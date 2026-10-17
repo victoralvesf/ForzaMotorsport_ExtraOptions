@@ -578,6 +578,9 @@ static long fake_createx(const void *desc, void **dev, void **ctx)
     return 0;
 }
 
+static void *fm6_type_tab[0x12][0x10e];
+static void **fake_vtbl_get(int t) { return fm6_type_tab[t]; }
+
 TEST(fm6_create_device_uses_azimuth_device)
 {
     uint8_t *az = fake_azimuth(0);
@@ -589,6 +592,9 @@ TEST(fm6_create_device_uses_azimuth_device)
     fm6_dev_vt[0x51] = (void *)0x5151;                                        /* implementado: fica */
     memcpy(az + RVA_CREATE_DEVICEX, "\xff\x25\0\0\0\0", 6);
     *(void **)(az + RVA_CREATE_DEVICEX + 6) = (void *)fake_createx;
+    memcpy(az + RVA_VTBL_GET, "ÿ%    ", 6);
+    *(void **)(az + RVA_VTBL_GET + 6) = (void *)fake_vtbl_get;
+    for (i = 0; i < 0x10e; i++) fm6_type_tab[0xe][i] = fm6_type_tab[5][i] = (void *)(uintptr_t)(0x100 + i);
     CHECK_EQ(fm6_D3D11CreateDevice(NULL, 1, NULL, 0x4000000, &lv, 1, 0x20011, &dev, &level, &ctx), 0);
     CHECK_HEX((uint8_t *)createx_desc, "0b000100" "00000004" "00000000" "00000000" "00000000" "00000000"
                                        "3f000000" "00000000" "00000000" "00000000" "00000000");
@@ -601,6 +607,12 @@ TEST(fm6_create_device_uses_azimuth_device)
     CHECK_EQ(((long (*)(void *))fm6_dev_vt[0x28])(fm6_dev), (long)0x80004001);
     CHECK(fm6_dev_vt[0x51] == (void *)0x5151);
     CHECK(fm6_dev_vt[0x3b] == az + 0xf5f30 + 0x3b * 0x100);                   /* fora da lista: intacto */
+    /* tabelas por tipo: IDXGIFactory (0xe) sem o slot 5, recurso (5) com o slot 8 novo */
+    CHECK(fm6_type_tab[0xe][4] == (void *)0x104 && fm6_type_tab[0xe][5] == (void *)0x106);
+    CHECK(fm6_type_tab[0xe][0x10] == (void *)0x111);                         /* CreateSwapChainForCoreWindow */
+    CHECK(fm6_type_tab[5][7] == (void *)0x107 && fm6_type_tab[5][9] == (void *)0x108);
+    CHECK(fm6_type_tab[5][0xc] == (void *)0x10b);                            /* GetDescriptor */
+    CHECK_EQ(((long (*)(void))fm6_type_tab[5][8])(), 0);
 }
 
 /* FM6: as duas copias da tabela embutida do contexto (ctx+0x3d0) montam o layout do driver do FM6 (+3 slots) */

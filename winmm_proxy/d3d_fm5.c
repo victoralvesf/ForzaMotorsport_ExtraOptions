@@ -1342,6 +1342,32 @@ static int fm6_ctx_install(void)
     return 1;
 }
 
+/* Objetos do FM6 (umd.dll do OS "era" contra o do FH2): ID3D11DeviceChild ganha um metodo no slot 8 (xor eax,eax;
+   ret, logo apos o SetPrivateDataInterfaceGraphics; o mesmo do contexto) -> recurso FM6 9 GetType, 0xc GetDescriptor,
+   0xd GetDesc; e IDXGIObject NAO tem o SetPrivateDataInterfaceGraphics (Set 3, SetI 4, Get 5, GetParent 6) ->
+   game+0x53d476 IDXGIDevice[7](&adapter) = GetAdapter, IDXGIAdapter[6] = GetParent, IDXGIFactory[0x10] =
+   CreateSwapChainForCoreWindow (Azimuth 8, 7, 0x11). As tabelas por tipo mudam no lugar, como no FM5. */
+static void fm6_layout_table(void **t, int kind)
+{
+    if (kind == K_DXGI) drop_slot(t, 5);
+    else if (kind == K_CHILD || kind == K_RES) {
+        memmove(&t[9], &t[8], (SLOTS - 9) * sizeof *t);
+        t[8] = (void *)ctx_ret0;
+    }
+}
+
+static void fm6_object_layouts(void)
+{
+    typedef void **(*get_fn)(int);
+    get_fn get = (get_fn)(g_base + RVA_VTBL_GET);
+    static int done;
+    int t;
+    if (done) return;
+    done = 1;
+    for (t = 0; t < NTYPES; t++) fm6_layout_table(get(t), type_kind[t]);
+    wlog("d3d: vtables dos objetos no layout do FM6 (DeviceChild +slot 8, DXGI sem o slot 5)");
+}
+
 /* FM6 (OS "era", XDK posterior ao do FH2): D3D11CreateDevice(0, 1, 0, 0x4000000, {0xb100}, 1, 0x20011, ...) em
    game+0x3a66f6, depois QI p/ ID3D11DeviceX e CreateDmaEngineContext no slot 0x3b (= layout do FH2). Device e
    contexto do Azimuth entregues sem proxy; so a tabela embutida do contexto muda de layout (fm6_ctx_install). */
@@ -1364,6 +1390,7 @@ static long WINAPI fm6_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     if (hr < 0) return hr;
     wlog("d3d: device do FM6: %d slots triviais do driver do console no lugar do stub fatal",
          fm6_device_fixups(*(void ***)dev));
+    fm6_object_layouts();
     if (out_level) *out_level = 0xb100;
     if (out_dev) *out_dev = dev;
     if (out_ctx) *out_ctx = ctx;
