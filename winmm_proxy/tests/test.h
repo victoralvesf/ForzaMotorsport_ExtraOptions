@@ -50,5 +50,8 @@ uint8_t *fake_azimuth(int fm5);                 /* g_base falso (zerado), opcion
 
 /* binarios usados nos testes de assinatura (pulam se nao existirem) */
 #define AZIMUTH_EXE "azimuth.exe"
-#define FM5_EXE     "game_binaries\\forza_durango_release_final.exe"
+#define FM5_DIR     "game_binaries\\FM5\\"
+#define FM6_DIR     "game_binaries\\FM6\\"
+#define FM5_EXE     FM5_DIR "forza_durango_release_final.exe"
+#define FM6_EXE     FM6_DIR "forza_durango_release_final.exe"
 #endif

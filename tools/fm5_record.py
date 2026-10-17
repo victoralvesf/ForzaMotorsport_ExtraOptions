@@ -1,7 +1,7 @@
 r"""fm5_record.py [GAME_DIR] [--exe EXE] [--manifest XML] [--json OUT]
 Collects the values the Azimuth game record (0x350 bytes, see docs/contexto/06_registro_do_jogo.txt,
 PASSO 4) needs for a new title. GAME_DIR is the game folder holding Mount\ and EmbeddedXvd\.
-Without GAME_DIR only the exe/manifest fields are filled (defaults: game_binaries\)."""
+Without GAME_DIR only the exe/manifest fields are filled (defaults: game_binaries\FM5\)."""
 import sys, os, struct, hashlib, json, re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -58,9 +58,9 @@ def main():
     game = a[0] if a else None
     mount = find(game, 'Mount') if game else None
     exe = opt.get('--exe') or (mount and find(mount, 'forza_durango_release_final.exe')) \
-        or os.path.join(ROOT, 'game_binaries', 'forza_durango_release_final.exe')
+        or os.path.join(ROOT, 'game_binaries', 'FM5', 'forza_durango_release_final.exe')
     man = opt.get('--manifest') or (mount and find(mount, 'AppxManifest.xml')) \
-        or os.path.join(ROOT, 'game_binaries', 'AppxManifest.xml')
+        or os.path.join(ROOT, 'game_binaries', 'FM5', 'AppxManifest.xml')
     xml = open(man, 'rb').read().decode('utf-8', 'replace')
     tid = re.search(r'TitleId="([0-9A-Fa-f]{8})"', xml).group(1).lower()
     ver = re.search(r'<Identity[^>]*Version="([^"]+)"', xml).group(1)

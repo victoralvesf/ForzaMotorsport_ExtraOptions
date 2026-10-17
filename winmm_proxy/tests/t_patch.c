@@ -118,6 +118,28 @@ TEST(is_fm5_reads_game_record)
     CHECK(is_fm5());
 }
 
+static int orig_apply_calls;
+static void fake_orig_apply(void *image, const void *options) { (void)image; (void)options; orig_apply_calls++; }
+
+/* FM6 (registro carregado = fm6_rec): sites do FH2 nao rodam; outro jogo segue para o original */
+TEST(apply_patches_skips_fm6)
+{
+    uint8_t *img[1] = { NULL }, opt[0x40] = { 0 };
+    uint8_t *az = fake_azimuth(0);
+    log_capture();
+    orig_apply_patches = fake_orig_apply;
+    orig_apply_calls = 0;
+    *(void **)(az + RVA_GAME_RECORD) = fm6_rec;
+    CHECK(is_fm6() && !is_fm5());
+    hook_apply_patches(img, opt);
+    CHECK_EQ(orig_apply_calls, 0);
+    CHECK(log_has("FM6"));
+    *(void **)(az + RVA_GAME_RECORD) = NULL;
+    hook_apply_patches(img, opt);
+    CHECK_EQ(orig_apply_calls, 1);
+    orig_apply_patches = NULL;
+}
+
 TEST(cfg_int_reads_ini)
 {
     ini_set("[FM5]\nSkipIntro=1\nD3D12Debug=2\n");
@@ -164,32 +186,83 @@ TEST(record_layout)
     }
 }
 
-/* o registro tem de bater com os arquivos do jogo copiados em game_binaries */
-TEST(record_matches_game_files)
+TEST(fm6_record_layout)
 {
     static uint8_t fh2[0x350];
-    char hex[65];
+    const LangEntry *langs;
+    int i;
+    uint8_t *az = fake_azimuth(0);
+    for (i = 0; i < 4; i++) *(void **)(fh2 + 0x58 + i * 0x10) = (void *)(uintptr_t)(0x1000 + i);
+    *(void **)(az + RVA_ALLOW_ARRAY) = fh2;
+    build_fm6_record();
+    CHECK(!wcscmp(*(const wchar_t **)(fm6_rec + 0x000), L"64f9397e"));
+    CHECK_STR(*(const char **)(fm6_rec + 0x008), "1.0.0.44");
+    for (i = 0; i < 4; i++) CHECK_EQ(*(uintptr_t *)(fm6_rec + 0x58 + i * 0x10), 0x1000 + i);   /* caminhos do FH2 */
+    CHECK_STR(*(const char **)(fm6_rec + 0x060), "9b458bcf0bd5a11ce51c29ef8003c62c4de3015f1c129d82edaeb9d41d602aa4");
+    CHECK_EQ(*(uint64_t *)(fm6_rec + 0x030), 0xa52);
+    CHECK_EQ(*(uint32_t *)(fm6_rec + 0x098), 0x1fc8000);
+    CHECK_EQ(*(uint32_t *)(fm6_rec + 0x09c), 0x6341d8);
+    CHECK_EQ(*(uint64_t *)(fm6_rec + 0x0a0), 0x264);
+    CHECK_EQ(*(uint32_t *)(fm6_rec + 0x1e8), 0);
+    CHECK_EQ(*(uint32_t *)(fm6_rec + 0x208), 0);
+    CHECK_EQ(strlen(*(const char **)(fm6_rec + 0x318)), 64);
+    CHECK_EQ(*(uint64_t *)(fm6_rec + 0x338), 21);
+    langs = *(const LangEntry **)(fm6_rec + 0x330);
+    CHECK(!wcscmp(langs[0].locale, L"en") && langs[0].speech);
+    CHECK(!wcscmp(langs[16].locale, L"pt-BR") && !langs[16].speech);
+    CHECK_EQ(fm6_rec[0x341], 1);
+    {
+        static const int offs[] = { 0x10, 0x18, 0x28, 0x38, 0x48, 0x60, 0x70, 0x80, 0x90 };
+        for (i = 0; i < (int)(sizeof offs / sizeof *offs); i++) {
+            const char *h = *(const char **)(fm6_rec + offs[i]);
+            CHECK(h && strlen(h) == 64 && strspn(h, "0123456789abcdef") == 64);
+        }
+    }
+}
+
+/* o registro tem de bater com os arquivos do jogo copiados em game_binaries\<jogo> */
+static void check_record_files(const uint8_t *rec, const char *dir)
+{
+    char path[MAX_PATH], hex[65];
     uint64_t size;
     uint32_t soi;
     uint8_t *game;
     IMAGE_NT_HEADERS64 *nt;
+    snprintf(path, sizeof path, "%sforza_durango_release_final.exe", dir);
+    if (!sha256_file(path, hex, &size)) { test_skip("exe do jogo ausente em game_binaries"); return; }
+    CHECK_STR(*(const char **)(rec + 0x018), hex);
+    CHECK_EQ(*(uint64_t *)(rec + 0x020), size);
+    REQUIRE((game = pe_map(path, &soi)));
+    nt = (IMAGE_NT_HEADERS64 *)(game + ((IMAGE_DOS_HEADER *)game)->e_lfanew);
+    CHECK_EQ(*(uint32_t *)(rec + 0x098), nt->OptionalHeader.SizeOfImage);
+    CHECK_EQ(*(uint32_t *)(rec + 0x09c), nt->OptionalHeader.AddressOfEntryPoint);
+    pe_unmap(game);
+    snprintf(path, sizeof path, "%sAppxManifest.xml", dir);
+    if (sha256_file(path, hex, &size))
+        CHECK_STR(*(const char **)(rec + 0x010), hex);
+    snprintf(path, sizeof path, "%sxg_x.dll", dir);
+    if (sha256_file(path, hex, &size)) {
+        CHECK_STR(*(const char **)(rec + 0x038), hex);
+        CHECK_EQ(*(uint64_t *)(rec + 0x040), size);
+    }
+}
+
+TEST(record_matches_game_files)
+{
+    static uint8_t fh2[0x350];
     fake_azimuth(0);
     *(void **)(g_base + RVA_ALLOW_ARRAY) = fh2;
     build_record();
-    if (!sha256_file(FM5_EXE, hex, &size)) { test_skip(FM5_EXE " ausente"); return; }
-    CHECK_STR(*(const char **)(fm5_rec + 0x018), hex);
-    CHECK_EQ(*(uint64_t *)(fm5_rec + 0x020), size);
-    if (sha256_file("game_binaries\\AppxManifest.xml", hex, &size))
-        CHECK_STR(*(const char **)(fm5_rec + 0x010), hex);
-    if (sha256_file("game_binaries\\xg_x.dll", hex, &size)) {
-        CHECK_STR(*(const char **)(fm5_rec + 0x038), hex);
-        CHECK_EQ(*(uint64_t *)(fm5_rec + 0x040), size);
-    }
-    REQUIRE((game = pe_map(FM5_EXE, &soi)));
-    nt = (IMAGE_NT_HEADERS64 *)(game + ((IMAGE_DOS_HEADER *)game)->e_lfanew);
-    CHECK_EQ(*(uint32_t *)(fm5_rec + 0x098), nt->OptionalHeader.SizeOfImage);
-    CHECK_EQ(*(uint32_t *)(fm5_rec + 0x09c), nt->OptionalHeader.AddressOfEntryPoint);
-    pe_unmap(game);
+    check_record_files(fm5_rec, FM5_DIR);
+}
+
+TEST(fm6_record_matches_game_files)
+{
+    static uint8_t fh2[0x350];
+    fake_azimuth(0);
+    *(void **)(g_base + RVA_ALLOW_ARRAY) = fh2;
+    build_fm6_record();
+    check_record_files(fm6_rec, FM6_DIR);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -282,18 +355,21 @@ TEST(install_on_real_azimuth)
     CHECK(fh2_rec > az && fh2_rec < az + 0x3b9000);  /* relocado para dentro da imagem */
     REQUIRE(install());
     CHECK(!log_has("nao confere"));
-    /* allow list {fh2, fh2 f&f, fm5} */
+    /* allow list {fh2, fh2 f&f, fm5, fm6} */
     span = (void *)(az + RVA_ALLOW_SPAN);
-    CHECK_EQ(span->count, 3);
-    CHECK(span->ptr[0] == fh2_rec && span->ptr[2] == fm5_rec);
+    CHECK_EQ(span->count, 4);
+    CHECK(span->ptr[0] == fh2_rec && span->ptr[2] == fm5_rec && span->ptr[3] == fm6_rec);
     CHECK(!wcscmp(*(const wchar_t **)fm5_rec, L"7b35d917"));
+    CHECK(!wcscmp(*(const wchar_t **)fm6_rec, L"64f9397e"));
     CHECK(*(void **)(fm5_rec + 0x58) == *(void **)(fh2_rec + 0x58));
+    CHECK(*(void **)(fm6_rec + 0x58) == *(void **)(fh2_rec + 0x58));
     /* bytes esperados escritos aqui de novo (nao lidos de exe_patches): PASSO 7, 09_proxy_winmm.txt */
-    CHECK_EQ(sizeof exe_patches / sizeof *exe_patches, 6);
+    CHECK_EQ(sizeof exe_patches / sizeof *exe_patches, 7);
     CHECK_HEX(az + 0x85c8b, "725b");              /* template: jne -> jb */
     CHECK_HEX(az + 0xbe6e2, "0f87f1000000");      /* TLS tamanho: jne -> ja */
     CHECK_HEX(az + 0xbe6f9, "0f87da000000");      /* TLS Characteristics: jne -> ja */
     CHECK_HEX(az + 0xbe70d, "488b4608909090");    /* TLS zeros: mov rax,[rsi+8] */
+    CHECK_HEX(az + 0xbe4db, "909090909090");      /* exe: NumberOfSections == 14 */
     CHECK_HEX(az + 0x9f33b, "909090909090");      /* XG SizeOfImage */
     CHECK_HEX(az + 0x9f348, "909090909090");      /* XG AddressOfEntryPoint */
     for (i = 0; i < sizeof exe_patches / sizeof *exe_patches; i++)

@@ -1,9 +1,9 @@
 /*
  * winmm.dll proxy para o azimuth.exe: carrega antes do WinMain (WINMM e import estatico) e
  *  - repassa todos os exports para o winmm.dll do System32 (winmm_stubs.S)
- *  - adiciona o registro do Forza Motorsport 5 (7b35d917) a allow list
- *  - relaxa as travas do azimuth.exe que o FM5 nao passa (template, TLS, layout do XG, xg.dll)
- *  - para o FM5, substitui loader::apply_patches pelos patches proprios do FM5
+ *  - adiciona os registros do Forza Motorsport 5 (7b35d917) e do Forza Motorsport 6 (64f9397e) a allow list
+ *  - relaxa as travas do azimuth.exe que o FM5/FM6 nao passam (template, TLS, layout do XG, xg.dll, n. de secoes)
+ *  - para o FM5, substitui loader::apply_patches pelos patches proprios do FM5; para o FM6 (por enquanto) nao aplica nada
  * Enderecos: ver docs\contexto\ (PASSOS 2-7; indice no CLAUDE.md). Todos os bytes originais sao
  * conferidos antes de escrever; se algo nao bater, nada e alterado.
  */
@@ -21,6 +21,7 @@
 #define RVA_TLS_SIZE_JNE   0xbe6e2   /* cmp rax,0x150 ; jne */
 #define RVA_TLS_CHAR_JNE   0xbe6f9   /* cmp [rsi+0x24],0x500000 ; jne */
 #define RVA_TLS_ZERO_END   0xbe70d   /* lea rax,[rdx+0x150] (fim do laco de zeros) */
+#define RVA_EXE_NSEC_JNE   0xbe4db   /* mapeador do exe: cmp NumberOfSections,0xe ; jne */
 #define RVA_XG_SIZE_JNE    0x9f33b   /* cmp SizeOfImage,0x1d000 ; jne */
 #define RVA_XG_ENTRY_JNE   0x9f348   /* cmp AddressOfEntryPoint,0xdf84 ; jne */
 #define RVA_XG_NAME_CMP    0x3a7b5   /* resolvedor: cmp rsi,8 ; ... "xg_x.dll" (21 bytes) */
@@ -89,18 +90,20 @@ static const LangEntry fm5_langs[] = {
 static const char unknown_hash[] = "0000000000000000000000000000000000000000000000000000000000000000";
 
 static uint8_t __attribute__((aligned(16))) fm5_rec[0x350];
-static const void *new_allow[3];
+static uint8_t __attribute__((aligned(16))) fm6_rec[0x350];
+static const void *new_allow[4];
 
-#define SET_PTR(off, v) (*(const void **)(fm5_rec + (off)) = (const void *)(v))
-#define SET_U64(off, v) (*(uint64_t *)(fm5_rec + (off)) = (uint64_t)(v))
-#define SET_U32(off, v) (*(uint32_t *)(fm5_rec + (off)) = (uint32_t)(v))
+#define SET_PTR(off, v) (*(const void **)(rec + (off)) = (const void *)(v))
+#define SET_U64(off, v) (*(uint64_t *)(rec + (off)) = (uint64_t)(v))
+#define SET_U32(off, v) (*(uint32_t *)(rec + (off)) = (uint32_t)(v))
 
 static void build_record(void)
 {
     const uint8_t *fh2 = *(const uint8_t **)(g_base + RVA_ALLOW_ARRAY);
+    uint8_t *rec = fm5_rec;
     int i;
 
-    memset(fm5_rec, 0, sizeof fm5_rec);
+    memset(rec, 0, sizeof fm5_rec);
     SET_PTR(0x000, L"7b35d917");
     SET_PTR(0x008, "1.0.0.20");
     SET_PTR(0x010, "ecff3ef723af018c600a8bfc1139d1508cc177a9dc4b65d1c01256c7ba8cfbf2");
@@ -130,8 +133,58 @@ static void build_record(void)
     SET_PTR(0x318, unknown_hash);
     SET_PTR(0x330, fm5_langs);
     SET_U64(0x338, sizeof fm5_langs / sizeof fm5_langs[0]);
-    fm5_rec[0x340] = 0;
-    fm5_rec[0x341] = 1;          /* EXPERIMENTAL */
+    rec[0x340] = 0;
+    rec[0x341] = 1;              /* EXPERIMENTAL */
+}
+
+/* ------------------------------------------------------------------------ */
+/* Registro do FM6 (Monument 1.0.0.44, XDK "era"; valores de docs/fm6_record.json) */
+/* So para o Azimuth aceitar o jogo: sem patches proprios ainda (hook_apply_patches). */
+/* O dump do FM6 nao tem EmbeddedXvd\...\config\SOFTWARE: usa-se uma copia do hive  */
+/* do FH2 1.0.0.64 na pasta do jogo (o hash em +0x060 e o dele).                      */
+/* ------------------------------------------------------------------------ */
+/* indice so e usado pelo site de fala do apply_patches (nao roda no FM6); o texto usa so o locale */
+static const LangEntry fm6_langs[] = {
+    { L"en", 0, 1 },    { L"de", 0, 0 },    { L"en-GB", 0, 0 }, { L"en-AU", 0, 0 },
+    { L"en-CA", 0, 0 }, { L"en-IE", 0, 0 }, { L"en-NZ", 0, 0 }, { L"es", 0, 0 },
+    { L"es-MX", 0, 0 }, { L"fr", 0, 0 },    { L"fr-CA", 0, 0 }, { L"it", 0, 0 },
+    { L"ja", 0, 0 },    { L"ko", 0, 0 },    { L"nl", 0, 0 },    { L"pl", 0, 0 },
+    { L"pt-BR", 0, 0 }, { L"pt-PT", 0, 0 }, { L"ru", 0, 0 },    { L"zh-Hant", 0, 0 },
+    { L"zh-Hans", 0, 0 },
+};
+
+static void build_fm6_record(void)
+{
+    const uint8_t *fh2 = *(const uint8_t **)(g_base + RVA_ALLOW_ARRAY);
+    uint8_t *rec = fm6_rec;
+    int i;
+
+    memset(rec, 0, sizeof fm6_rec);
+    SET_PTR(0x000, L"64f9397e");
+    SET_PTR(0x008, "1.0.0.44");
+    SET_PTR(0x010, "9b8f98bbe2a702ad9263b22fa4dd3d01bce4e287b78fd5f65a77f55bc63b0bd5");
+    SET_PTR(0x018, "01ee5446d7d5afa655daf87751e63f9c2bff1e713236037ca2a9b6300642dbcf");
+    SET_U64(0x020, 0x1d80000);
+    SET_PTR(0x028, "87c25090d0fab334e3608646a53618804bdd34d3c7f27c96578962fab94dc22f");
+    SET_U64(0x030, 0xa52);
+    SET_PTR(0x038, "555441c0f34365de3092cda1d03d92efea338fed3ba37076aa319aa654b2504d");
+    SET_U64(0x040, 0x21200);
+    SET_PTR(0x048, "99a3f99db4a2ebeed726c6c741d606770c54e2486070dc726ef4e6f10b8bcdc0");
+    SET_U64(0x050, 0x68c800);
+    for (i = 0; i < 4; i++)
+        SET_PTR(0x058 + i * 0x10, *(const void **)(fh2 + 0x058 + i * 0x10));
+    SET_PTR(0x060, "9b458bcf0bd5a11ce51c29ef8003c62c4de3015f1c129d82edaeb9d41d602aa4");  /* SOFTWARE do FH2 */
+    SET_PTR(0x070, "0e311f6c60b87582305de5f14e74e8aaa9805e4d93f29b5fb0e848c34a0a0338");
+    SET_PTR(0x080, "aca2f84ab55b3b0e2e33ce6045acd88f30296f5e710f406799de01dc800734df");
+    SET_PTR(0x090, "9a24d12e684b82911be7fc3f4509bcd02aaa57bd59218aaca64989b5b617d006");
+    SET_U32(0x098, 0x1fc8000);   /* SizeOfImage */
+    SET_U32(0x09c, 0x6341d8);    /* AddressOfEntryPoint */
+    SET_U64(0x0a0, 0x264);       /* slots da IAT */
+    /* +0x1e8/+0x1f8/+0x208 (idle calls do HLE): 0 = sem site ainda */
+    SET_PTR(0x318, unknown_hash);
+    SET_PTR(0x330, fm6_langs);
+    SET_U64(0x338, sizeof fm6_langs / sizeof fm6_langs[0]);
+    rec[0x341] = 1;              /* EXPERIMENTAL */
 }
 
 /* ------------------------------------------------------------------------ */
@@ -166,6 +219,8 @@ static const Patch exe_patches[] = {
     { RVA_TLS_SIZE_JNE, 6, "0f85f1000000", "0f87f1000000", "TLS: tamanho == 0x150 -> <= 0x150" },
     { RVA_TLS_CHAR_JNE, 6, "0f85da000000", "0f87da000000", "TLS: Characteristics == 0x500000 -> <=" },
     { RVA_TLS_ZERO_END, 7, "488d8250010000", "488b4608909090", "TLS: laco de zeros ate EndAddressOfRawData" },
+    /* exe do jogo com 14 secoes fixas (FM6 tem 15); hash, SizeOfImage e entry do registro ja identificam o exe */
+    { RVA_EXE_NSEC_JNE, 6, "0f8523010000", "909090909090", "exe: NumberOfSections == 14 fixo" },
     /* layout fixo do xg_x.dll pinado (o hash do registro ja identifica o XG) */
     { RVA_XG_SIZE_JNE, 6, "0f859c020000", "909090909090", "XG: SizeOfImage fixo" },
     { RVA_XG_ENTRY_JNE, 6, "0f858f020000", "909090909090", "XG: AddressOfEntryPoint fixo" },
@@ -530,6 +585,7 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
 }
 
 int is_fm5(void) { return *(void **)(g_base + RVA_GAME_RECORD) == fm5_rec; }
+int is_fm6(void) { return *(void **)(g_base + RVA_GAME_RECORD) == fm6_rec; }
 
 /* hook com trampolim: os bytes roubados nao podem ter enderecos relativos a RIP */
 int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp_out)
@@ -566,6 +622,10 @@ static void hook_apply_patches(void *image, const void *options)
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM5 em %p, sites do FH2 pulados", game);
         fm5_patches(game, options);
+        return;
+    }
+    if (is_fm6()) {  /* os sites do registro sao do FH2: nada a aplicar por enquanto */
+        wlog("apply_patches: FM6 em %p, sem patches", *(uint8_t **)image);
         return;
     }
     orig_apply_patches(image, options);
@@ -677,16 +737,18 @@ static int install(void)
         wlog("bytes do resolvedor/apply_patches nao conferem"); return 0;
     }
 
-    /* 2) registro + allow list {fh2, fh2 f&f, fm5} */
+    /* 2) registros + allow list {fh2, fh2 f&f, fm5, fm6} */
     build_record();
+    build_fm6_record();
     new_allow[0] = *(void **)(g_base + RVA_ALLOW_ARRAY);
     new_allow[1] = *(void **)(g_base + RVA_ALLOW_ARRAY + 8);
     new_allow[2] = fm5_rec;
+    new_allow[3] = fm6_rec;
     {
-        struct { const void **ptr; uint64_t count; } span = { new_allow, 3 };
+        struct { const void **ptr; uint64_t count; } span = { new_allow, 4 };
         write_mem(g_base + RVA_ALLOW_SPAN, &span, sizeof span);
     }
-    wlog("allow list: %p %p %p (FM5)", new_allow[0], new_allow[1], new_allow[2]);
+    wlog("allow list: %p %p %p (FM5) %p (FM6)", new_allow[0], new_allow[1], new_allow[2], new_allow[3]);
 
     /* 3) patches pontuais */
     for (i = 0; i < sizeof exe_patches / sizeof exe_patches[0]; i++) {

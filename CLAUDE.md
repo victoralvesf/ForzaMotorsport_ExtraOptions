@@ -29,7 +29,8 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
   (`tools\gen_d3d_thunks.py`, `tools\gen_winmm_stubs.py`).
 - `winmm.dll` (root) = installed proxy (delete it = original Azimuth).
 - `azimuth_fm5.ini` section `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`, `D3D12Debug`) and `azimuth_fm5.log` (proxy log).
-- `game_binaries\` — copied exes/manifest/xg_x.dll (FM5 and FH2 1.0.0.64). Game folder: `E:\Xbox One Games\Forza Motorsport 5`.
+- `game_binaries\FM5\`, `FM6\`, `FH2\` — copied exes/manifest/xg_x.dll per game. Game folders: `E:\Xbox One Games\Forza Motorsport 5`,
+  FM6 `E:\Xbox One Games\Monument_1.0.0.44_x64__8wekyb3d8bbwe`.
 - `tools\` — Python RE scripts (capstone) and `dec.ps1` (Ghidra headless). `ghidra\` — already analyzed Ghidra projects.
 - `docs\contexto\` — accumulated knowledge (see below). `docs\decomp\` — saved decompilations.
 - `.github\workflows\ci.yml` — tests on pull requests; on a `v*` tag push, tests + build + release (zip with `winmm.dll`, `azimuth_fm5.ini`, `README.txt`).
@@ -87,4 +88,5 @@ Read only what is relevant to the task:
 | `14_present_draws_telapreta_resolve.txt` | cont. 9/11/13/14: DXGIXPresentArray, IASetIndexBuffer, black screen (packed Draw*), D3D12 debug layer, ResolveSubresource |
 | `15_opcoes_ini_e_videos.txt` | cont. 12/15 + STEP 11: azimuth_fm5.ini, SkipIntro, SkipPresentationVideo, UnlockDLC (DLC ownership/ContentOffers), EnableMarketplace, FM5 command line options |
 | `16_opcoes_graficas.txt` | STEP 9: launcher graphics options (resolution, AA, fps, presets) in FH2 x FM5, porting plan |
+| `17_fm6.txt` | FM6 (`64F9397E`, 1.0.0.44, OS "era"): manifest, record, section-count lock, missing SOFTWARE hive |
 | `99_proximos_passos_historico.txt` | what has been done and **the current next step** |

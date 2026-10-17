@@ -16,7 +16,7 @@ class PE:
     def read(s, rva, n):
         for nm, vs, va, rs, ro in s.secs:
             if va <= rva < va + rs: return s.d[rva - va + ro:rva - va + ro + n]
-fh = PE('game_binaries/forza_durango_release_final_fh2.exe')
+fh = PE('game_binaries/FH2/forza_durango_release_final.exe')
 md = Cs(CS_ARCH_X86, CS_MODE_64)
 OPT = ['shadows', 'reflections', 'car_detail', 'particles', 'motion_blur', 'texture_filtering']
 LVL = {0: 'low', 1: 'default', 2: 'high', 3: 'ultra'}
