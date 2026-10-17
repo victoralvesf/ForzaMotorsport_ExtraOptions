@@ -1356,15 +1356,43 @@ static void fm6_layout_table(void **t, int kind)
     }
 }
 
+/* CreateSwapChainForCoreWindow do Azimuth (0x14004f730 -> 0x14004eed0) so aceita Flags & ~2 == 0 (ou o perfil
+   0x200000/R10G10B10A2) e para em "swap chain unsupported presentation profile". O FM6 (game+0x53d43f) pede
+   Flags 0x100000, flag do XDK "era" que o do FH2 nao conhece; o Azimuth monta o descritor do host sozinho
+   (Flags 0x40/0x800, 3 buffers) e nao usa as flags do jogo -> 0x100000 sai de uma copia do descritor. */
+#define FM6_SC_FLAG_ERA 0x100000
+typedef long (*create_sc_cw_fn)(void *factory, void *device, void *window, const uint32_t *desc,
+                                void *restrict_output, void **out);
+static create_sc_cw_fn orig_fm6_create_sc_cw;
+
+static long fm6_CreateSwapChainForCoreWindow(void *factory, void *device, void *window, const uint32_t *desc,
+                                             void *restrict_output, void **out)
+{
+    uint32_t d[12];   /* DXGI_SWAP_CHAIN_DESC1: w, h, fmt, stereo, sample {n, q}, usage, buffers, scaling,
+                         swap effect, alpha, flags (+0x2c) */
+    long hr;
+    if (!desc) return orig_fm6_create_sc_cw(factory, device, window, desc, restrict_output, out);
+    memcpy(d, desc, sizeof d);
+    d[11] &= ~FM6_SC_FLAG_ERA;
+    hr = orig_fm6_create_sc_cw(factory, device, window, d, restrict_output, out);
+    wlog("d3d: CreateSwapChainForCoreWindow(FM6 %ux%u fmt=%#x buffers=%u flags=%#x -> %#x) hr=%#lx sc=%p",
+         d[0], d[1], d[2], d[7], desc[11], d[11], hr, out ? *out : NULL);
+    return hr;
+}
+
 static void fm6_object_layouts(void)
 {
     typedef void **(*get_fn)(int);
     get_fn get = (get_fn)(g_base + RVA_VTBL_GET);
     static int done;
+    void **factory;
     int t;
     if (done) return;
     done = 1;
     for (t = 0; t < NTYPES; t++) fm6_layout_table(get(t), type_kind[t]);
+    factory = get(0xe);
+    orig_fm6_create_sc_cw = (create_sc_cw_fn)factory[0x10];
+    factory[0x10] = (void *)fm6_CreateSwapChainForCoreWindow;
     wlog("d3d: vtables dos objetos no layout do FM6 (DeviceChild +slot 8, DXGI sem o slot 5)");
 }
 

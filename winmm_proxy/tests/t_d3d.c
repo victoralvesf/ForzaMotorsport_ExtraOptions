@@ -581,6 +581,15 @@ static long fake_createx(const void *desc, void **dev, void **ctx)
 static void *fm6_type_tab[0x12][0x10e];
 static void **fake_vtbl_get(int t) { return fm6_type_tab[t]; }
 
+static uint32_t create_sc_desc[12];
+static long fake_create_sc_cw(void *factory, void *device, void *window, const uint32_t *desc, void *ro, void **out)
+{
+    (void)factory; (void)device; (void)window; (void)ro;
+    memcpy(create_sc_desc, desc, sizeof create_sc_desc);
+    *out = (void *)0x5c5c;
+    return 0;
+}
+
 TEST(fm6_create_device_uses_azimuth_device)
 {
     uint8_t *az = fake_azimuth(0);
@@ -595,6 +604,7 @@ TEST(fm6_create_device_uses_azimuth_device)
     memcpy(az + RVA_VTBL_GET, "ÿ%    ", 6);
     *(void **)(az + RVA_VTBL_GET + 6) = (void *)fake_vtbl_get;
     for (i = 0; i < 0x10e; i++) fm6_type_tab[0xe][i] = fm6_type_tab[5][i] = (void *)(uintptr_t)(0x100 + i);
+    fm6_type_tab[0xe][0x11] = (void *)fake_create_sc_cw;                     /* CreateSwapChainForCoreWindow */
     CHECK_EQ(fm6_D3D11CreateDevice(NULL, 1, NULL, 0x4000000, &lv, 1, 0x20011, &dev, &level, &ctx), 0);
     CHECK_HEX((uint8_t *)createx_desc, "0b000100" "00000004" "00000000" "00000000" "00000000" "00000000"
                                        "3f000000" "00000000" "00000000" "00000000" "00000000");
@@ -609,7 +619,16 @@ TEST(fm6_create_device_uses_azimuth_device)
     CHECK(fm6_dev_vt[0x3b] == az + 0xf5f30 + 0x3b * 0x100);                   /* fora da lista: intacto */
     /* tabelas por tipo: IDXGIFactory (0xe) sem o slot 5, recurso (5) com o slot 8 novo */
     CHECK(fm6_type_tab[0xe][4] == (void *)0x104 && fm6_type_tab[0xe][5] == (void *)0x106);
-    CHECK(fm6_type_tab[0xe][0x10] == (void *)0x111);                         /* CreateSwapChainForCoreWindow */
+    {   /* CreateSwapChainForCoreWindow (0x11 -> 0x10): descritor de game+0x53d3fb sem a flag 0x100000 */
+        static const uint32_t sc[12] = { 2560, 1440, 0x1c, 0, 1, 0, 0x20, 2, 0, 0, 0, 0x100002 };
+        void *swap = NULL;
+        CHECK_EQ(((long (*)(void *, void *, void *, const uint32_t *, void *, void **))fm6_type_tab[0xe][0x10])(
+                     (void *)1, fm6_dev, (void *)2, sc, NULL, &swap), 0);
+        CHECK(swap == (void *)0x5c5c);
+        CHECK_HEX((uint8_t *)create_sc_desc, "000a0000" "a0050000" "1c000000" "00000000" "01000000" "00000000"
+                                             "20000000" "02000000" "00000000" "00000000" "00000000" "02000000");
+        CHECK_EQ(sc[11], 0x100002);
+    }
     CHECK(fm6_type_tab[5][7] == (void *)0x107 && fm6_type_tab[5][9] == (void *)0x108);
     CHECK(fm6_type_tab[5][0xc] == (void *)0x10b);                            /* GetDescriptor */
     CHECK_EQ(((long (*)(void))fm6_type_tab[5][8])(), 0);
