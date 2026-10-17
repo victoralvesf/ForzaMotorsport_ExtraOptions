@@ -16,6 +16,7 @@ extern uint8_t *g_base;
 extern uint8_t *g_game;
 extern void wlog(const char *fmt, ...);
 extern int is_fm5(void);
+extern void game_tls_apply(void);
 
 /* ---- RVAs no azimuth.exe ---- */
 #define RVA_RESOLVER       0x3a290   /* FARPROC resolve(ImportEntry*) : {std::string dll; std::string nome} */
@@ -1397,6 +1398,7 @@ static resolver_fn orig_resolver;
 static FARPROC hook_resolver(const uint8_t *entry)
 {
     FARPROC p = orig_resolver(entry);
+    game_tls_apply();   /* 1o import: azimuth-tls.dll ja carregado, jogo ainda nao rodou */
     if (!is_fm5()) return p;
     if (p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXPresentArray")) {
         wlog("d3d: d3d11_x.dll!DXGIXPresentArray -> parametros de 12 dwords (XDK do FM5)");

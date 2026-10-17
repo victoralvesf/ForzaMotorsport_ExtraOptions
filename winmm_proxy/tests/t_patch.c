@@ -124,8 +124,10 @@ static void fake_orig_apply(void *image, const void *options) { (void)image; (vo
 /* FM6 (registro carregado = fm6_rec): sites do FH2 nao rodam; outro jogo segue para o original */
 TEST(apply_patches_skips_fm6)
 {
-    uint8_t *img[1] = { NULL }, opt[0x40] = { 0 };
+    static uint8_t game[0x400];                  /* PE sem diretorio TLS */
+    uint8_t *img[1] = { game }, opt[0x40] = { 0 };
     uint8_t *az = fake_azimuth(0);
+    ((IMAGE_DOS_HEADER *)game)->e_lfanew = 0x80;
     log_capture();
     orig_apply_patches = fake_orig_apply;
     orig_apply_calls = 0;
@@ -138,6 +140,53 @@ TEST(apply_patches_skips_fm6)
     hook_apply_patches(img, opt);
     CHECK_EQ(orig_apply_calls, 1);
     orig_apply_patches = NULL;
+}
+
+/* TLS do FM6: template guardado/zerado na imagem e aplicado no azimuth-tls.dll real (thread atual + nova) */
+static DWORD tls_index_seen;
+static uint8_t tls_new_thread[0x48];
+static DWORD WINAPI tls_thread(void *arg)
+{
+    (void)arg;
+    memcpy(tls_new_thread, ((void **)__readgsqword(0x58))[tls_index_seen], sizeof tls_new_thread);
+    return 0;
+}
+
+TEST(fm6_tls_template_applied)
+{
+    static uint8_t img[0x1000] __attribute__((aligned(16)));
+    IMAGE_DOS_HEADER *dos = (void *)img;
+    IMAGE_NT_HEADERS64 *nt = (void *)(img + 0x80);
+    IMAGE_TLS_DIRECTORY64 *t = (void *)(img + 0x400);
+    uint8_t *tmpl = img + 0x800, *mine;
+    HMODULE helper;
+    HANDLE th;
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\data\\bin\\azimuth-tls.dll", t_root());
+    if (!(helper = LoadLibraryExA(path, NULL, 0x900))) { test_skip("data\\bin\\azimuth-tls.dll ausente"); return; }
+    log_capture();
+    dos->e_lfanew = 0x80;
+    nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress = 0x400;
+    t->StartAddressOfRawData = (uintptr_t)tmpl;
+    t->EndAddressOfRawData = (uintptr_t)tmpl + 0x48;
+    memset(tmpl + 0x20, 0xff, 4);                    /* como o FM6 */
+    take_tls_template(img);
+    CHECK(game_tls_pending && game_tls_size == 0x48);
+    CHECK_HEX(tmpl + 0x20, "00000000");               /* imagem zerada para a checagem do Azimuth */
+    game_tls_apply();
+    CHECK(!game_tls_pending);
+    tls_index_seen = *(const DWORD *)GetProcAddress(helper, "azimuth_tls_index");
+    mine = ((uint8_t **)__readgsqword(0x58))[tls_index_seen];
+    CHECK_HEX(mine + 0x1f, "00ffffffff00");           /* thread existente */
+    th = CreateThread(NULL, 0, tls_thread, NULL, 0, NULL);
+    WaitForSingleObject(th, INFINITE);
+    CloseHandle(th);
+    CHECK_HEX(tls_new_thread + 0x1f, "00ffffffff00");  /* thread nova copia do template do helper */
+    CHECK(log_has("TLS: template do jogo no azimuth-tls.dll"));
+    /* template ja zerado: nada pendente */
+    take_tls_template(img);
+    CHECK(!game_tls_pending);
+    dump_log_on_fail();
 }
 
 TEST(cfg_int_reads_ini)

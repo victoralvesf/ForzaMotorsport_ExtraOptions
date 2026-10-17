@@ -12,6 +12,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <tlhelp32.h>
 
 /* ---- RVAs no azimuth.exe (SHA-256 579ed8d8...) ---- */
 #define RVA_ALLOW_SPAN     0x29a200  /* {ptr, count} da allow list */
@@ -587,6 +588,84 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
 int is_fm5(void) { return *(void **)(g_base + RVA_GAME_RECORD) == fm5_rec; }
 int is_fm6(void) { return *(void **)(g_base + RVA_GAME_RECORD) == fm6_rec; }
 
+/* ------------------------------------------------------------------------ */
+/* TLS estatico do FM6: o template (0x48 bytes) NAO e zerado ([+0x20] = ffffffff). O Azimuth so aceita */
+/* template zerado (0x1400be6a0) porque o bloco do jogo e o do azimuth-tls.dll (0x150 zerados). Entao: */
+/*  1) apply_patches: guarda o template e zera-o na imagem do jogo (passa na checagem);               */
+/*  2) 1o import resolvido (o azimuth-tls.dll ja carregou, o entry do jogo ainda nao rodou): grava o  */
+/*     template no do azimuth-tls.dll (threads novas copiam dele) e nos blocos das threads existentes. */
+/* ------------------------------------------------------------------------ */
+#define TLS_HELPER_SIZE 0x150
+static uint8_t game_tls[TLS_HELPER_SIZE];
+static size_t game_tls_size;
+static volatile LONG game_tls_pending;
+
+static IMAGE_TLS_DIRECTORY64 *tls_dir(uint8_t *mod)
+{
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(mod + ((IMAGE_DOS_HEADER *)mod)->e_lfanew);
+    IMAGE_DATA_DIRECTORY *d = &nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    return d->VirtualAddress ? (IMAGE_TLS_DIRECTORY64 *)(mod + d->VirtualAddress) : NULL;
+}
+
+static void take_tls_template(uint8_t *game)
+{
+    IMAGE_TLS_DIRECTORY64 *t = tls_dir(game);
+    uint8_t *start;
+    size_t n, i;
+    if (!t) return;
+    start = (uint8_t *)(uintptr_t)t->StartAddressOfRawData;
+    n = (size_t)(t->EndAddressOfRawData - t->StartAddressOfRawData);
+    if (n > TLS_HELPER_SIZE) { wlog("TLS: template de %#zx bytes > bloco do helper", n); return; }
+    for (i = 0; i < n && !start[i]; i++) ;
+    if (i == n) return;                              /* ja zerado: nada a fazer */
+    memcpy(game_tls, start, n);
+    game_tls_size = n;
+    memset(start, 0, n);                             /* .tls do jogo e RW; so o loader le o template */
+    game_tls_pending = 1;
+    wlog("TLS: template de %#zx bytes guardado e zerado (1o byte nao nulo em +%#zx)", n, i);
+}
+
+typedef LONG (WINAPI *nt_query_thread_fn)(HANDLE, int, void *, ULONG, ULONG *);
+typedef struct { LONG status; PVOID teb; HANDLE pid, tid; ULONG_PTR affinity; LONG prio, base_prio; } THREAD_BASIC_INFO;
+
+void game_tls_apply(void)
+{
+    HMODULE helper;
+    const DWORD *index;
+    IMAGE_TLS_DIRECTORY64 *t;
+    nt_query_thread_fn query;
+    HANDLE snap;
+    THREADENTRY32 te;
+    int fixed = 0;
+    if (!game_tls_pending || InterlockedExchange(&game_tls_pending, 0) == 0) return;
+    helper = GetModuleHandleW(L"azimuth-tls.dll");
+    index = helper ? (const DWORD *)GetProcAddress(helper, "azimuth_tls_index") : NULL;
+    t = helper ? tls_dir((uint8_t *)helper) : NULL;
+    query = (nt_query_thread_fn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread");
+    if (!index || !t || !query || t->EndAddressOfRawData - t->StartAddressOfRawData < game_tls_size) {
+        wlog("TLS: azimuth-tls.dll nao confere (modulo %p indice %p); template do jogo NAO aplicado", (void *)helper, (void *)index);
+        return;
+    }
+    write_mem((void *)(uintptr_t)t->StartAddressOfRawData, game_tls, game_tls_size);
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    te.dwSize = sizeof te;
+    if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
+        do {
+            HANDLE h;
+            THREAD_BASIC_INFO bi;
+            if (te.th32OwnerProcessID != GetCurrentProcessId()) continue;
+            if (!(h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID))) continue;
+            if (query(h, 0, &bi, sizeof bi, NULL) >= 0 && bi.teb) {
+                void **slots = *(void ***)((uint8_t *)bi.teb + 0x58);   /* TEB.ThreadLocalStoragePointer */
+                if (slots && slots[*index]) { memcpy(slots[*index], game_tls, game_tls_size); fixed++; }
+            }
+            CloseHandle(h);
+        } while (Thread32Next(snap, &te));
+    }
+    if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
+    wlog("TLS: template do jogo no azimuth-tls.dll (indice %lu) e em %d threads", *index, fixed);
+}
+
 /* hook com trampolim: os bytes roubados nao podem ter enderecos relativos a RIP */
 int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp_out)
 {
@@ -624,8 +703,10 @@ static void hook_apply_patches(void *image, const void *options)
         fm5_patches(game, options);
         return;
     }
-    if (is_fm6()) {  /* os sites do registro sao do FH2: nada a aplicar por enquanto */
-        wlog("apply_patches: FM6 em %p, sem patches", *(uint8_t **)image);
+    if (is_fm6()) {  /* os sites do registro sao do FH2: so o TLS por enquanto */
+        uint8_t *game = *(uint8_t **)image;
+        wlog("apply_patches: FM6 em %p, sem patches", game);
+        take_tls_template(game);
         return;
     }
     orig_apply_patches(image, options);
