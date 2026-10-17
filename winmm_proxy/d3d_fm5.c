@@ -460,7 +460,7 @@ static UINT host_samples(UINT samples)
  * (tamanho, amostras, formato), nunca liberada. Bits por amostra: 2x R8 = 1, 4x R32 = 4 (o FM5 le a FMASK 4x como
  * R32_UINT; o Azimuth so emula 4x R8 e 8x R32). Mapeamento igual ao do Azimuth (0x14013dc40): host com as amostras
  * todas -> identidade; host 2x -> amostra i -> fragmento i & 1; host 1x (AA desligado) -> tudo no fragmento 0. */
-static void *fmask_emul(void *dev, UINT w, UINT h, UINT samples, UINT fmt)
+static void *fmask_emul(void *dev, tex2d_fn create, UINT w, UINT h, UINT samples, UINT fmt)
 {
     UINT d[16] = { 0 };
     struct { const void *mem; UINT pitch, slice; } init;
@@ -484,7 +484,7 @@ static void *fmask_emul(void *dev, UINT w, UINT h, UINT samples, UINT fmt)
     else for (k = 0; k < n; k++) ((UINT *)buf)[k] = val;
     d[0] = w; d[1] = h; d[2] = 1; d[3] = 1; d[4] = fmt; d[5] = 1; d[8] = 0x8 /* SHADER_RESOURCE */;
     init.mem = buf; init.pitch = w * bpp; init.slice = (UINT)(n * bpp);
-    hr = ((tex2d_fn)dev_orig[5])(dev, d, &init, &tex);
+    hr = create(dev, d, &init, &tex);
     HeapFree(GetProcessHeap(), 0, buf);
     wlog("d3d: FMASK %ux emulada %ux%u fmt %u (host %ux, valor %#x) hr=%#lx tex=%p", samples, w, h, fmt, host, val, hr, tex);
     if (hr < 0) tex = NULL;
@@ -527,19 +527,25 @@ static long dev_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
     return hr;
 }
 
-static long dev_CreateShaderResourceView_(void *dev, void *res, const UINT *desc, void **out)
+/* SRV com a FMASK emulada (FM5 e FM6: create/srv = originais do Azimuth para CreateTexture2D/CreateShaderResourceView) */
+static long srv_fmask(void *dev, void *res, const UINT *desc, void **out, tex2d_fn create, srv_fn srv)
 {
     const uint8_t *r = res;
     UINT smp = r ? *(const UINT *)(r + 0x84) : 0;
     if (desc && r && desc[1] == 4 /* TEXTURE2D */ && *(const UINT *)(r + 0x38) == 0xc && *(const UINT *)(r + 0xe4) == 1 &&
         ((desc[0] == 62 && smp == 2) || (desc[0] == 42 && smp == 4))) {
-        void *f = fmask_emul(dev, *(const UINT *)(r + 0x70), *(const UINT *)(r + 0x74), smp, desc[0]);
+        void *f = fmask_emul(dev, create, *(const UINT *)(r + 0x70), *(const UINT *)(r + 0x74), smp, desc[0]);
         if (f) {
             UINT v[8] = { desc[0], 4, 0, 1 };   /* Texture2D {MostDetailedMip 0, MipLevels 1} */
-            return ((srv_fn)dev_orig[7])(dev, f, v, out);
+            return srv(dev, f, v, out);
         }
     }
-    return ((srv_fn)dev_orig[7])(dev, res, desc, out);
+    return srv(dev, res, desc, out);
+}
+
+static long dev_CreateShaderResourceView_(void *dev, void *res, const UINT *desc, void **out)
+{
+    return srv_fmask(dev, res, desc, out, (tex2d_fn)dev_orig[5], (srv_fn)dev_orig[7]);
 }
 
 typedef long (*state_fn)(void *dev, const UINT *desc, void **out);
@@ -1198,10 +1204,42 @@ static const struct { uint8_t slot; long (*fn)(void); } fm6_dev_trivial[] = {
     { 0x51, dev_ret0 },      /* SetDebugFlags: xor eax,eax */
 };
 
+/* CreateTexture2D (slot 5) do FM6: mesmo SampleDesc do console que o FM5 (2x -> {2, 2}; game+0x334f94 cor
+   R11G11B10 1920x1080, misc 0x40000) -> E_INVALIDARG no D3D12. O device do FM6 e o do Azimuth sem o proxy do FM5
+   (dev_CreateTexture2D), entao a troca do Quality pelo padrao fica aqui. */
+static tex2d_fn orig_fm6_create_tex2d;
+static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, void **out)
+{
+    UINT d[16];
+    long hr;
+    if (!desc || desc[5] <= 1 || desc[6] == 0 || desc[6] == 0xffffffff)
+        return orig_fm6_create_tex2d(dev, desc, init, out);
+    memcpy(d, desc, 12 * sizeof(UINT));
+    d[6] = 0xffffffff;
+    hr = orig_fm6_create_tex2d(dev, d, init, out);
+    wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> padrao, bind=%#x misc=%#x) hr=%#lx tex=%p",
+         d[0], d[1], d[4], d[5], desc[6], d[8], d[10], hr, out ? *out : NULL);
+    return hr;
+}
+
+/* CreateShaderResourceView (slot 7) do FM6: R8_UINT sobre a cor 2x (game+0x216dc7) = leitura da FMASK, que o
+   Azimuth so emula em 4x/8x -> device removido; mesma FMASK emulada do FM5 (srv_fmask, PASSO 8 cont. 20). */
+static srv_fn orig_fm6_create_srv;
+static long fm6_CreateShaderResourceView(void *dev, void *res, const UINT *desc, void **out)
+{
+    return srv_fmask(dev, res, desc, out, orig_fm6_create_tex2d, orig_fm6_create_srv);
+}
+
 static int fm6_device_fixups(void **vt)
 {
     size_t i;
     int n = 0;
+    if (vt[5] != (void *)fm6_CreateTexture2D) {
+        orig_fm6_create_tex2d = (tex2d_fn)vt[5];
+        vt[5] = (void *)fm6_CreateTexture2D;
+        orig_fm6_create_srv = (srv_fn)vt[7];
+        vt[7] = (void *)fm6_CreateShaderResourceView;
+    }
     for (i = 0; i < sizeof fm6_dev_trivial / sizeof *fm6_dev_trivial; i++) {
         int s = fm6_dev_trivial[i].slot;
         if (vt[s] != g_base + RVA_STUB_SLOT(s)) continue;
@@ -1271,6 +1309,20 @@ static const struct { uint8_t slot; long (*imm)(void), (*def)(void); } fm6_ctx_t
     { 0xe2, ctx_ret0, NULL },
 };
 
+/* XXSetShaderResources do FM6 (PS 0xa, VS 0x1a, GS 0x20, HS 0x3c, DS 0x40, CS 0x44): no driver do OS "era" (umd
+   0x11bb0.. 0x12c40, 279 bytes; no do FH2 sao jmp p/ a forma padrao) os argumentos sao (ppViews, StartSlot, packed):
+   packed = offset do registrador por estagio (bits 0..15; VS 0x1d80 + 32 * slot) | 7 << 16 | (NumViews - 1) << 19
+   (game+0x1905e6 VS, 0x19060f PS, 0x190633 CS). O caminho lento do driver chama a forma padrao com
+   (ctx, start, (packed >> 19) + 1, ppViews) -> aqui o mesmo, no metodo do Azimuth da tabela em [ctx] (imediata ou
+   diferida). */
+typedef void (*set_srvs_fn)(void *ctx, UINT start, UINT n, void *const *views);
+#define FM6_SET_SRVS(s)                                                                                 static void fm6_set_srvs_##s(void *ctx, void *const *views, UINT start, UINT packed)                {                                                                                                       ((set_srvs_fn)(*(void ***)ctx)[fm6_ctx_slot(s)])(ctx, start, (packed >> 19) + 1, views);        }
+FM6_SET_SRVS(0x0a) FM6_SET_SRVS(0x1a) FM6_SET_SRVS(0x20) FM6_SET_SRVS(0x3c) FM6_SET_SRVS(0x40) FM6_SET_SRVS(0x44)
+static const struct { uint8_t slot; void *fn; } fm6_ctx_srvs[] = {
+    { 0x0a, (void *)fm6_set_srvs_0x0a }, { 0x1a, (void *)fm6_set_srvs_0x1a }, { 0x20, (void *)fm6_set_srvs_0x20 },
+    { 0x3c, (void *)fm6_set_srvs_0x3c }, { 0x40, (void *)fm6_set_srvs_0x40 }, { 0x44, (void *)fm6_set_srvs_0x44 },
+};
+
 /* monta em dst (0x870 bytes, ja copiados) a tabela do FM6 a partir da tabela do Azimuth src; devolve quantos slots
    triviais do driver entraram no lugar do stub fatal (ou de um slot novo) */
 static int fm6_ctx_table(void **dst, void *const *src, int deferred)
@@ -1288,6 +1340,7 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         dst[s] = (void *)fn;
         n++;
     }
+    for (i = 0; i < sizeof fm6_ctx_srvs / sizeof *fm6_ctx_srvs; i++) dst[fm6_ctx_srvs[i].slot] = fm6_ctx_srvs[i].fn;
     for (s = 0; s < FM6_CTX_SLOTS; s++)
         if (!dst[s]) dst[s] = g_base + RVA_STUB_SLOT(s);       /* novo sem comportamento: nao acontece hoje */
     return n;
@@ -1724,6 +1777,21 @@ static BOOL WINAPI fm6_DeleteFileW(const wchar_t *path)
     return az_DeleteFileW(path);
 }
 
+/* FM6 (game+0x6531cc, XAudio2CreateWithVersionInfo do XDK "era") faz GetProcAddress("CreateXAudio2Object") =
+   0x140181b10 e chama com (pp, 0x400, processador 0x10, 0) (game+0x5174ca); o Azimuth exige processador -1
+   ("alternate profile") e depois ignora o processador -> mesma ponte do FM5 (fm5_XAudio2Create). */
+static FARPROC (WINAPI *az_GetProcAddress)(HMODULE m, const char *name);
+
+static FARPROC WINAPI fm6_GetProcAddress(HMODULE m, const char *name)
+{
+    FARPROC p = az_GetProcAddress(m, name);
+    if ((uint8_t *)p == g_base + RVA_CREATE_XAUDIO2) {
+        wlog("xaudio2: GetProcAddress(CreateXAudio2Object) -> ponte com processador -1 (FM6)");
+        p = (FARPROC)fm5_XAudio2Create;
+    }
+    return p;
+}
+
 static FARPROC hook_resolver(const uint8_t *entry)
 {
     FARPROC p = orig_resolver(entry);
@@ -1753,6 +1821,9 @@ static FARPROC hook_resolver(const uint8_t *entry)
         if (!az_DeleteFileW) wlog("kernelx.dll!DeleteFileW -> d:\\ falha com ERROR_PATH_NOT_FOUND (sem PLS)");
         az_DeleteFileW = (BOOL (WINAPI *)(const wchar_t *))p;
         p = (FARPROC)fm6_DeleteFileW;
+    } else if (p && str_is(entry, "kernelx.dll") && str_is(entry + 0x20, "GetProcAddress")) {
+        az_GetProcAddress = (FARPROC (WINAPI *)(HMODULE, const char *))p;
+        p = (FARPROC)fm6_GetProcAddress;
     }
     if (!p) p = import_fallback(entry);
     if (!p) {

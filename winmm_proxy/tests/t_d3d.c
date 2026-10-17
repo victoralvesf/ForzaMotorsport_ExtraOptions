@@ -567,6 +567,23 @@ TEST(fm6_delete_file_d_drive_fails)
     az_DeleteFileW = NULL;
 }
 
+/* FM6: GetProcAddress("CreateXAudio2Object") devolve a ponte com processador -1 no lugar do 0x140181b10 */
+static uint8_t *gpa_base;
+static FARPROC WINAPI fake_az_gpa(HMODULE m, const char *name)
+{
+    (void)m;
+    return (FARPROC)(strcmp(name, "CreateXAudio2Object") ? (void *)0x1234 : gpa_base + 0x181b10);
+}
+
+TEST(fm6_get_proc_address_xaudio2_bridge)
+{
+    gpa_base = fake_azimuth(0);
+    az_GetProcAddress = fake_az_gpa;
+    CHECK(fm6_GetProcAddress(NULL, "CreateXAudio2Object") == (FARPROC)fm5_XAudio2Create);
+    CHECK(fm6_GetProcAddress(NULL, "X3DAudioInitialize") == (FARPROC)(void *)0x1234);
+    az_GetProcAddress = NULL;
+}
+
 /* FM6: D3D11CreateDevice -> D3D11XCreateDeviceX do Azimuth com o descritor do FH2; device/contexto sem conversao */
 static uint32_t createx_desc[11];
 static void *fm6_dev_vt[0x56], *fm6_dev[8] = { fm6_dev_vt };
@@ -580,6 +597,26 @@ static long fake_createx(const void *desc, void **dev, void **ctx)
 
 static void *fm6_type_tab[0x12][0x10e];
 static void **fake_vtbl_get(int t) { return fm6_type_tab[t]; }
+
+static uint32_t create_tex_desc[12];
+static long fake_fm6_create_tex(void *dev, const UINT *desc, const void *init, void **out)
+{
+    (void)dev; (void)init;
+    memcpy(create_tex_desc, desc, sizeof create_tex_desc);
+    *out = (void *)0x7e7e;
+    return 0;
+}
+
+static void *srv_res;
+static UINT srv_desc[4];
+static long fake_fm6_create_srv(void *dev, void *res, const UINT *desc, void **out)
+{
+    (void)dev;
+    srv_res = res;
+    memcpy(srv_desc, desc, sizeof srv_desc);
+    *out = (void *)0x5e5e;
+    return 0;
+}
 
 static uint32_t create_sc_desc[12];
 static long fake_create_sc_cw(void *factory, void *device, void *window, const uint32_t *desc, void *ro, void **out)
@@ -599,6 +636,8 @@ TEST(fm6_create_device_uses_azimuth_device)
     int i;
     for (i = 0; i < 0x56; i++) fm6_dev_vt[i] = az + 0xf5f30 + i * 0x100;   /* stubs fatais padrao */
     fm6_dev_vt[0x51] = (void *)0x5151;                                        /* implementado: fica */
+    fm6_dev_vt[5] = (void *)fake_fm6_create_tex;                              /* CreateTexture2D */
+    fm6_dev_vt[7] = (void *)fake_fm6_create_srv;                              /* CreateShaderResourceView */
     memcpy(az + RVA_CREATE_DEVICEX, "\xff\x25\0\0\0\0", 6);
     *(void **)(az + RVA_CREATE_DEVICEX + 6) = (void *)fake_createx;
     memcpy(az + RVA_VTBL_GET, "ÿ%    ", 6);
@@ -616,6 +655,33 @@ TEST(fm6_create_device_uses_azimuth_device)
     CHECK_EQ(((long (*)(void *))fm6_dev_vt[0x38])(fm6_dev), (long)0x80004001);
     CHECK_EQ(((long (*)(void *))fm6_dev_vt[0x28])(fm6_dev), (long)0x80004001);
     CHECK(fm6_dev_vt[0x51] == (void *)0x5151);
+    {   /* CreateTexture2D: SampleDesc {2, 2} de game+0x334f94 -> Quality padrao do D3D12; {1, 0} passa igual */
+        static const UINT tex[12] = { 1920, 1080, 1, 1, 26, 2, 2, 0, 0x28, 0, 0x40000, 0 };
+        static const UINT one[12] = { 64, 64, 1, 1, 28, 1, 0, 0, 8, 0, 0, 0 };
+        void *t = NULL;
+        CHECK_EQ(((long (*)(void *, const UINT *, const void *, void **))fm6_dev_vt[5])(fm6_dev, tex, NULL, &t), 0);
+        CHECK(t == (void *)0x7e7e);
+        CHECK_HEX((uint8_t *)create_tex_desc, "80070000" "38040000" "01000000" "01000000" "1a000000" "02000000"
+                                              "ffffffff" "00000000" "28000000" "00000000" "00000400" "00000000");
+        CHECK_EQ(tex[6], 2);
+        CHECK_EQ(((long (*)(void *, const UINT *, const void *, void **))fm6_dev_vt[5])(fm6_dev, one, NULL, &t), 0);
+        CHECK_HEX((uint8_t *)create_tex_desc, "40000000" "40000000" "01000000" "01000000" "1c000000" "01000000"
+                                              "00000000" "00000000" "08000000" "00000000" "00000000" "00000000");
+    }
+    {   /* CreateShaderResourceView: R8_UINT/TEXTURE2D sobre a cor 2x (game+0x216dc7) -> FMASK emulada (R8, 1x, SRV) */
+        static uint8_t res[0x100];
+        static const UINT fmask[4] = { 62, 4, 0, 1 }, plain[4] = { 26, 4, 0, 1 };
+        void *v = NULL;
+        *(UINT *)(res + 0x38) = 0xc; *(UINT *)(res + 0x70) = 1600; *(UINT *)(res + 0x74) = 900;
+        *(UINT *)(res + 0x84) = 2; *(UINT *)(res + 0xe4) = 1;
+        CHECK_EQ(((long (*)(void *, void *, const UINT *, void **))fm6_dev_vt[7])(fm6_dev, res, fmask, &v), 0);
+        CHECK(v == (void *)0x5e5e && srv_res == (void *)0x7e7e);
+        CHECK_HEX((uint8_t *)create_tex_desc, "40060000" "84030000" "01000000" "01000000" "3e000000" "01000000"
+                                              "00000000" "00000000" "08000000" "00000000" "00000000" "00000000");
+        CHECK_HEX((uint8_t *)srv_desc, "3e000000" "04000000" "00000000" "01000000");
+        CHECK_EQ(((long (*)(void *, void *, const UINT *, void **))fm6_dev_vt[7])(fm6_dev, res, plain, &v), 0);
+        CHECK(srv_res == (void *)res && srv_desc[0] == 26);
+    }
     CHECK(fm6_dev_vt[0x3b] == az + 0xf5f30 + 0x3b * 0x100);                   /* fora da lista: intacto */
     /* tabelas por tipo: IDXGIFactory (0xe) sem o slot 5, recurso (5) com o slot 8 novo */
     CHECK(fm6_type_tab[0xe][4] == (void *)0x104 && fm6_type_tab[0xe][5] == (void *)0x106);
@@ -645,6 +711,15 @@ static copy_site_fn fm6_copy_site(uint8_t *az, uint32_t rva)
     memcpy(at + 5, "\x48\x83\xc4\x08\xc3", 5);                                 /* add rsp,8; ret */
     return (copy_site_fn)(at - 10);
 }
+
+static void *srvs_ctx, *const *srvs_views;
+static UINT srvs_start, srvs_n, srvs_slot;
+static void fake_set_srvs(void *ctx, UINT start, UINT n, void *const *views, UINT slot)
+{
+    srvs_ctx = ctx; srvs_start = start; srvs_n = n; srvs_views = views; srvs_slot = slot;
+}
+static void fake_set_srvs_19(void *c, UINT s, UINT n, void *const *v) { fake_set_srvs(c, s, n, v, 0x19); }
+static void fake_set_srvs_43(void *c, UINT s, UINT n, void *const *v) { fake_set_srvs(c, s, n, v, 0x43); }
 
 TEST(fm6_context_table_layout)
 {
@@ -682,4 +757,16 @@ TEST(fm6_context_table_layout)
     CHECK(def[0x1e] == az + 0xf5f30 + 0x1d * 0x100 && def[0xc9] == az + 0xf5f30 + 0xc6 * 0x100);
     CHECK_EQ(((long (*)(void))def[0x71])(), 0);
     CHECK(def[0xc7] == (void *)0x10c4);
+    {   /* XXSetShaderResources do FM6 (ppViews, StartSlot, packed) -> metodo do Azimuth em [ctx] (start, n, ppViews) */
+        static void *az_tab[0x10e], *ctx[1] = { az_tab }, *views[2];
+        typedef void (*fm6_srvs_fn)(void *, void *const *, UINT, UINT);
+        az_tab[0x19] = (void *)fake_set_srvs_19;
+        az_tab[0x43] = (void *)fake_set_srvs_43;
+        ((fm6_srvs_fn)imm[0x1a])(ctx, views, 3, (0x1d80 + 3 * 32) | 0x70000 | 1 << 19);   /* VS, 2 views */
+        CHECK(srvs_ctx == ctx && srvs_views == views && srvs_slot == 0x19);
+        CHECK_EQ(srvs_start, 3);
+        CHECK_EQ(srvs_n, 2);
+        ((fm6_srvs_fn)def[0x44])(ctx, views, 5, (0x140 + 5 * 32) | 0x70000);               /* CS, 1 view */
+        CHECK(srvs_slot == 0x43 && srvs_start == 5 && srvs_n == 1);
+    }
 }
