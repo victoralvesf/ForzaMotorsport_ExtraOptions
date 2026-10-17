@@ -60,6 +60,8 @@ the original Azimuth. Nothing else was changed.
 
 ## Building from source
 
+See `ARCHITECTURE.md` for how the mod works.
+
 The source is in `winmm_proxy\`. Build it with mingw-w64 gcc:
 
 ```
