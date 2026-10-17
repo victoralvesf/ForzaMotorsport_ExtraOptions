@@ -1211,9 +1211,140 @@ static int fm6_device_fixups(void **vt)
     return n;
 }
 
+/* Contexto do FM6: o umd.dll do OS "era" copia para ctx+0x3d0 uma tabela de 0x100 slots (imediato .data 0xe2bf0,
+   diferido 0xe3760; la [ctx] = ctx+0x3d0) = a do driver do FH2 (.data 0x117b60, 0xfd slots) com 3 metodos a mais
+   (tools\umd_vtdiff.py): 8 (novo, xor eax,eax), 0x8e PIXBeginEventEx e 0x91 PIXSetMarkerEx (cabecalho: BeginEvent,
+   BeginEventEx, EndEvent, SetMarker, SetMarkerEx). FM6 s -> Azimuth: s < 8 = s; 9..0x8d = s-1; 0x8f/0x90 = s-2;
+   >= 0x92 = s-3. Ex.: game+0x3a732f [ctx+0xa08](1) = FM6 0xc7 = CSEnableAutomaticGpuFlush (Azimuth 0xc4), nao Resume.
+   O Azimuth faz [ctx] = tabela global do tipo e memcpy(ctx+0x3d0, tabela, 0x870) em 0x586e1 (imediato, dentro do
+   D3D11XCreateDeviceX) e 0x11b440 (diferido); o jogo le a copia embutida -> as duas chamadas ao memcpy passam a
+   montar a copia no layout do FM6. [ctx] continua com a tabela do Azimuth (slots 0..7 iguais nos dois). */
+#define RVA_CTX_COPY_IMM  0x586e1
+#define RVA_CTX_COPY_DEF  0x11b440
+#define RVA_MEMCPY        0x24b6f0
+#define FM6_CTX_SLOTS     0x100
+#define FM6_NEW           0xff
+
+extern void write_mem(void *dst, const void *src, size_t len);
+extern uint8_t *alloc_near(uint8_t *mod, size_t size);
+
+static int fm6_ctx_slot(int s)
+{
+    if (s < 8) return s;
+    if (s == 8 || s == 0x8e || s == 0x91) return -1;
+    return s < 0x8e ? s - 1 : s < 0x91 ? s - 2 : s - 3;
+}
+
+static long ctx_ret0(void) { return 0; }
+static long ctx_ret1(void) { return 1; }
+static long ctx_retm1(void) { return -1; }
+static long ctx_notimpl(void) { return E_NOTIMPL; }
+static long ctx_fail(void) { return E_FAIL; }
+
+/* metodos triviais no driver (tools\umd_trivial.py ... fm6): imediato / diferido; NULL = nao trivial ali */
+static const struct { uint8_t slot; long (*imm)(void), (*def)(void); } fm6_ctx_trivial[] = {
+    { 0x08, ctx_ret0, ctx_ret0 },          /* novo */
+    { 0x1e, ctx_notimpl, NULL },
+    { 0x38, ctx_ret0, NULL },
+    { 0x70, ctx_ret0, NULL },
+    { 0x71, ctx_ret1, ctx_ret0 },
+    { 0x72, NULL, ctx_ret0 },
+    { 0x73, NULL, ctx_notimpl },
+    { 0x76, ctx_ret0, ctx_ret0 }, { 0x77, ctx_ret0, ctx_ret0 },
+    { 0x84, ctx_ret0, NULL },
+    { 0x86, ctx_ret0, ctx_ret0 },
+    { 0x8d, ctx_retm1, ctx_retm1 },        /* PIXBeginEvent */
+    { 0x8e, ctx_retm1, ctx_retm1 },        /* PIXBeginEventEx (novo) */
+    { 0x8f, ctx_retm1, ctx_retm1 },        /* PIXEndEvent */
+    { 0x90, ctx_ret0, ctx_ret0 },          /* PIXSetMarker */
+    { 0x91, ctx_ret0, ctx_ret0 },          /* PIXSetMarkerEx (novo) */
+    { 0x92, ctx_ret0, ctx_ret0 },
+    { 0x93, ctx_notimpl, ctx_notimpl }, { 0x94, ctx_notimpl, ctx_notimpl }, { 0x95, ctx_notimpl, ctx_notimpl },
+    { 0x96, ctx_ret0, ctx_ret0 }, { 0x97, ctx_ret0, ctx_ret0 }, { 0x98, ctx_ret0, ctx_ret0 },
+    { 0x99, ctx_notimpl, ctx_notimpl },
+    { 0x9d, ctx_ret0, NULL }, { 0x9e, ctx_ret0, NULL },
+    { 0x9f, NULL, ctx_ret0 }, { 0xa0, NULL, ctx_ret0 }, { 0xa1, NULL, ctx_ret0 }, { 0xa2, NULL, ctx_ret0 },
+    { 0xc9, ctx_fail, NULL }, { 0xca, ctx_fail, NULL },
+    { 0xcb, ctx_ret0, NULL }, { 0xcc, ctx_ret0, NULL },
+    { 0xdc, ctx_ret0, ctx_ret0 },
+    { 0xde, ctx_fail, NULL }, { 0xdf, ctx_ret0, NULL },
+    { 0xe2, ctx_ret0, NULL },
+};
+
+/* monta em dst (0x870 bytes, ja copiados) a tabela do FM6 a partir da tabela do Azimuth src; devolve quantos slots
+   triviais do driver entraram no lugar do stub fatal (ou de um slot novo) */
+static int fm6_ctx_table(void **dst, void *const *src, int deferred)
+{
+    int s, n = 0;
+    size_t i;
+    for (s = 0; s < FM6_CTX_SLOTS; s++) {
+        int a = fm6_ctx_slot(s);
+        dst[s] = a < 0 ? NULL : src[a];
+    }
+    for (i = 0; i < sizeof fm6_ctx_trivial / sizeof *fm6_ctx_trivial; i++) {
+        long (*fn)(void) = deferred ? fm6_ctx_trivial[i].def : fm6_ctx_trivial[i].imm;
+        int s = fm6_ctx_trivial[i].slot, a = fm6_ctx_slot(s);
+        if (!fn || (a >= 0 && src[a] != g_base + RVA_STUB_SLOT(a))) continue;
+        dst[s] = (void *)fn;
+        n++;
+    }
+    for (s = 0; s < FM6_CTX_SLOTS; s++)
+        if (!dst[s]) dst[s] = g_base + RVA_STUB_SLOT(s);       /* novo sem comportamento: nao acontece hoje */
+    return n;
+}
+
+static void *fm6_ctx_copy(void *dst, const void *src, size_t n, int deferred)
+{
+    static volatile LONG logged[2];
+    int t;
+    memcpy(dst, src, n);
+    if (n != SLOTS * 8) return dst;
+    t = fm6_ctx_table(dst, src, deferred);
+    if (InterlockedIncrement(&logged[deferred]) == 1)
+        wlog("d3d: contexto %s do FM6 %p: tabela embutida no layout do FM6 (0x%x slots, %d triviais do driver)",
+             deferred ? "diferido" : "imediato", (uint8_t *)dst - 0x3d0, FM6_CTX_SLOTS, t);
+    return dst;
+}
+
+void *fm6_ctx_copy_imm(void *dst, const void *src, size_t n) { return fm6_ctx_copy(dst, src, n, 0); }
+void *fm6_ctx_copy_def(void *dst, const void *src, size_t n) { return fm6_ctx_copy(dst, src, n, 1); }
+
+/* troca o call memcpy (e8 rel32) dos dois sites por call num stub perto do azimuth.exe (jmp abs p/ fm6_ctx_copy_*) */
+static int fm6_ctx_install(void)
+{
+    static int done;
+    static const struct { uint32_t rva; void *fn; } site[2] = {
+        { RVA_CTX_COPY_IMM, (void *)fm6_ctx_copy_imm }, { RVA_CTX_COPY_DEF, (void *)fm6_ctx_copy_def },
+    };
+    uint8_t *stubs;
+    int i;
+    if (done) return 1;
+    for (i = 0; i < 2; i++) {
+        uint8_t *at = g_base + site[i].rva;
+        if (at[0] != 0xe8 || at + 5 + *(int32_t *)(at + 1) != g_base + RVA_MEMCPY ||
+            memcmp(at - 6, "\x41\xb8\x70\x08\x00\x00", 6) != 0) {
+            wlog("d3d: copia da tabela do contexto em %#x nao confere; contexto do FM6 sem conversao", site[i].rva);
+            return 0;
+        }
+    }
+    if (!(stubs = alloc_near(g_base, 32))) { wlog("d3d: sem memoria perto do azimuth.exe para o contexto do FM6"); return 0; }
+    for (i = 0; i < 2; i++) {
+        uint8_t *at = g_base + site[i].rva, *st = stubs + i * 16, call[5] = { 0xe8 };
+        int32_t rel = (int32_t)(st - (at + 5));
+        memcpy(st, "\xff\x25\0\0\0\0", 6);
+        memcpy(st + 6, &site[i].fn, 8);
+        memcpy(call + 1, &rel, 4);
+        write_mem(at, call, sizeof call);
+    }
+    FlushInstructionCache(GetCurrentProcess(), stubs, 32);
+    done = 1;
+    wlog("d3d: contexto do FM6: copias da tabela embutida (%#x, %#x) -> layout do FM6", RVA_CTX_COPY_IMM, RVA_CTX_COPY_DEF);
+    return 1;
+}
+
 /* FM6 (OS "era", XDK posterior ao do FH2): D3D11CreateDevice(0, 1, 0, 0x4000000, {0xb100}, 1, 0x20011, ...) em
    game+0x3a66f6, depois QI p/ ID3D11DeviceX e CreateDmaEngineContext no slot 0x3b (= layout do FH2). Device e
-   contexto do Azimuth entregues sem conversao de vtable nem proxy do contexto. */
+   contexto do Azimuth entregues sem proxy; so a tabela embutida do contexto muda de layout (fm6_ctx_install). */
 static long WINAPI fm6_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, UINT flags,
                                          const UINT *levels, UINT nlevels, UINT sdk,
                                          void **out_dev, UINT *out_level, void **out_ctx)
@@ -1227,8 +1358,9 @@ static long WINAPI fm6_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     (void)sw;
     if (out_dev) *out_dev = NULL;
     if (out_ctx) *out_ctx = NULL;
+    fm6_ctx_install();
     hr = ((createx_fn)(g_base + RVA_CREATE_DEVICEX))(desc, &dev, &ctx);
-    wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p contexto=%p (FM6, layout do FH2)", hr, dev, ctx);
+    wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p contexto=%p (FM6, device no layout do FH2)", hr, dev, ctx);
     if (hr < 0) return hr;
     wlog("d3d: device do FM6: %d slots triviais do driver do console no lugar do stub fatal",
          fm6_device_fixups(*(void ***)dev));

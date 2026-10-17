@@ -708,7 +708,7 @@ static size_t slot0_stub(uint8_t *s, int r, DWORD index)
 }
 
 /* memoria executavel a menos de 2 GB da imagem (para call rel32) */
-static uint8_t *alloc_near(uint8_t *mod, size_t size)
+uint8_t *alloc_near(uint8_t *mod, size_t size)
 {
     IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(mod + ((IMAGE_DOS_HEADER *)mod)->e_lfanew);
     uintptr_t a = ((uintptr_t)mod + nt->OptionalHeader.SizeOfImage + 0xffff) & ~(uintptr_t)0xffff;

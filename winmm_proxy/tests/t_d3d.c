@@ -602,3 +602,53 @@ TEST(fm6_create_device_uses_azimuth_device)
     CHECK(fm6_dev_vt[0x51] == (void *)0x5151);
     CHECK(fm6_dev_vt[0x3b] == az + 0xf5f30 + 0x3b * 0x100);                   /* fora da lista: intacto */
 }
+
+/* FM6: as duas copias da tabela embutida do contexto (ctx+0x3d0) montam o layout do driver do FM6 (+3 slots) */
+typedef void *(*copy_site_fn)(void *dst, const void *src, size_t n);
+static copy_site_fn fm6_copy_site(uint8_t *az, uint32_t rva)
+{
+    uint8_t *at = az + rva;
+    int32_t rel = (int32_t)(az + 0x24b6f0 - (at + 5));
+    memcpy(at - 10, "\x48\x83\xec\x08" "\x41\xb8\x70\x08\x00\x00" "\xe8", 11);   /* sub rsp,8; mov r8d,0x870; call */
+    memcpy(at + 1, &rel, 4);
+    memcpy(at + 5, "\x48\x83\xc4\x08\xc3", 5);                                 /* add rsp,8; ret */
+    return (copy_site_fn)(at - 10);
+}
+
+TEST(fm6_context_table_layout)
+{
+    uint8_t *az = fake_azimuth(0);
+    static void *src[0x10e], *imm[0x10e], *def[0x10e];
+    copy_site_fn site_imm, site_def;
+    int i;
+    CHECK(!fm6_ctx_install());                                  /* bytes nao conferem: nada muda */
+    CHECK_HEX(az + 0x586e1, "0000000000");
+    site_imm = fm6_copy_site(az, 0x586e1);
+    site_def = fm6_copy_site(az, 0x11b440);
+    CHECK(fm6_ctx_install());
+    CHECK(az[0x586e1] == 0xe8 && az + 0x586e6 + *(int32_t *)(az + 0x586e2) != az + 0x24b6f0);
+    for (i = 0; i < 0x10e; i++) src[i] = (void *)(uintptr_t)(0x1000 + i);
+    src[0x1d] = az + 0xf5f30 + 0x1d * 0x100;                    /* stubs fatais do Azimuth */
+    src[0x70] = az + 0xf5f30 + 0x70 * 0x100;
+    src[0xc6] = az + 0xf5f30 + 0xc6 * 0x100;
+    CHECK(site_imm(imm, src, 0x870) == imm);
+    CHECK(site_def(def, src, 0x870) == def);
+    CHECK(imm[0] == (void *)0x1000 && imm[7] == (void *)0x1007);
+    CHECK_EQ(((long (*)(void))imm[8])(), 0);                    /* slot novo */
+    CHECK(imm[9] == (void *)0x1008 && imm[0x8d] == (void *)0x108c);
+    CHECK_EQ(((long (*)(void))imm[0x8e])(), (long)-1);          /* PIXBeginEventEx */
+    CHECK(imm[0x8f] == (void *)0x108d && imm[0x90] == (void *)0x108e);
+    CHECK_EQ(((long (*)(void))imm[0x91])(), 0);                 /* PIXSetMarkerEx */
+    CHECK(imm[0x92] == (void *)0x108f);
+    CHECK(imm[0xc7] == (void *)0x10c4);                         /* game+0x3a732f: CSEnableAutomaticGpuFlush */
+    CHECK(imm[0xff] == (void *)0x10fc);
+    CHECK(imm[0x100] == (void *)0x1100 && imm[0x10d] == (void *)0x110d);   /* resto do memcpy */
+    /* stub fatal no Azimuth + trivial no driver: E_NOTIMPL / 1 / E_FAIL no imediato */
+    CHECK_EQ(((long (*)(void))imm[0x1e])(), (long)0x80004001);
+    CHECK_EQ(((long (*)(void))imm[0x71])(), 1);
+    CHECK_EQ(((long (*)(void))imm[0xc9])(), (long)0x80004005);
+    /* diferido: GetData e Suspend nao sao triviais no driver -> stub fatal continua; 0x71 devolve 0 */
+    CHECK(def[0x1e] == az + 0xf5f30 + 0x1d * 0x100 && def[0xc9] == az + 0xf5f30 + 0xc6 * 0x100);
+    CHECK_EQ(((long (*)(void))def[0x71])(), 0);
+    CHECK(def[0xc7] == (void *)0x10c4);
+}
