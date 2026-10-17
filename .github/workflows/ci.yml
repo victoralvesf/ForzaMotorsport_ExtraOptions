@@ -1,0 +1,63 @@
+# Testes do proxy em todo pull request; release (winmm.dll + azimuth_fm5.ini + README.txt) no push de tag v*.
+# No GitHub os testes que precisam do azimuth.exe/game_binaries sao pulados (ficam fora do git).
+name: CI
+
+on:
+  pull_request:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Conferir mingw
+        run: |
+          [ -x /c/mingw64/bin/gcc.exe ] || { echo "::error::C:\\mingw64\\bin\\gcc.exe ausente no runner"; exit 1; }
+          /c/mingw64/bin/gcc --version | head -1
+
+      - name: Testes
+        run: sh winmm_proxy/tests/run_tests.sh
+
+  release:
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-2025
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        env:
+          SKIP_TESTS: 1
+        run: sh winmm_proxy/build.sh
+
+      # o build regera os exports a partir do winmm.dll do System32 do runner
+      - name: Conferir arquivos gerados
+        run: |
+          git diff --quiet -- winmm_proxy/winmm_exports.def winmm_proxy/winmm_stubs.S winmm_proxy/d3d_thunks.S ||
+            { echo "::warning::arquivos gerados diferem do git (exports do winmm.dll do runner)"; git diff --stat; }
+
+      - name: Empacotar
+        run: |
+          mkdir -p dist
+          cp winmm_proxy/build/winmm.dll azimuth_fm5.ini dist/
+          python tools/md2txt.py README.md dist/README.txt
+          cd dist && 7z a "../azimuth-fm5-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini README.txt
+
+      - name: Publicar release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "azimuth-fm5-$GITHUB_REF_NAME.zip" --title "$GITHUB_REF_NAME" --generate-notes

@@ -1,0 +1,34 @@
+# Ghidra project (binary, ~1.7 GB) - back it up separately
+ghidra/
+
+# Original game executables
+game_binaries/
+
+# Emulator and build artifacts
+/azimuth.exe
+/winmm.dll
+/winmm.prev.dll
+winmm_proxy/build/
+*.bak
+
+# Azimuth's folder: runtime data (cache, saves, dumps, pipelines) and launcher config (azimuth.ini, per user)
+/data/
+
+# Logs and dumps
+*.log
+*.dmp
+*.err
+
+# Decompilations/dumps derived from the binaries (Azimuth, FH2, FM5): local only, kept out of the public repository
+tools/sessoes_antigas/
+*.pkl
+
+# Accumulated knowledge/RE notes (whole docs folder) and internal research: local only
+/docs/
+/car_model_report/
+
+# Python
+__pycache__/
+*.pyc
+captures/
+screenshots/
