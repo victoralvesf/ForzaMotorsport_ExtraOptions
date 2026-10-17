@@ -156,7 +156,18 @@ TEST(ctx_topology_written_inline)
     CHECK_EQ(*(uint64_t *)(real_ctx + CTX_TOPO_PACKET), 0x000009ffc0009e00ull);
     CHECK_EQ(*(uint32_t *)(real_ctx + CTX_DIRTY), 0x100 | CTX_DIRTY_TOPO);
     FM5_CALL(px, 0x18, void (*)(void *, UINT))(px, 999);
-    CHECK_EQ(*(uint64_t *)(real_ctx + CTX_TOPO_PACKET), topo_packets[0]);
+    CHECK_EQ(*(uint64_t *)(real_ctx + CTX_TOPO_PACKET), 0x000001ffc0009e00ull);
+}
+
+TEST(ctx_topology_packet_kinds)
+{
+    CHECK_EQ(topo_packet(0), 0x000001ffc0009e00ull);              /* UNDEFINED */
+    CHECK_EQ(topo_packet(1), 0x000003ffc0009e00ull);              /* POINTLIST */
+    CHECK_EQ(topo_packet(5), 0x00000dffc0009e00ull);              /* TRIANGLESTRIP */
+    CHECK_EQ(topo_packet(12), 0x0000197fc0009e00ull);             /* TRIANGLELIST_ADJ */
+    CHECK_EQ(topo_packet(35), 0x00301354c0009e00ull);             /* 3_CONTROL_POINT_PATCHLIST */
+    CHECK_EQ(topo_packet(64), 0x02001307c0009e00ull);             /* 32_CONTROL_POINT_PATCHLIST */
+    CHECK_EQ(topo_packet(65), topo_packet(0));
 }
 
 static const GUID guid_any = { 1, 2, 3, { 4 } };

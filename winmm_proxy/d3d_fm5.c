@@ -97,26 +97,24 @@ long ctx_wrap_qi(void *real, const GUID *iid, void **out)
 
 /* FM5 0x18 = IASetPrimitiveTopology. No XDK do FH2 e inline (por isso a vtable do Azimuth nao tem):
  * ctx+0x170 = pacote PM4 da topologia, ctx+0x168 |= 0x46 (o Draw confere/limpa, 0x14012b800).
- * Tabela indexada por D3D11_PRIMITIVE_TOPOLOGY, copiada do FH2 1.0.0.64 (RVA 0x1df87e0). */
-static const uint64_t topo_packets[65] = {
-    0x000001ffc0009e00ull, 0x000003ffc0009e00ull, 0x000005ffc0009e00ull, 0x000007ffc0009e00ull,
-    0x000009ffc0009e00ull, 0x00000dffc0009e00ull, 0x00000bffc0009e00ull, 0x000001ffc0009e00ull,
-    0x000001ffc0009e00ull, 0x000001ffc0009e00ull, 0x0000157fc0009e00ull, 0x0000177fc0009e00ull,
-    0x0000197fc0009e00ull, 0x00001b7fc0009e00ull, 0x00001dffc0009e00ull, 0x00001fffc0009e00ull,
-    0x000021ffc0009e00ull, 0x000023ffc0009e00ull, 0x000025ffc0009e00ull, 0x000027ffc0009e00ull,
-    0x000029ffc0009e00ull, 0x00002bffc0009e00ull, 0x00002dffc0009e00ull, 0x00002fffc0009e00ull,
-    0x000031ffc0009e00ull, 0x000033ffc0009e00ull, 0x000035ffc0009e00ull, 0x000037ffc0009e00ull,
-    0x000039ffc0009e00ull, 0x000001ffc0009e00ull, 0x000001ffc0009e00ull, 0x000001ffc0009e00ull,
-    0x000001ffc0009e00ull, 0x001013ffc0009e00ull, 0x0020137fc0009e00ull, 0x00301354c0009e00ull,
-    0x0040133fc0009e00ull, 0x00501332c0009e00ull, 0x00601329c0009e00ull, 0x00701323c0009e00ull,
-    0x0080131fc0009e00ull, 0x0090131bc0009e00ull, 0x00a01318c0009e00ull, 0x00b01316c0009e00ull,
-    0x00c01314c0009e00ull, 0x00d01312c0009e00ull, 0x00e01311c0009e00ull, 0x00f01310c0009e00ull,
-    0x0100130fc0009e00ull, 0x0110130ec0009e00ull, 0x0120130dc0009e00ull, 0x0130130cc0009e00ull,
-    0x0140130bc0009e00ull, 0x0150130bc0009e00ull, 0x0160130ac0009e00ull, 0x0170130ac0009e00ull,
-    0x01801309c0009e00ull, 0x01901309c0009e00ull, 0x01a01308c0009e00ull, 0x01b01308c0009e00ull,
-    0x01c01308c0009e00ull, 0x01d01307c0009e00ull, 0x01e01307c0009e00ull, 0x01f01307c0009e00ull,
-    0x02001307c0009e00ull,
-};
+ * Pacote montado a partir da D3D11_PRIMITIVE_TOPOLOGY: dword baixo = cabecalho fixo; dword alto =
+ *   bits 0..8   0x100 | (256 / k - 1), k = 1; 2 nas *_ADJ; n nos patch lists de n pontos de controle
+ *   bits 9..15  tipo de primitiva do hardware (strip/list de triangulos trocados; 9 = patch)
+ *   bits 20..   pontos de controle (patch lists)
+ * Topologia indefinida (ou fora da faixa) -> tipo 0, igual a UNDEFINED. */
+#define TOPO_PKT_HEADER 0xc0009e00u
+
+static uint64_t topo_packet(UINT topo)
+{
+    uint32_t prim, k = 1, cp = 0;
+    if (topo >= 33 && topo <= 64) { cp = topo - 32; k = cp; prim = 9; }
+    else if (topo == 5) prim = 6;                                   /* TRIANGLESTRIP */
+    else if (topo == 6) prim = 5;
+    else if ((topo >= 1 && topo <= 4) || (topo >= 10 && topo <= 28)) prim = topo;
+    else prim = 0;
+    if (topo >= 10 && topo <= 13) k = 2;                            /* *_ADJ */
+    return (uint64_t)(cp << 20 | prim << 9 | 0x100 | (256 / k - 1)) << 32 | TOPO_PKT_HEADER;
+}
 #define CTX_TOPO_PACKET 0x170
 #define CTX_DIRTY       0x168
 #define CTX_DIRTY_TOPO  0x46
@@ -124,7 +122,7 @@ static const uint64_t topo_packets[65] = {
 void ctx_IASetPrimitiveTopology(void *real, UINT topo)
 {
     uint8_t *c = real;
-    *(uint64_t *)(c + CTX_TOPO_PACKET) = topo < 65 ? topo_packets[topo] : topo_packets[0];
+    *(uint64_t *)(c + CTX_TOPO_PACKET) = topo_packet(topo);
     *(volatile uint32_t *)(c + CTX_DIRTY) |= CTX_DIRTY_TOPO;
 }
 
