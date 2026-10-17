@@ -1457,6 +1457,25 @@ static HRESULT fm6_DXGIXSetVLineNotification(UINT counter, UINT line, HANDLE eve
     return S_OK;
 }
 
+/* XSAPI do FM6 (ctor do rastreador de chamadas, xsapi+0x5bde3) apaga d:\callHistoryJson.tmp e ignora o
+   retorno. d: = armazenamento local persistente, que o manifesto do FM6 nao declara -> no console falha;
+   o mapeador do Azimuth (0x1400b86f0: G:, T:, GAME:, letras >= H:) lanca "Unmapped host/device path". */
+static BOOL (WINAPI *az_DeleteFileW)(const wchar_t *path);
+
+static int is_d_drive(const wchar_t *p)
+{
+    return p && (p[0] | 0x20) == L'd' && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/');
+}
+
+static BOOL WINAPI fm6_DeleteFileW(const wchar_t *path)
+{
+    if (is_d_drive(path)) {
+        SetLastError(ERROR_PATH_NOT_FOUND);
+        return FALSE;
+    }
+    return az_DeleteFileW(path);
+}
+
 static FARPROC hook_resolver(const uint8_t *entry)
 {
     FARPROC p = orig_resolver(entry);
@@ -1479,6 +1498,10 @@ static FARPROC hook_resolver(const uint8_t *entry)
     } else if (!p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXSetVLineNotification")) {
         wlog("d3d: d3d11_x.dll!DXGIXSetVLineNotification -> evento a 60 Hz");
         p = (FARPROC)fm6_DXGIXSetVLineNotification;
+    } else if (p && str_is(entry, "kernelx.dll") && str_is(entry + 0x20, "DeleteFileW")) {
+        if (!az_DeleteFileW) wlog("kernelx.dll!DeleteFileW -> d:\\ falha com ERROR_PATH_NOT_FOUND (sem PLS)");
+        az_DeleteFileW = (BOOL (WINAPI *)(const wchar_t *))p;
+        p = (FARPROC)fm6_DeleteFileW;
     }
     if (!p) p = import_fallback(entry);
     if (!p) {

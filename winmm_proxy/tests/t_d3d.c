@@ -548,3 +548,21 @@ TEST(fm6_vline_notification_signals)
     CHECK_EQ(WaitForSingleObject(ev, 60), WAIT_TIMEOUT);
     CloseHandle(ev);
 }
+
+/* FM6: DeleteFileW em d:\ (armazenamento persistente que o FM6 nao declara) falha sem chamar o Azimuth */
+static int az_delete_calls;
+static BOOL WINAPI fake_az_delete(const wchar_t *path) { (void)path; az_delete_calls++; return TRUE; }
+
+TEST(fm6_delete_file_d_drive_fails)
+{
+    az_DeleteFileW = fake_az_delete;
+    az_delete_calls = 0;
+    SetLastError(0);
+    CHECK(!fm6_DeleteFileW(L"d:\\callHistoryJson.tmp"));
+    CHECK_EQ(GetLastError(), ERROR_PATH_NOT_FOUND);
+    CHECK(!fm6_DeleteFileW(L"D:/x.tmp"));
+    CHECK_EQ(az_delete_calls, 0);
+    CHECK(fm6_DeleteFileW(L"T:\\x.tmp") && fm6_DeleteFileW(L"d:") && fm6_DeleteFileW(L"dx\\y"));
+    CHECK_EQ(az_delete_calls, 3);
+    az_DeleteFileW = NULL;
+}

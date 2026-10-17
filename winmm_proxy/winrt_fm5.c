@@ -210,9 +210,93 @@ static int install_template_hook(void)
     return 1;
 }
 
+/* ------------------------------------------------------------------------ */
+/* ConnectedStorageSpace.GetForMachineAsync() (FM6: game+0x22a045, na init)   */
+/* LocalSpaceStatics do Azimuth (vtable 0x1402b65e8): slot 6 = GetForUserAsync(user) -> LocalSpace    */
+/* unico em saves\player-1; slots 7-9 = stubs fatais (o FH2 nao usa); slot 8 (so o out) = "local     */
+/* machine storage" -> STOPPED. Aqui: o mesmo LocalSpace do Azimuth (vtable/layout que o slot 6       */
+/* monta), unico, em saves\machine, e a operacao assincrona do proprio Azimuth.                        */
+/* ------------------------------------------------------------------------ */
+#define RVA_STATICS_SLOT6   0x2b6618   /* GetForUserAsync = 0x1899a0 (conferido) */
+#define RVA_STATICS_MACHINE 0x2b6628   /* slot 8 */
+#define RVA_MACHINE_STUB    0x189bd0
+#define RVA_PLAYER_DIR      0x187040   /* (wstring *out) -> ...\saves\player-1, cria as pastas */
+#define RVA_WSTR_INIT       0x008310   /* (wstring *s, ptr, len) */
+#define RVA_WSTR_FREE       0x008d50
+#define RVA_MALLOC          0x22f664
+#define RVA_LOCAL_SPACE_VT  0x2b6830
+#define RVA_LOCAL_SPACE_CLS 0x2b62c0   /* L"Windows.Xbox.Storage.ConnectedStorageSpace" */
+#define RVA_LOCAL_SPACE_OP  0x18aa20   /* (space) -> IAsyncOperation (Azimuth.LocalStorageOperation) */
+
+typedef struct { union { wchar_t buf[8]; wchar_t *ptr; }; size_t size, cap; } MsvcWstr;
+typedef struct { const void *vtbl; uint32_t refs, pad; const wchar_t *cls; MsvcWstr path; } LocalSpace;
+
+extern void write_mem(void *dst, const void *src, size_t len);
+
+static LocalSpace *machine_space;
+static SRWLOCK machine_lock = SRWLOCK_INIT;
+
+static LocalSpace *machine_space_create(void)
+{
+    MsvcWstr player;
+    wchar_t dir[MAX_PATH];
+    const wchar_t *p;
+    size_t n;
+    LocalSpace *s;
+    memset(&player, 0, sizeof player);
+    ((void (*)(MsvcWstr *))(g_base + RVA_PLAYER_DIR))(&player);
+    p = player.cap > 7 ? player.ptr : player.buf;
+    for (n = player.size; n && p[n - 1] != L'\\'; n--) ;
+    if (n && n + 8 <= MAX_PATH) { memcpy(dir, p, n * 2); wcscpy(dir + n, L"machine"); }
+    ((void (*)(MsvcWstr *))(g_base + RVA_WSTR_FREE))(&player);
+    if (!n || n + 8 > MAX_PATH) { wlog("storage: pasta do jogador inesperada"); return NULL; }
+    if (!CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+        wlog("storage: CreateDirectory %ls falhou (%lu)", dir, GetLastError());
+        return NULL;
+    }
+    s = ((void *(*)(size_t))(g_base + RVA_MALLOC))(sizeof *s);
+    if (!s) return NULL;
+    s->vtbl = g_base + RVA_LOCAL_SPACE_VT;
+    s->refs = 1;
+    s->pad = 0;
+    s->cls = (const wchar_t *)(g_base + RVA_LOCAL_SPACE_CLS);
+    memset(&s->path, 0, sizeof s->path);
+    ((void (*)(MsvcWstr *, const wchar_t *, size_t))(g_base + RVA_WSTR_INIT))(&s->path, dir, wcslen(dir));
+    wlog("storage: GetForMachineAsync -> LocalSpace em %ls", dir);
+    return s;
+}
+
+static long STDMETHODCALLTYPE local_machine_async(void *self, void **out)
+{
+    long hr = S_OK;
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    AcquireSRWLockExclusive(&machine_lock);
+    if (!machine_space) machine_space = machine_space_create();
+    if (machine_space) *out = ((void *(*)(void *))(g_base + RVA_LOCAL_SPACE_OP))(machine_space);
+    else hr = E_FAIL;
+    ReleaseSRWLockExclusive(&machine_lock);
+    return hr;
+}
+
+static int install_machine_storage(void)
+{
+    void *fn = (void *)local_machine_async;
+    if (*(void **)(g_base + RVA_STATICS_MACHINE) != g_base + RVA_MACHINE_STUB ||
+        *(void **)(g_base + RVA_STATICS_SLOT6) != g_base + 0x1899a0 ||
+        !bytes_match(g_base + RVA_LOCAL_SPACE_CLS, "570069006e0064006f0077007300", 14)) {
+        wlog("LocalSpaceStatics %#x: nao confere", RVA_STATICS_MACHINE);
+        return 0;
+    }
+    write_mem(g_base + RVA_STATICS_MACHINE, &fn, sizeof fn);
+    wlog("patch %#x: LocalSpaceStatics::GetForMachineAsync -> saves\\machine", RVA_STATICS_MACHINE);
+    return 1;
+}
+
 int winrt_install(void)
 {
     return hook_function(RVA_GET_FACTORY, "48895c2420555657" "4881ec20010000", GET_FACTORY_STOLEN,
                          (void *)hook_get_factory, (void **)&orig_get_factory) &&
-           install_template_hook();
+           install_template_hook() && install_machine_storage();
 }

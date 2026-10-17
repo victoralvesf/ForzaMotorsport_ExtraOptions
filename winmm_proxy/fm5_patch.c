@@ -204,7 +204,7 @@ int bytes_match(const uint8_t *p, const char *hex, size_t len)
     return memcmp(p, buf, len) == 0;
 }
 
-static void write_mem(void *dst, const void *src, size_t len)
+void write_mem(void *dst, const void *src, size_t len)
 {
     DWORD old;
     VirtualProtect(dst, len, PAGE_EXECUTE_READWRITE, &old);
