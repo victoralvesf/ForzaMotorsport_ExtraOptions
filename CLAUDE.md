@@ -57,6 +57,9 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
   with RESULTADO and the next error) and update `99_proximos_passos_historico.txt`; then **commit** the code
   (docs stay local). Large/generated files go in `.gitignore`, and so does any new
   file/folder of internal research, derived from the game/Azimuth binaries, or belonging to Azimuth: never `git add` those.
+- **Never commit code from Azimuth or Forza** (MIT covers only our code): no decompiled/disassembled snippets, Ghidra
+  output or copied data in source, comments, tests or docs. Allowed: addresses/offsets, short byte signatures checked
+  before patching, hashes, and our own prose descriptions.
 - Commit messages: **English, Conventional Commits** (`type(scope): summary`, e.g. `fix(d3d): ...`, `feat(ini): ...`,
   `ci: ...`, `docs: ...`, `test: ...`, `chore: ...`; scopes like `d3d`, `xg`, `audio`, `winrt`, `patch`, `ini`, `tests`).
 - Push only `main`. The local branch `historico-local` has the old history (with decomps) and must never be pushed.
