@@ -32,3 +32,6 @@ __pycache__/
 *.pyc
 captures/
 screenshots/
+
+# Claude Code local settings (per user)
+.claude/settings.local.json

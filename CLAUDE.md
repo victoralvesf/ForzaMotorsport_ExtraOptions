@@ -54,8 +54,13 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
 - Local only (`.gitignore`), never in the public repository: `docs\` (whole folder), `data\` (Azimuth's folder),
   `car_model_report\` (internal research), `tools\sessoes_antigas\`, `*.pkl`, `game_binaries\`, `ghidra\`, `azimuth.exe`.
 - At the end of each step: record the findings in the topic's `docs\contexto\` file (section "PASSO 8 (cont. N)"
-  with RESULTADO and the next error) and update `99_proximos_passos_historico.txt`; then **commit** (message in
-  Portuguese) with the code (docs stay local). Large/generated files go in `.gitignore`.
+  with RESULTADO and the next error) and update `99_proximos_passos_historico.txt`; then **commit** the code
+  (docs stay local). Large/generated files go in `.gitignore`, and so does any new
+  file/folder of internal research, derived from the game/Azimuth binaries, or belonging to Azimuth: never `git add` those.
+- Commit messages: **English, Conventional Commits** (`type(scope): summary`, e.g. `fix(d3d): ...`, `feat(ini): ...`,
+  `ci: ...`, `docs: ...`, `test: ...`, `chore: ...`; scopes like `d3d`, `xg`, `audio`, `winrt`, `patch`, `ini`, `tests`).
+- Push only `main`. The local branch `historico-local` has the old history (with decomps) and must never be pushed.
+  Once pushed, a commit is never amended/rewritten: fixes go in new commits.
 - Don't take a desktop screenshot when the game is not in the foreground.
 
 ## Reference files (`docs\contexto\`)
