@@ -499,3 +499,52 @@ TEST(private_data_rvas_match_fm5_exe)
           (r[-6] == 0xff && (r[-5] & 0x38) == 0x10));
     pe_unmap(g);
 }
+
+/* entrada do resolvedor: dois std::string do MSVC (dll em +0, nome em +0x20) */
+static void set_msvc_str(uint8_t *s, const char *v)
+{
+    size_t n = strlen(v);
+    memset(s, 0, 0x20);
+    if (n > 15) { *(const char **)s = v; *(size_t *)(s + 0x18) = n; }
+    else { memcpy(s, v, n); *(size_t *)(s + 0x18) = 15; }
+    *(size_t *)(s + 0x10) = n;
+}
+
+/* imports ausentes no Azimuth -> DLL real com o mesmo nome; o resto continua sem resolucao */
+TEST(import_fallback_forwards_to_real_dll)
+{
+    uint8_t e[0x40];
+    HMODULE k32 = GetModuleHandleA("kernel32.dll"), cb = LoadLibraryA("combase.dll");
+    set_msvc_str(e, "kernelx.dll"); set_msvc_str(e + 0x20, "GetThreadId");
+    CHECK(import_fallback(e) == GetProcAddress(k32, "GetThreadId"));
+    CHECK(import_fallback(e) != NULL);
+    set_msvc_str(e + 0x20, "GlobalMemoryStatusEx");
+    CHECK(import_fallback(e) == GetProcAddress(k32, "GlobalMemoryStatusEx"));
+    set_msvc_str(e + 0x20, "DuplicateHandle");
+    CHECK(import_fallback(e) == GetProcAddress(k32, "DuplicateHandle"));
+    set_msvc_str(e + 0x20, "GetLocalTime");
+    CHECK(import_fallback(e) == GetProcAddress(k32, "GetLocalTime"));
+    set_msvc_str(e + 0x20, "CreateFileA");
+    CHECK(import_fallback(e) == NULL);
+    set_msvc_str(e, "combase.dll"); set_msvc_str(e + 0x20, "StringFromGUID2");
+    CHECK(cb && import_fallback(e) == GetProcAddress(cb, "StringFromGUID2") && import_fallback(e));
+    set_msvc_str(e + 0x20, "GetThreadId");
+    CHECK(import_fallback(e) == NULL);
+}
+
+/* vline: o evento registrado e sinalizado periodicamente (~60 Hz); evento nulo desliga */
+TEST(fm6_vline_notification_signals)
+{
+    HANDLE ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    DWORD t0, n = 0;
+    CHECK_EQ(fm6_DXGIXSetVLineNotification(VLINE_N, 0, ev), E_INVALIDARG);
+    CHECK_EQ(fm6_DXGIXSetVLineNotification(0, 0, ev), S_OK);
+    t0 = GetTickCount();
+    while (GetTickCount() - t0 < 200) if (WaitForSingleObject(ev, 100) == WAIT_OBJECT_0) n++;
+    CHECK(n >= 6 && n <= 16);                        /* 200 ms a 60 Hz ~ 12 */
+    CHECK_EQ(fm6_DXGIXSetVLineNotification(0, 0, NULL), S_OK);
+    Sleep(40);
+    ResetEvent(ev);
+    CHECK_EQ(WaitForSingleObject(ev, 60), WAIT_TIMEOUT);
+    CloseHandle(ev);
+}

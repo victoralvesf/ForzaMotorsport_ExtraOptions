@@ -136,6 +136,8 @@ TEST(apply_patches_skips_fm6)
     hook_apply_patches(img, opt);
     CHECK_EQ(orig_apply_calls, 0);
     CHECK(log_has("FM6"));
+    CHECK(slot0_game == game && slot0_n == 329 && game_tls_pending);   /* sites do slot 0 para o 1o import */
+    slot0_n = 0; game_tls_pending = 0;
     *(void **)(az + RVA_GAME_RECORD) = NULL;
     hook_apply_patches(img, opt);
     CHECK_EQ(orig_apply_calls, 1);
@@ -186,6 +188,91 @@ TEST(fm6_tls_template_applied)
     /* template ja zerado: nada pendente */
     take_tls_template(img);
     CHECK(!game_tls_pending);
+    dump_log_on_fail();
+}
+
+/* stubs do TLS "slot 0": mov T, gs:[0x58] ; lea T, [T + indice*8] ; ret */
+TEST(tls_slot0_stub_encoding)
+{
+    uint8_t s[32];
+    CHECK_EQ(slot0_stub(s, 0, 27), 17);
+    CHECK_HEX(s, "65488b042558000000488d80d8000000c3");             /* rax */
+    CHECK_EQ(slot0_stub(s, 12, 27), 18);
+    CHECK_HEX(s, "654c8b2425580000004d8da424d8000000c3");           /* r12 (SIB) */
+    CHECK_EQ(slot0_stub(s, 9, 3), 17);
+    CHECK_HEX(s, "654c8b0c25580000004d8d8918000000c3");             /* r9 */
+    CHECK_EQ(slot0_reg((const uint8_t *)"\x65\x4c\x8b\x24\x25\x58\x00\x00\x00"), 12);
+    CHECK_EQ(slot0_reg((const uint8_t *)"\x65\x48\x8b\x0c\x25\x58\x00\x00\x00"), 1);
+    CHECK_EQ(slot0_reg((const uint8_t *)"\x65\x48\x8b\x04\x25\x30\x00\x00\x00"), -1);   /* gs:[0x30] */
+    CHECK_EQ(slot0_reg((const uint8_t *)"\x65\x48\x8b\x44\x25\x58\x00\x00\x00"), -1);   /* outro modrm */
+}
+
+/* sites falsos executaveis: depois do redirect [T] = ThreadLocalStoragePointer[indice] */
+TEST(tls_slot0_redirect_runs)
+{
+    static const uint32_t sites[3] = { 0x1100, 0x1200, 0x1300 };
+    uint8_t *img = t_rwx(0x2000);
+    IMAGE_DOS_HEADER *dos = (void *)img;
+    IMAGE_NT_HEADERS64 *nt = (void *)(img + 0x80);
+    void **tlsp = (void **)__readgsqword(0x58);
+    uint64_t (*f)(void);
+    int32_t rel;
+    memset(img, 0xcc, 0x2000);
+    dos->e_lfanew = 0x80;
+    nt->OptionalHeader.SizeOfImage = 0x2000;
+    memcpy(img + 0x1100, "\x65\x48\x8b\x04\x25\x58\x00\x00\x00\xc3", 10);                  /* rax ; ret */
+    memcpy(img + 0x1200, "\x65\x48\x8b\x0c\x25\x58\x00\x00\x00\x48\x89\xc8\xc3", 13);      /* rcx ; mov rax,rcx */
+    memcpy(img + 0x1300, "\x65\x4c\x8b\x1c\x25\x58\x00\x00\x00\x4c\x89\xd8\xc3", 13);      /* r11 ; mov rax,r11 */
+    log_capture();
+    slot0_game = img; slot0_sites = sites; slot0_n = 3;
+    tls_slot0_redirect(0);
+    CHECK_EQ(img[0x1100], 0xe8);
+    CHECK_HEX(img + 0x1105, "0f1f4000c3");
+    memcpy(&rel, img + 0x1101, 4);
+    CHECK_HEX(img + 0x1105 + rel, "65488b04255800000048");                              /* stub do rax */
+    f = (void *)(img + 0x1100); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[0]);
+    f = (void *)(img + 0x1200); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[0]);
+    tls_slot0_redirect(1);                                                                 /* ja patchado: nao confere */
+    CHECK(log_has("nao confere; nenhum alterado"));
+    memcpy(img + 0x1100, "\x65\x48\x8b\x04\x25\x58\x00\x00\x00\xc3", 10);
+    memcpy(img + 0x1200, "\x65\x48\x8b\x0c\x25\x58\x00\x00\x00\x48\x89\xc8\xc3", 13);
+    memcpy(img + 0x1300, "\x65\x4c\x8b\x1c\x25\x58\x00\x00\x00\x4c\x89\xd8\xc3", 13);
+    tls_slot0_redirect(5);
+    f = (void *)(img + 0x1100); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[5]);
+    f = (void *)(img + 0x1200); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[5]);
+    f = (void *)(img + 0x1300); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[5]);
+    CHECK(log_has("TLS: 3 leituras do slot 0 do jogo -> indice 5 (3 stubs"));
+    /* um site que nao confere: nenhum alterado */
+    memcpy(img + 0x1100, "\x65\x48\x8b\x04\x25\x58\x00\x00\x00\xc3", 10);
+    memcpy(img + 0x1300, "\x65\x48\x8b\x04\x25\x30\x00\x00\x00\xc3", 10);
+    tls_slot0_redirect(5);
+    CHECK_HEX(img + 0x1100, "65488b0425580000");
+    slot0_n = 0;
+    dump_log_on_fail();
+}
+
+/* exe real do FM6: todos os sites da tabela sao "mov T, gs:[0x58]" e viram call para o stub do mesmo T */
+TEST(fm6_tls_slot0_sites_match_exe)
+{
+    uint8_t *game = pe_map(FM6_EXE, NULL), regs[FM6_TLS_SLOT0_N];
+    size_t i, ok = 0;
+    if (!game) { test_skip("exe do FM6 ausente"); return; }
+    for (i = 0; i < FM6_TLS_SLOT0_N; i++) regs[i] = (uint8_t)slot0_reg(game + fm6_tls_slot0[i]);
+    for (i = 0; i < FM6_TLS_SLOT0_N; i++) CHECK(regs[i] < 16);
+    log_capture();
+    slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
+    tls_slot0_redirect(27);
+    for (i = 0; i < FM6_TLS_SLOT0_N; i++) {
+        uint8_t *at = game + fm6_tls_slot0[i], *stub;
+        int32_t rel;
+        memcpy(&rel, at + 1, 4);
+        stub = at + 5 + rel;
+        ok += at[0] == 0xe8 && !memcmp(at + 5, "\x0f\x1f\x40\x00", 4) && slot0_reg(stub) == regs[i] &&
+              stub[10] == 0x8d && *(uint32_t *)(stub + ((regs[i] & 7) == 4 ? 13 : 12)) == 27 * 8;
+    }
+    CHECK_EQ(ok, FM6_TLS_SLOT0_N);
+    slot0_n = 0;
+    pe_unmap(game);
     dump_log_on_fail();
 }
 

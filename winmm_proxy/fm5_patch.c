@@ -628,6 +628,122 @@ static void take_tls_template(uint8_t *game)
 typedef LONG (WINAPI *nt_query_thread_fn)(HANDLE, int, void *, ULONG, ULONG *);
 typedef struct { LONG status; PVOID teb; HANDLE pid, tid; ULONG_PTR affinity; LONG prio, base_prio; } THREAD_BASIC_INFO;
 
+/* ------------------------------------------------------------------------ */
+/* TLS no modelo "exe" do XDK: o FM6 le TEB.ThreadLocalStoragePointer[0] direto (no console o titulo */
+/* e o exe, indice 0), sem _tls_index; no PC o slot 0 e o bloco do azimuth.exe (epoca dos statics   */
+/* do MSVC em +0x10) -> o jogo pisava nele e o Azimuth pulava inits (WindowsDeleteString na init do */
+/* CRT). Cada "mov T, gs:[0x58]" desses sites (tools/tls_slot0.py) vira "call stub_T; nop4"; o stub */
+/* faz T = &ThreadLocalStoragePointer[indice do azimuth-tls.dll], entao [T] = bloco do jogo. Sem     */
+/* efeito em flags; os 72 sites que usam _tls_index ja caem nesse bloco.                             */
+/* ------------------------------------------------------------------------ */
+static const uint32_t fm6_tls_slot0[] = {
+    0x0eda53, 0x0edf0e, 0x0ee72e, 0x0efdc3, 0x0f6ed3, 0x0f7d37, 0x0fa003, 0x0fac9c,
+    0x0fc1d9, 0x0fdef8, 0x1068a1, 0x106aa1, 0x107af4, 0x109b6c, 0x10a3cc, 0x113e8e,
+    0x114057, 0x116ea1, 0x1171e6, 0x1174e5, 0x1195c3, 0x11c4d6, 0x11d3db, 0x11d6d9,
+    0x12400e, 0x124db2, 0x12524d, 0x127c49, 0x12817c, 0x129fe6, 0x12a28e, 0x12c4d0,
+    0x12d175, 0x12d311, 0x12d5d1, 0x12e1cb, 0x12e35b, 0x12f855, 0x135c6f, 0x136413,
+    0x141b0a, 0x14799e, 0x148e0e, 0x15492f, 0x15951d, 0x159a64, 0x15a68e, 0x15a767,
+    0x15ad1c, 0x1611fb, 0x1616ff, 0x163442, 0x1634b8, 0x164d20, 0x164e8c, 0x164edc,
+    0x1655f4, 0x1658b0, 0x166375, 0x16673b, 0x169074, 0x16a005, 0x16b4d4, 0x16cbca,
+    0x16ccd8, 0x16f84d, 0x174fb1, 0x17520b, 0x188fde, 0x189269, 0x18b429, 0x18bc2c,
+    0x18c366, 0x18c54f, 0x18c75a, 0x18cd3e, 0x18d36a, 0x18df46, 0x18ea1f, 0x18f267,
+    0x190c1b, 0x1a0b12, 0x1a0c49, 0x1a0dd1, 0x1a0f96, 0x1a364f, 0x1a66bd, 0x1a6eb6,
+    0x1bc74f, 0x1e0147, 0x1f7a8a, 0x1f94d5, 0x1fcebc, 0x1fd9e6, 0x1fecc5, 0x2047ce,
+    0x2049a1, 0x204fce, 0x205141, 0x205c98, 0x2064a9, 0x2067fc, 0x2075f8, 0x207a23,
+    0x209bdd, 0x20aa09, 0x20b519, 0x20bd03, 0x20cbe9, 0x20cf99, 0x20cfc4, 0x20cfea,
+    0x20d189, 0x20f8e0, 0x215143, 0x215b72, 0x21b5bf, 0x220f7d, 0x227b5f, 0x2286d6,
+    0x22876c, 0x23518a, 0x23c2b6, 0x241e46, 0x2422ec, 0x244b15, 0x27d0d8, 0x287723,
+    0x2b3697, 0x2bf824, 0x2c3964, 0x2c4fea, 0x2eacd8, 0x2f17fe, 0x2f2d18, 0x2f7c44,
+    0x2f7d78, 0x2f7f5e, 0x2f881c, 0x2faaac, 0x2fb974, 0x2fc04e, 0x304b40, 0x30a661,
+    0x30ce47, 0x30dbd5, 0x317ebf, 0x317f50, 0x3286ed, 0x334502, 0x335187, 0x3360fd,
+    0x3442bc, 0x344b4c, 0x346fca, 0x347310, 0x3485c1, 0x348eda, 0x3544f5, 0x354526,
+    0x355746, 0x35746a, 0x35f7fe, 0x35f8c7, 0x35f9ea, 0x360c1e, 0x363b77, 0x364b6a,
+    0x364bb6, 0x373e9e, 0x37cc87, 0x37cea8, 0x381aea, 0x3839df, 0x397b3c, 0x398cd5,
+    0x39f4ca, 0x3a3762, 0x3a41aa, 0x3a445d, 0x3a4a23, 0x3a69c4, 0x3a6ed6, 0x3af5eb,
+    0x3be292, 0x3be731, 0x3c263e, 0x3c431a, 0x3c45d8, 0x3e623d, 0x3e6ab2, 0x3e6d69,
+    0x3e6e65, 0x40cb02, 0x418e5c, 0x429465, 0x429767, 0x42983b, 0x42a2b7, 0x42b7af,
+    0x42b8bb, 0x42b9c7, 0x42bd57, 0x42bddb, 0x42be4f, 0x42bf33, 0x42bfa7, 0x42c0b7,
+    0x42c1f7, 0x42c26b, 0x42e126, 0x42ef3c, 0x434851, 0x4416df, 0x443212, 0x449220,
+    0x44e2b5, 0x44f7c2, 0x45481c, 0x4619f7, 0x4707fb, 0x472886, 0x4a5d80, 0x4b0b78,
+    0x4d1cbe, 0x4fcaf2, 0x541e0f, 0x541ec7, 0x563ce5, 0x5724e7, 0x577701, 0x587746,
+    0x589b0f, 0x5957a0, 0x5c0b57, 0x5c47ce, 0x5d135a, 0x5d183c, 0x5d19d5, 0x5d1e81,
+    0x5da53c, 0x5daf31, 0x5eab06, 0x5ec0e0, 0x5ec7e7, 0x5efb95, 0x5f0659, 0x5f09cf,
+    0x5f1375, 0x5f142e, 0x5f1510, 0x5f1bad, 0x5f5469, 0x83c660, 0x84ff60, 0x93a0a5,
+    0x93a0db, 0x93a10c, 0x9b582f, 0x9f40ce, 0x9f5d31, 0x9f8abd, 0x9fb0ca, 0x9fbaa8,
+    0x9fc088, 0x9fc548, 0x9fd9e5, 0x9fdda2, 0xa066b8, 0xa0698e, 0xa3466b, 0xa4dc13,
+    0xa7239f, 0xcfeb1b, 0xd04132, 0xd406b3, 0xd41465, 0xd4fd92, 0xd54d83, 0xd967bc,
+    0xd967ec, 0xd96818, 0xd9d025, 0xd9ece9, 0xda64c0, 0xda6f0f, 0xda700a, 0xda7983,
+    0xdaa824, 0xdabe9d, 0xdac3a9, 0xdb69dd, 0xdc1679, 0xe02dfa, 0xe1b9c3, 0xe1ba57,
+    0xe1baeb, 0xe237a2, 0xe23e49, 0xe23ee9, 0xe23f89, 0xe24029, 0xe240f7, 0xe3ccc1,
+    0xe421f6, 0xe4b4b6, 0xe54bae, 0xe551c6, 0xe562d5, 0xe63633, 0xe64582, 0xe6524b,
+    0xe6531d, 0xe66af6, 0xe670f5, 0xe6751e, 0xe6ac75, 0xe6afec, 0xe72caf, 0xe785a9,
+    0xedd85c, 0xedee70, 0xedef09, 0xef45bc, 0xf094d6, 0xf0ae08, 0xf4aaef, 0xf4e018,
+    0xf4e3e4,
+};
+#define FM6_TLS_SLOT0_N (sizeof fm6_tls_slot0 / sizeof *fm6_tls_slot0)   /* 329 */
+static uint8_t *slot0_game;
+static const uint32_t *slot0_sites;
+static size_t slot0_n;
+
+/* registro destino de "65 48/4c 8b XX 25 58000000" (mov T, gs:[0x58]) ou -1 */
+static int slot0_reg(const uint8_t *p)
+{
+    if (p[0] != 0x65 || (p[1] & ~4) != 0x48 || p[2] != 0x8b || (p[3] & 0xc7) != 0x04 || p[4] != 0x25 ||
+        p[5] != 0x58 || p[6] || p[7] || p[8]) return -1;
+    return (p[1] & 4) << 1 | (p[3] >> 3 & 7);
+}
+
+/* mov T, gs:[0x58] ; lea T, [T + indice*8] ; ret */
+static size_t slot0_stub(uint8_t *s, int r, DWORD index)
+{
+    size_t n = 0;
+    uint32_t disp = index * 8;
+    s[n++] = 0x65; s[n++] = 0x48 | (r >> 3) << 2; s[n++] = 0x8b; s[n++] = 0x04 | (r & 7) << 3;
+    s[n++] = 0x25; s[n++] = 0x58; s[n++] = 0; s[n++] = 0; s[n++] = 0;
+    s[n++] = 0x48 | (r >> 3) << 2 | (r >> 3); s[n++] = 0x8d; s[n++] = 0x80 | (r & 7) << 3 | (r & 7);
+    if ((r & 7) == 4) s[n++] = 0x24;
+    memcpy(s + n, &disp, 4); n += 4;
+    s[n++] = 0xc3;
+    return n;
+}
+
+/* memoria executavel a menos de 2 GB da imagem (para call rel32) */
+static uint8_t *alloc_near(uint8_t *mod, size_t size)
+{
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(mod + ((IMAGE_DOS_HEADER *)mod)->e_lfanew);
+    uintptr_t a = ((uintptr_t)mod + nt->OptionalHeader.SizeOfImage + 0xffff) & ~(uintptr_t)0xffff;
+    uintptr_t end = (uintptr_t)mod + 0x70000000;
+    for (; a < end; a += 0x10000) {
+        void *p = VirtualAlloc((void *)a, size, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+        if (p) return p;
+    }
+    return NULL;
+}
+
+static void tls_slot0_redirect(DWORD index)
+{
+    uint8_t *stubs, *stub[16] = { 0 };
+    size_t i, used = 0;
+    if (!slot0_n) return;
+    for (i = 0; i < slot0_n; i++)
+        if (slot0_reg(slot0_game + slot0_sites[i]) < 0) {
+            wlog("TLS: site do slot 0 em game+%#x nao confere; nenhum alterado", slot0_sites[i]);
+            return;
+        }
+    if (!(stubs = alloc_near(slot0_game, 16 * 32))) { wlog("TLS: sem memoria perto do jogo para os stubs"); return; }
+    for (i = 0; i < slot0_n; i++) {
+        uint8_t *at = slot0_game + slot0_sites[i], code[9] = { 0xe8, 0, 0, 0, 0, 0x0f, 0x1f, 0x40, 0x00 };
+        int r = slot0_reg(at);
+        int32_t rel;
+        if (!stub[r]) { stub[r] = stubs + used * 32; slot0_stub(stub[r], r, index); used++; }
+        rel = (int32_t)(stub[r] - (at + 5));
+        memcpy(code + 1, &rel, 4);
+        write_mem(at, code, sizeof code);
+    }
+    FlushInstructionCache(GetCurrentProcess(), stubs, 16 * 32);
+    wlog("TLS: %zu leituras do slot 0 do jogo -> indice %lu (%zu stubs em %p)", slot0_n, index, used, (void *)stubs);
+}
+
 void game_tls_apply(void)
 {
     HMODULE helper;
@@ -647,6 +763,7 @@ void game_tls_apply(void)
         return;
     }
     write_mem((void *)(uintptr_t)t->StartAddressOfRawData, game_tls, game_tls_size);
+    tls_slot0_redirect(*index);
     snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     te.dwSize = sizeof te;
     if (snap != INVALID_HANDLE_VALUE && Thread32First(snap, &te)) {
@@ -707,6 +824,8 @@ static void hook_apply_patches(void *image, const void *options)
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM6 em %p, sem patches", game);
         take_tls_template(game);
+        slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
+        game_tls_pending = 1;
         return;
     }
     orig_apply_patches(image, options);

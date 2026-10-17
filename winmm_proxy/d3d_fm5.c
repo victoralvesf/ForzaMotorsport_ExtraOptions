@@ -16,6 +16,7 @@ extern uint8_t *g_base;
 extern uint8_t *g_game;
 extern void wlog(const char *fmt, ...);
 extern int is_fm5(void);
+extern int is_fm6(void);
 extern void game_tls_apply(void);
 
 /* ---- RVAs no azimuth.exe ---- */
@@ -1395,28 +1396,91 @@ static FARPROC wp_hook(const uint8_t *entry, FARPROC p)
 typedef FARPROC (*resolver_fn)(const uint8_t *entry);
 static resolver_fn orig_resolver;
 
+/* imports sem entrada no HLE do Azimuth (o FH2 nao usa), com a mesma assinatura do Win32 -> DLL real:
+   GlobalMemoryStatusEx = thread de liberacao de memoria do FM5 (game+0x683b30), ullAvailPhys;
+   GetThreadId (game+0x563ce5) e DuplicateHandle = FM6; StringFromGUID2/GetLocalTime = Xbox.Services.dll do FM6. */
+static const struct { const char *dll, *name, *real; } import_fwd[] = {
+    { "kernelx.dll", "GlobalMemoryStatusEx", "kernel32.dll" },
+    { "kernelx.dll", "GetThreadId", "kernel32.dll" },
+    { "kernelx.dll", "DuplicateHandle", "kernel32.dll" },
+    { "kernelx.dll", "GetLocalTime", "kernel32.dll" },
+    { "combase.dll", "StringFromGUID2", "combase.dll" },
+};
+
+static FARPROC import_fallback(const uint8_t *entry)
+{
+    size_t i;
+    for (i = 0; i < sizeof import_fwd / sizeof *import_fwd; i++)
+        if (str_is(entry, import_fwd[i].dll) && str_is(entry + 0x20, import_fwd[i].name)) {
+            HMODULE m = LoadLibraryA(import_fwd[i].real);
+            wlog("%s!%s -> %s", import_fwd[i].dll, import_fwd[i].name, import_fwd[i].real);
+            return m ? GetProcAddress(m, import_fwd[i].name) : NULL;
+        }
+    return NULL;
+}
+
+/* DXGIXSetVLineNotification(contador, linha, evento): no console o evento e sinalizado quando o scanout
+   passa pela linha. Aqui: uma thread sinaliza os eventos registrados a 60 Hz (prazo por QPC). */
+#define VLINE_N 2
+static HANDLE vline_event[VLINE_N];
+static volatile LONG vline_started;
+
+static DWORD WINAPI vline_thread(void *arg)
+{
+    LARGE_INTEGER f, next, now, due;
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 2 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    int i;
+    (void)arg;
+    if (!timer) timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&next);
+    for (;;) {
+        next.QuadPart += f.QuadPart / 60;
+        QueryPerformanceCounter(&now);
+        if (next.QuadPart < now.QuadPart) next = now;
+        due.QuadPart = -(LONGLONG)((next.QuadPart - now.QuadPart) * 10000000 / f.QuadPart);
+        if (due.QuadPart && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
+        for (i = 0; i < VLINE_N; i++) {
+            HANDLE e = vline_event[i];
+            if (e) SetEvent(e);
+        }
+    }
+    return 0;
+}
+
+static HRESULT fm6_DXGIXSetVLineNotification(UINT counter, UINT line, HANDLE event)
+{
+    if (counter >= VLINE_N) return E_INVALIDARG;
+    vline_event[counter] = event;
+    wlog("d3d: DXGIXSetVLineNotification(%u, linha %u, evento %p) -> 60 Hz", counter, line, event);
+    if (event && !InterlockedExchange(&vline_started, 1)) CloseHandle(CreateThread(NULL, 0, vline_thread, NULL, 0, NULL));
+    return S_OK;
+}
+
 static FARPROC hook_resolver(const uint8_t *entry)
 {
     FARPROC p = orig_resolver(entry);
     game_tls_apply();   /* 1o import: azimuth-tls.dll ja carregado, jogo ainda nao rodou */
-    if (!is_fm5()) return p;
-    if (p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXPresentArray")) {
-        wlog("d3d: d3d11_x.dll!DXGIXPresentArray -> parametros de 12 dwords (XDK do FM5)");
-        return (FARPROC)fm5_DXGIXPresentArray;
+    if (is_fm5()) {
+        if (p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXPresentArray")) {
+            wlog("d3d: d3d11_x.dll!DXGIXPresentArray -> parametros de 12 dwords (XDK do FM5)");
+            return (FARPROC)fm5_DXGIXPresentArray;
+        }
+        if (p) return wp_hook(entry, p);
+        if (str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "D3D11CreateDevice")) {
+            wlog("d3d: d3d11_x.dll!D3D11CreateDevice -> ponte do FM5");
+            p = (FARPROC)fm5_D3D11CreateDevice;
+        } else if (str_is(entry, "xaudio2_9.dll") && str_is(entry + 0x20, "#1")) {
+            wlog("xaudio2: xaudio2_9.dll!#1 (XAudio2Create) -> CreateXAudio2Object do Azimuth");
+            p = (FARPROC)fm5_XAudio2Create;
+        }
+    } else if (!is_fm6()) {
+        return p;   /* FH2: exatamente o Azimuth */
+    } else if (!p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXSetVLineNotification")) {
+        wlog("d3d: d3d11_x.dll!DXGIXSetVLineNotification -> evento a 60 Hz");
+        p = (FARPROC)fm6_DXGIXSetVLineNotification;
     }
-    if (p) return wp_hook(entry, p);
-    if (str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "D3D11CreateDevice")) {
-        wlog("d3d: d3d11_x.dll!D3D11CreateDevice -> ponte do FM5");
-        p = (FARPROC)fm5_D3D11CreateDevice;
-    } else if (str_is(entry, "xaudio2_9.dll") && str_is(entry + 0x20, "#1")) {
-        wlog("xaudio2: xaudio2_9.dll!#1 (XAudio2Create) -> CreateXAudio2Object do Azimuth");
-        p = (FARPROC)fm5_XAudio2Create;
-    } else if (str_is(entry, "kernelx.dll") && str_is(entry + 0x20, "GlobalMemoryStatusEx")) {
-        /* ausente na tabela HLE do kernelx (o FH2 nao usa); o thread de liberacao de memoria do FM5
-           (game+0x683b30) consulta ullAvailPhys. Mesma assinatura do Win32. */
-        wlog("kernelx.dll!GlobalMemoryStatusEx -> kernel32");
-        p = GetProcAddress(GetModuleHandleA("kernel32.dll"), "GlobalMemoryStatusEx");
-    }
+    if (!p) p = import_fallback(entry);
     if (!p) {
         size_t nd, nn;
         const char *d = msvc_str(entry, &nd), *n = msvc_str(entry + 0x20, &nn);
