@@ -1177,6 +1177,67 @@ static long WINAPI fm5_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     return hr;
 }
 
+/* Device do FM6: o driver do OS "era" (EmbeddedXvd\...\umd.dll, vtable em .data 0x17f760) tem o mesmo layout
+   do driver do FH2 (0x16f2e0) slot a slot (tools\umd_vtdiff.py). Alguns metodos la sao triviais e no Azimuth sao
+   o stub fatal padrao (o FH2 nunca chama): ex. FM6 game+0x3a676c PlaceSwapChainView(0x14) = "ret" no console.
+   So os slots que ainda sao o stub padrao recebem o comportamento do driver. */
+#define RVA_STUB_SLOT(s)  (0xf5f30 + (uintptr_t)(s) * 0x100)   /* stub fatal padrao do slot s */
+static long dev_ret0(void) { return 0; }
+static long dev_notimpl(void) { return E_NOTIMPL; }
+static const struct { uint8_t slot; long (*fn)(void); } fm6_dev_trivial[] = {
+    { 0x1c, dev_notimpl },   /* OpenSharedResource */
+    { 0x1f, dev_ret0 },      /* CheckCounterInfo: ret */
+    { 0x28, dev_notimpl },   /* GetDeviceRemovedReason */
+    { 0x2a, dev_notimpl },   /* SetExceptionMode */
+    { 0x2b, dev_ret0 },      /* GetExceptionMode: xor eax,eax */
+    { 0x31, dev_notimpl },   /* OpenSharedResource1 */
+    { 0x32, dev_notimpl },   /* OpenSharedResourceByName */
+    { 0x38, dev_notimpl },   /* CreateCounterSet */
+    { 0x39, dev_notimpl },   /* CreateCounterSample */
+    { 0x50, dev_ret0 },      /* PlaceSwapChainView: ret */
+    { 0x51, dev_ret0 },      /* SetDebugFlags: xor eax,eax */
+};
+
+static int fm6_device_fixups(void **vt)
+{
+    size_t i;
+    int n = 0;
+    for (i = 0; i < sizeof fm6_dev_trivial / sizeof *fm6_dev_trivial; i++) {
+        int s = fm6_dev_trivial[i].slot;
+        if (vt[s] != g_base + RVA_STUB_SLOT(s)) continue;
+        vt[s] = (void *)fm6_dev_trivial[i].fn;
+        n++;
+    }
+    return n;
+}
+
+/* FM6 (OS "era", XDK posterior ao do FH2): D3D11CreateDevice(0, 1, 0, 0x4000000, {0xb100}, 1, 0x20011, ...) em
+   game+0x3a66f6, depois QI p/ ID3D11DeviceX e CreateDmaEngineContext no slot 0x3b (= layout do FH2). Device e
+   contexto do Azimuth entregues sem conversao de vtable nem proxy do contexto. */
+static long WINAPI fm6_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, UINT flags,
+                                         const UINT *levels, UINT nlevels, UINT sdk,
+                                         void **out_dev, UINT *out_level, void **out_ctx)
+{
+    uint32_t desc[16] = { 0x1000b, 0x4000000, 0, 0, 0, 0, 0x3f };
+    void *dev = NULL, *ctx = NULL;
+    long hr;
+
+    wlog("d3d: D3D11CreateDevice(adapter=%p type=%u flags=%#x levels=%u:%#x sdk=%#x)",
+         adapter, type, flags, nlevels, levels && nlevels ? levels[0] : 0, sdk);
+    (void)sw;
+    if (out_dev) *out_dev = NULL;
+    if (out_ctx) *out_ctx = NULL;
+    hr = ((createx_fn)(g_base + RVA_CREATE_DEVICEX))(desc, &dev, &ctx);
+    wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p contexto=%p (FM6, layout do FH2)", hr, dev, ctx);
+    if (hr < 0) return hr;
+    wlog("d3d: device do FM6: %d slots triviais do driver do console no lugar do stub fatal",
+         fm6_device_fixups(*(void ***)dev));
+    if (out_level) *out_level = 0xb100;
+    if (out_dev) *out_dev = dev;
+    if (out_ctx) *out_ctx = ctx;
+    return hr;
+}
+
 /* ------------------------------------------------------------------------ */
 /* XAudio2Create                                                              */
 /* ------------------------------------------------------------------------ */
@@ -1498,6 +1559,9 @@ static FARPROC hook_resolver(const uint8_t *entry)
     } else if (!p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXSetVLineNotification")) {
         wlog("d3d: d3d11_x.dll!DXGIXSetVLineNotification -> evento a 60 Hz");
         p = (FARPROC)fm6_DXGIXSetVLineNotification;
+    } else if (!p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "D3D11CreateDevice")) {
+        wlog("d3d: d3d11_x.dll!D3D11CreateDevice -> D3D11XCreateDeviceX do Azimuth (FM6)");
+        p = (FARPROC)fm6_D3D11CreateDevice;
     } else if (p && str_is(entry, "kernelx.dll") && str_is(entry + 0x20, "DeleteFileW")) {
         if (!az_DeleteFileW) wlog("kernelx.dll!DeleteFileW -> d:\\ falha com ERROR_PATH_NOT_FOUND (sem PLS)");
         az_DeleteFileW = (BOOL (WINAPI *)(const wchar_t *))p;

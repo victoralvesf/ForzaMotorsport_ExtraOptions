@@ -566,3 +566,39 @@ TEST(fm6_delete_file_d_drive_fails)
     CHECK_EQ(az_delete_calls, 3);
     az_DeleteFileW = NULL;
 }
+
+/* FM6: D3D11CreateDevice -> D3D11XCreateDeviceX do Azimuth com o descritor do FH2; device/contexto sem conversao */
+static uint32_t createx_desc[11];
+static void *fm6_dev_vt[0x56], *fm6_dev[8] = { fm6_dev_vt };
+static long fake_createx(const void *desc, void **dev, void **ctx)
+{
+    memcpy(createx_desc, desc, sizeof createx_desc);
+    *dev = fm6_dev;
+    *ctx = (void *)0x2222;
+    return 0;
+}
+
+TEST(fm6_create_device_uses_azimuth_device)
+{
+    uint8_t *az = fake_azimuth(0);
+    static const UINT lv = 0xb100;
+    void *dev = (void *)1, *ctx = (void *)1;
+    UINT level = 0;
+    int i;
+    for (i = 0; i < 0x56; i++) fm6_dev_vt[i] = az + 0xf5f30 + i * 0x100;   /* stubs fatais padrao */
+    fm6_dev_vt[0x51] = (void *)0x5151;                                        /* implementado: fica */
+    memcpy(az + RVA_CREATE_DEVICEX, "\xff\x25\0\0\0\0", 6);
+    *(void **)(az + RVA_CREATE_DEVICEX + 6) = (void *)fake_createx;
+    CHECK_EQ(fm6_D3D11CreateDevice(NULL, 1, NULL, 0x4000000, &lv, 1, 0x20011, &dev, &level, &ctx), 0);
+    CHECK_HEX((uint8_t *)createx_desc, "0b000100" "00000004" "00000000" "00000000" "00000000" "00000000"
+                                       "3f000000" "00000000" "00000000" "00000000" "00000000");
+    CHECK(dev == (void *)fm6_dev && ctx == (void *)0x2222);
+    CHECK_EQ(level, 0xb100);
+    /* PlaceSwapChainView (game+0x3a676c) = ret no driver do console; E_NOTIMPL onde o driver devolve isso */
+    CHECK_EQ(((long (*)(void *, UINT))fm6_dev_vt[0x50])(fm6_dev, 0x14), 0);
+    CHECK_EQ(((long (*)(void *))fm6_dev_vt[0x2b])(fm6_dev), 0);
+    CHECK_EQ(((long (*)(void *))fm6_dev_vt[0x38])(fm6_dev), (long)0x80004001);
+    CHECK_EQ(((long (*)(void *))fm6_dev_vt[0x28])(fm6_dev), (long)0x80004001);
+    CHECK(fm6_dev_vt[0x51] == (void *)0x5151);
+    CHECK(fm6_dev_vt[0x3b] == az + 0xf5f30 + 0x3b * 0x100);                   /* fora da lista: intacto */
+}
