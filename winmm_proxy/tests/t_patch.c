@@ -132,10 +132,17 @@ TEST(apply_patches_skips_fm6)
     orig_apply_patches = fake_orig_apply;
     orig_apply_calls = 0;
     *(void **)(az + RVA_GAME_RECORD) = fm6_rec;
+    /* ApuCreateHeap falso (xor eax,eax ; ret) com a tabela como o Azimuth deixaria */
+    memcpy(az + RVA_APU_CREATE_HEAP, "\x31\xc0\xc3", 3);
+    *(void **)(az + RVA_APU_HEAPS) = VirtualAlloc(NULL, 0x500000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    *(uint32_t *)(az + RVA_APU_HEAPS + 8) = 0x500000; *(uint32_t *)(az + RVA_APU_HEAPS + 0xc) = 0x1000000;
     CHECK(is_fm6() && !is_fm5());
     hook_apply_patches(img, opt);
     CHECK_EQ(orig_apply_calls, 0);
     CHECK(log_has("FM6"));
+    CHECK(log_has("APU: heap criado p/ o FM6"));                         /* XDK sem ApuCreateHeap */
+    CHECK_EQ(*(uint32_t *)(az + RVA_APU_HEAPS + 8), 0x1000000);
+    VirtualFree(*(void **)(az + RVA_APU_HEAPS), 0, MEM_RELEASE);
     CHECK(slot0_game == game && slot0_n == 329 && game_tls_pending);   /* sites do slot 0 para o 1o import */
     slot0_n = 0; game_tls_pending = 0;
     *(void **)(az + RVA_GAME_RECORD) = NULL;

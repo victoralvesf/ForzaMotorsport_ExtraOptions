@@ -286,8 +286,8 @@ static void drop_partyconfig_link(void)
     wlog("Live table: link PartyConfig removido");
 }
 
-/* Heap da APU: o XDK do FM5 (nov-2012) NAO tem ApuCreateHeap (heap implicito); o Azimuth exige que o jogo o crie
-   antes de ApuAlloc ("ApuAlloc before the game's explicit heap creation", via AcpHalAllocateShapeContexts).
+/* Heap da APU: os XDKs do FM5 (nov-2012) e do FM6 NAO tem ApuCreateHeap (heap implicito); o Azimuth exige que o
+   jogo o crie antes de ApuAlloc ("ApuAlloc before the game's explicit heap creation", via AcpHalAllocateShapeContexts).
    ApuCreateHeap 0x1400aead0(cached, noncached) so aceita (0x500000, 0x40000) = o que o FH2 pede. Tabela dos 2 heaps
    em 0x14037c9a0 (0x20 cada: +0 base, +8 u32 tamanho, +0xc u32 endereco APU, +0x10 mapa de blocos); ApuAlloc/Free/
    Map* leem tudo dela. O FM5 usa ApuAlloc(&va, NULL, size, 0x800, 1) como alocador geral (0x627af0/0x627c10) ->
@@ -297,7 +297,7 @@ static void drop_partyconfig_link(void)
 #define FM5_APU_CACHED_SIZE 0x1000000
 typedef long (*apu_create_heap_fn)(uint32_t cached, uint32_t noncached);
 
-static void fm5_apu_heap(void)
+static void implicit_apu_heap(const char *game_name)
 {
     uint8_t *h = g_base + RVA_APU_HEAPS;
     void *big;
@@ -309,8 +309,8 @@ static void fm5_apu_heap(void)
         *(void **)h = big;
         *(uint32_t *)(h + 8) = FM5_APU_CACHED_SIZE;
     } else if (big) VirtualFree(big, 0, MEM_RELEASE);
-    wlog("APU: heap criado p/ o FM5: cacheado %p (%#x bytes, APU %#x), nao cacheado %p (%#x bytes, APU %#x)",
-         *(void **)h, *(uint32_t *)(h + 8), *(uint32_t *)(h + 0xc),
+    wlog("APU: heap criado p/ o %s: cacheado %p (%#x bytes, APU %#x), nao cacheado %p (%#x bytes, APU %#x)",
+         game_name, *(void **)h, *(uint32_t *)(h + 8), *(uint32_t *)(h + 0xc),
          *(void **)(h + 0x20), *(uint32_t *)(h + 0x28), *(uint32_t *)(h + 0x2c));
 }
 
@@ -509,7 +509,7 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
     g_game = game;
 
     drop_partyconfig_link();
-    fm5_apu_heap();
+    implicit_apu_heap("FM5");
 
     if (cfg_int(L"SkipIntro", 0)) {
         /* cmp [rsi+0x309f],0 -> cmp [rsi+0x309f],0xff: o jogo ve a opcao ligada (so je/jne depois) */
@@ -820,10 +820,11 @@ static void hook_apply_patches(void *image, const void *options)
         fm5_patches(game, options);
         return;
     }
-    if (is_fm6()) {  /* os sites do registro sao do FH2: so o TLS por enquanto */
+    if (is_fm6()) {  /* os sites do registro sao do FH2: so o TLS e o heap da APU por enquanto */
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM6 em %p, sem patches", game);
         take_tls_template(game);
+        implicit_apu_heap("FM6");
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;
         return;
