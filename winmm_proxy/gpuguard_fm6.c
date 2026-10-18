@@ -204,7 +204,19 @@ typedef struct {
 } gg_site;
 typedef struct { void *cl; uint32_t n, dropped; gg_site s[GG_SITES]; } gg_trace;
 
-int gg_trace_on;
+int gg_trace_on;                  /* 1 = D3D12Debug 3; 2 = D3D12Debug 4 (tambem pula a compute interna) */
+static void *volatile internal_rs; /* root signature "k12 + tab[SRV 1, UAV 1]" (compute interna do Azimuth) */
+
+/* forma da root signature da compute interna do Azimuth (resolve/conversao 1920x1080 + copia, suspeita do page fault) */
+int gg_is_internal_rs(const D3D12_ROOT_SIGNATURE_DESC1 *d)
+{
+    const D3D12_ROOT_PARAMETER1 *p = d->pParameters;
+    return d->NumParameters == 2 && p[0].ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS &&
+           p[0].Constants.Num32BitValues == 12 && p[1].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE &&
+           p[1].DescriptorTable.NumDescriptorRanges == 2 &&
+           p[1].DescriptorTable.pDescriptorRanges[0].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV &&
+           p[1].DescriptorTable.pDescriptorRanges[1].RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+}
 static gg_trace trace_tab[GG_TRACE_SLOTS];
 static SRWLOCK trace_lock = SRWLOCK_INIT;
 
@@ -462,6 +474,7 @@ static HRESULT STDMETHODCALLTYPE hook_rootsig(ID3D12Device *dev, UINT mask, cons
                     size[i] = gg_table_size(&vd->Desc_1_1.pParameters[i].DescriptorTable);
             gg_rs_add(*out, size, n);
             if (gg_trace_on) log_rootsig(*out, &vd->Desc_1_1);
+            if (gg_is_internal_rs(&vd->Desc_1_1)) internal_rs = *out;
         }
         ds->lpVtbl->Release(ds);
     }
@@ -614,6 +627,12 @@ static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x
     uint32_t arg[3] = { x, y, z }, n = known_frames(f, GG_SITE_FRAMES);
     gg_trace_add(l, GG_OP_DISPATCH, rs, arg, f, n);
     log_new_site(l, GG_OP_DISPATCH, rs, arg, f, n);
+    if (gg_trace_on == 2 && rs && rs == internal_rs) {
+        static volatile LONG skipped;
+        LONG k = InterlockedIncrement(&skipped);
+        if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: Dispatch #%ld da compute interna pulado (%u,%u,%u)", k, x, y, z);
+        return;
+    }
     real_dispatch(l, x, y, z);
 }
 

@@ -3,7 +3,7 @@
  * O azimuth.exe importa d3d12.dll!D3D12CreateDevice por ordinal (101) no slot da IAT 0x26f868. O hook liga a
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
- * D3D12Debug=3: sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
+ * D3D12Debug=3 (4 = + experimento do gpuguard_fm6.c: pula a compute interna k12 + [SRV, UAV]): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
  * UINT64_MAX) e grava no log as ultimas listas com a contagem de operacoes e, de cada uma, os pontos de chamada de
  * Dispatch/CopyTextureRegion guardados pela trava (gpuguard_fm6.c, gg_trace_*).
  * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c): o device nasce
@@ -129,7 +129,7 @@ static void enable_debug_layer(void)
     ID3D12Debug *dbg = NULL;
     if (done) return;
     done = 1;
-    if (g_mode == 3) { enable_dred(); return; }
+    if (g_mode >= 3) { enable_dred(); return; }
     get_debug = (PFN_D3D12_GET_DEBUG_INTERFACE)GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12GetDebugInterface");
     if (!get_debug || FAILED(get_debug(&IID_ID3D12Debug, (void **)&dbg))) {
         wlog("debug12: D3D12GetDebugInterface falhou (Graphics Tools instalado?)");
@@ -154,7 +154,7 @@ static HRESULT WINAPI hook_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL le
     hr = real_create_device(adapter, level, riid, out);
     if (SUCCEEDED(hr) && out && *out) gpuguard_install((IUnknown *)*out);
     if (!g_mode) return hr;
-    if (g_mode == 3 && SUCCEEDED(hr) && out && *out) {
+    if (g_mode >= 3 && SUCCEEDED(hr) && out && *out) {
         static int watching;
         ID3D12Device *dev = NULL;
         if (!watching && SUCCEEDED(((IUnknown *)*out)->lpVtbl->QueryInterface(*out, &IID_ID3D12Device, (void **)&dev))) {
@@ -189,7 +189,7 @@ int debug12_install(void)
     DWORD old;
 
     g_mode = cfg_int(L"D3D12Debug", 0);
-    gg_trace_on = g_mode == 3;
+    gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna (experimento) */
     d3d12 = GetModuleHandleW(L"d3d12.dll");
     if (!d3d12 || *slot != (void *)GetProcAddress(d3d12, "D3D12CreateDevice")) {
         wlog("debug12: slot da IAT %#x nao e D3D12CreateDevice; debug layer NAO ativada", RVA_IAT_D3D12_CREATE_DEVICE);

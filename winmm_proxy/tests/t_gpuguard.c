@@ -120,3 +120,27 @@ TEST(gpuguard_trace_per_list)
     CHECK_EQ(gg_trace_get(&cl1, s, GG_SITES, NULL), 0);
     CHECK_EQ(gg_trace_get(&rs, s, GG_SITES, NULL), 0);        /* lista desconhecida */
 }
+
+TEST(gpuguard_internal_rs_shape)
+{
+    D3D12_DESCRIPTOR_RANGE1 r[2] = {
+        { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0, 0 },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND },
+    };
+    D3D12_ROOT_PARAMETER1 p[2] = { 0 };
+    D3D12_ROOT_SIGNATURE_DESC1 d = { 2, p, 0, NULL, 0 };
+    p[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+    p[0].Constants.Num32BitValues = 12;
+    p[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    p[1].DescriptorTable.NumDescriptorRanges = 2;
+    p[1].DescriptorTable.pDescriptorRanges = r;
+    CHECK(gg_is_internal_rs(&d));
+    p[0].Constants.Num32BitValues = 2;                  /* outra quantidade de constantes */
+    CHECK(!gg_is_internal_rs(&d));
+    p[0].Constants.Num32BitValues = 12;
+    r[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;   /* sem UAV */
+    CHECK(!gg_is_internal_rs(&d));
+    r[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    d.NumParameters = 1;
+    CHECK(!gg_is_internal_rs(&d));
+}
