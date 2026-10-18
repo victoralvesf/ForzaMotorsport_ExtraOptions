@@ -94,8 +94,78 @@ static StubFactory stub_factories[] = {
     { sf_vtbl, L"Windows.Xbox.Speech.Recognition.SpeechRecognizer" },
 };
 
+/* ------------------------------------------------------------------------ */
+/* FM6: Windows.Xbox.ApplicationModel.Core.CoreApplicationContext.CurrentUser */
+/* ------------------------------------------------------------------------ */
+/*
+ * Unico uso no FM6: game+0x57bb30 pega os statics (iid d8d4c59f-...), chama o slot 6 (get_CurrentUser) e devolve
+ * o User (chamador game+0xc930f4, login com [this+0x3be] ligado; User NULL -> erro 0xc no fluxo de login).
+ * O Azimuth nao tem a classe, mas tem o usuario local: LocalUserStatics (singleton 0x140041290, o provedor de
+ * Windows.Xbox.System.User) guarda o LocalUser unico em [statics+0x18] (vtable 0x14029d718, IUser a2c2223e-...,
+ * o mesmo IID que o FM6 usa).
+ * => statics proprios cujo get_CurrentUser devolve esse LocalUser com AddRef.
+ */
+#define RVA_USER_STATICS    0x41290    /* LocalUserStatics singleton */
+#define RVA_LOCAL_USER_VTBL 0x29d718
+#define USER_STATICS_USER   0x18
+static const wchar_t CORE_APP_CONTEXT[] = L"Windows.Xbox.ApplicationModel.Core.CoreApplicationContext";
+static const GUID IID_ICoreApplicationContextStatics_ =
+    { 0xd8d4c59f, 0xb9ac, 0x4d41, { 0x84, 0x2d, 0xa0, 0x1c, 0x59, 0xb6, 0x17, 0xe7 } };
+
+typedef void *(*user_statics_fn)(void);
+
+static long STDMETHODCALLTYPE cac_QueryInterface(StubFactory *self, const GUID *iid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(iid, &IID_IUnknown_) || IsEqualGUID(iid, &IID_IInspectable_) ||
+        IsEqualGUID(iid, &IID_IAgileObject_) || IsEqualGUID(iid, &IID_ICoreApplicationContextStatics_)) {
+        *out = self;
+        return S_OK;
+    }
+    *out = NULL;
+    wlog("winrt: CoreApplicationContext: QI %08lx-... recusado", iid->Data1);
+    return E_NOINTERFACE;
+}
+
+static long STDMETHODCALLTYPE cac_get_CurrentUser(StubFactory *self, void **out)
+{
+    /* sub rsp,0x28 ; mov ecx,0x10 ; mov rax,gs:[0x58] */
+    static const char sig[] = "4883ec28" "b910000000" "65488b042558000000";
+    uint8_t *statics;
+    void ***user;
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!bytes_match(g_base + RVA_USER_STATICS, sig, 18)) {
+        wlog("winrt: CoreApplicationContext.CurrentUser: %#x nao confere -> NULL", RVA_USER_STATICS);
+        return S_OK;
+    }
+    statics = ((user_statics_fn)(g_base + RVA_USER_STATICS))();
+    user = statics ? *(void ****)(statics + USER_STATICS_USER) : NULL;
+    if (!user || *user != (void **)(g_base + RVA_LOCAL_USER_VTBL)) {
+        wlog("winrt: CoreApplicationContext.CurrentUser: sem LocalUser do Azimuth -> NULL");
+        return S_OK;
+    }
+    ((ULONG (STDMETHODCALLTYPE *)(void *))(*user)[1])(user);
+    *out = user;
+    wlog("winrt: CoreApplicationContext.CurrentUser -> LocalUser do Azimuth");
+    return S_OK;
+}
+
+static void *const cac_vtbl[] = {
+    (void *)cac_QueryInterface, (void *)sf_AddRef, (void *)sf_Release,
+    (void *)sf_GetIids, (void *)sf_GetRuntimeClassName, (void *)sf_GetTrustLevel,
+    (void *)cac_get_CurrentUser,
+};
+static StubFactory core_app_context = { cac_vtbl, CORE_APP_CONTEXT };
+
 static long hook_get_factory(const wchar_t *cls, const GUID *iid, void **out)
 {
+    if (cls && out && is_fm6() && !wcscmp(cls, CORE_APP_CONTEXT)) {
+        long hr = cac_QueryInterface(&core_app_context, iid, out);
+        wlog("winrt: activation %ls iid=%08lx-... -> statics do proxy hr=%#lx", cls, iid->Data1, hr);
+        return hr;
+    }
     if (cls && out && is_fm5()) {
         size_t i;
         for (i = 0; i < sizeof stub_factories / sizeof stub_factories[0]; i++)

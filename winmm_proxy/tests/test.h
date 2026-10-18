@@ -46,7 +46,7 @@ void log_capture(void);
 const char *log_text(void);
 int log_has(const char *s);
 void ini_set(const char *body);                 /* "[FM5]\nSkipIntro=1\n..." ; NULL = sem ini */
-uint8_t *fake_azimuth(int fm5);                 /* g_base falso (zerado), opcionalmente com o registro do FM5 */
+uint8_t *fake_azimuth(int game);                /* g_base falso (zerado), opcionalmente com o registro do FM5 (1) ou FM6 (2) */
 
 /* binarios usados nos testes de assinatura (pulam se nao existirem) */
 #define AZIMUTH_EXE "azimuth.exe"

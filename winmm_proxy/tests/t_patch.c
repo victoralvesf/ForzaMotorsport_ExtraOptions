@@ -43,12 +43,12 @@ void ini_set(const char *body)
     MultiByteToWideChar(CP_ACP, 0, path, -1, g_ini, MAX_PATH);
 }
 
-uint8_t *fake_azimuth(int fm5)
+uint8_t *fake_azimuth(int game)
 {
     static uint8_t *img;
     if (!img) img = t_rwx(0x3b9000);            /* SizeOfImage do azimuth.exe */
     memset(img, 0, 0x3b9000);
-    if (fm5) *(void **)(img + RVA_GAME_RECORD) = fm5_rec;
+    if (game) *(void **)(img + RVA_GAME_RECORD) = game == 2 ? fm6_rec : fm5_rec;
     g_base = img;
     return img;
 }

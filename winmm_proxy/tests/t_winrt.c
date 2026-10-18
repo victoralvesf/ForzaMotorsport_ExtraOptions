@@ -223,3 +223,78 @@ TEST(gamechat_passthrough)
     CHECK_EQ(routed(obj, 22), 22);
     CHECK(log_has("__IChatUserPublicNonVirtuals com 23 slots (esperado 21)"));
 }
+
+/* ---- FM6: CoreApplicationContext.CurrentUser = LocalUser do Azimuth ---- */
+static int orig_factory_calls, user_addrefs;
+static long fake_orig_factory(const wchar_t *cls, const GUID *iid, void **out)
+{
+    (void)cls; (void)iid;
+    orig_factory_calls++;
+    *out = NULL;
+    return REGDB_E_CLASSNOTREG;
+}
+static ULONG STDMETHODCALLTYPE fake_user_addref(void *u) { (void)u; return ++user_addrefs; }
+static uint64_t fake_user_statics[8];
+static void *fake_get_user_statics(void) { return fake_user_statics; }
+
+/* singleton com o prologo real (sub rsp,0x28 ; mov ecx,0x10 ; mov rax,gs:[0x58]) seguido de add rsp,0x28 + jmp */
+static uint8_t *fake_user_azimuth(void **user)
+{
+    uint8_t *az = fake_azimuth(2);
+    void *p = (void *)fake_user_addref;
+    memcpy(az + 0x41290, "\x48\x83\xec\x28\xb9\x10\x00\x00\x00\x65\x48\x8b\x04\x25\x58\x00\x00\x00"
+                         "\x48\x83\xc4\x28", 22);
+    jmp_to(az + 0x41290 + 22, (void *)fake_get_user_statics);
+    memcpy(az + 0x29d718 + 8, &p, 8);                            /* LocalUser slot 1 = AddRef */
+    *user = az + 0x29d718;
+    fake_user_statics[3] = (uint64_t)user;                       /* [statics+0x18] */
+    return az;
+}
+
+TEST(core_app_context_current_user)
+{
+    static const GUID statics_iid =
+        { 0xd8d4c59f, 0xb9ac, 0x4d41, { 0x84, 0x2d, 0xa0, 0x1c, 0x59, 0xb6, 0x17, 0xe7 } };
+    static const GUID other_iid = { 0x12345678, 0, 0, { 0 } };
+    void *user, *out = (void *)1, **f;
+    uint8_t *az = fake_user_azimuth(&user);
+    orig_get_factory = fake_orig_factory;
+    orig_factory_calls = user_addrefs = 0;
+    log_capture();
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.ApplicationModel.Core.CoreApplicationContext", &statics_iid, &out),
+             S_OK);
+    REQUIRE(out != NULL);
+    CHECK_EQ(orig_factory_calls, 0);
+    f = *(void ***)out;
+    CHECK_EQ(((long (*)(void *, void **))f[6])(out, NULL), E_POINTER);
+    out = NULL;
+    {
+        void *u = NULL, *stat = NULL;
+        hook_get_factory(L"Windows.Xbox.ApplicationModel.Core.CoreApplicationContext", &statics_iid, &stat);
+        CHECK_EQ(((long (*)(void *, void **))f[6])(stat, &u), S_OK);   /* slot 6 = get_CurrentUser */
+        CHECK(u == &user);
+        CHECK_EQ(user_addrefs, 1);
+        CHECK(log_has("CurrentUser -> LocalUser do Azimuth"));
+        /* LocalUser com outra vtable -> NULL sem AddRef */
+        user = az + 0x29d720;
+        CHECK_EQ(((long (*)(void *, void **))f[6])(stat, &u), S_OK);
+        CHECK(u == NULL && user_addrefs == 1);
+        /* singleton com outros bytes -> nao chama */
+        user = az + 0x29d718;
+        az[0x41294] = 0x90;
+        CHECK_EQ(((long (*)(void *, void **))f[6])(stat, &u), S_OK);
+        CHECK(u == NULL && user_addrefs == 1);
+        CHECK(log_has("0x41290 nao confere"));
+    }
+    /* outra interface: recusada sem chegar ao Azimuth */
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.ApplicationModel.Core.CoreApplicationContext", &other_iid, &out),
+             E_NOINTERFACE);
+    CHECK(out == NULL && orig_factory_calls == 0);
+    /* FM5 / outra classe: segue para o Azimuth */
+    fake_azimuth(1);
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.ApplicationModel.Core.CoreApplicationContext", &statics_iid, &out),
+             REGDB_E_CLASSNOTREG);
+    fake_azimuth(2);
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.System.User", &statics_iid, &out), REGDB_E_CLASSNOTREG);
+    CHECK_EQ(orig_factory_calls, 2);
+}
