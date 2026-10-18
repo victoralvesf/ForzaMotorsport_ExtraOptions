@@ -4,9 +4,9 @@
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
  * D3D12Debug=3 (4 = + experimento do gpuguard_fm6.c: pula a compute interna k12 + [SRV, UAV]; 5 = + placement textures
- * do FM6 committed em vez de reservadas, fm5_patch.c; 6 = + recursos/views nunca destruidos, fm5_patch.c; 7 = + nenhum CopyTextureRegion, gpuguard_fm6.c): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
+ * do FM6 committed em vez de reservadas, fm5_patch.c; 6 = + recursos/views nunca destruidos, fm5_patch.c; 7 = + nenhum CopyTextureRegion; 8 = + nenhum draw; 9 = + nenhum Dispatch fora da compute interna, gpuguard_fm6.c): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
  * UINT64_MAX) e grava no log as ultimas listas com a contagem de operacoes e, de cada uma, os pontos de chamada de
- * Dispatch/CopyTextureRegion guardados pela trava (gpuguard_fm6.c, gg_trace_*).
+ * Dispatch/CopyTextureRegion/draws/ClearRenderTargetView guardados pela trava (gpuguard_fm6.c, gg_trace_*).
  * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c): o device nasce
  * antes do apply_patches, quando o jogo ainda nao e conhecido.
  */
@@ -190,7 +190,7 @@ int debug12_install(void)
     DWORD old;
 
     g_mode = cfg_int(L"D3D12Debug", 0);
-    gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm5_patch.c) */
+    gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm5_patch.c); 8/9: gpuguard_fm6.c */
     d3d12 = GetModuleHandleW(L"d3d12.dll");
     if (!d3d12 || *slot != (void *)GetProcAddress(d3d12, "D3D12CreateDevice")) {
         wlog("debug12: slot da IAT %#x nao e D3D12CreateDevice; debug layer NAO ativada", RVA_IAT_D3D12_CREATE_DEVICE);

@@ -90,20 +90,21 @@ TEST(gpuguard_root_signature_per_list)
 
 TEST(gpuguard_trace_per_list)
 {
-    static int cl1, cl2, rs;
+    static int cl1, cl2, rs, pso;
     void *fa[2] = { (void *)0x140001000, (void *)0x140002000 }, *fb[1] = { (void *)0x140003000 };
     uint32_t arg[3] = { 8, 8, 1 }, dropped = 99, i;
     gg_site s[GG_SITES];
-    gg_trace_add(&cl1, GG_OP_DISPATCH, &rs, arg, fa, 2);
-    gg_trace_add(&cl1, GG_OP_DISPATCH, &rs, arg, fa, 2);     /* mesmo ponto: so conta */
-    gg_trace_add(&cl1, GG_OP_COPY_TEXTURE, NULL, arg, fa, 2); /* mesma pilha, outra operacao */
-    gg_trace_add(&cl1, GG_OP_DISPATCH, NULL, arg, fa, 2);     /* outra root signature */
-    gg_trace_add(&cl2, GG_OP_DISPATCH, &rs, arg, fb, 1);
+    gg_trace_add(&cl1, GG_OP_DISPATCH, &rs, &pso, arg, fa, 2);
+    gg_trace_add(&cl1, GG_OP_DISPATCH, &rs, NULL, arg, fa, 2); /* mesmo ponto: so conta */
+    gg_trace_add(&cl1, GG_OP_COPY_TEXTURE, NULL, NULL, arg, fa, 2); /* mesma pilha, outra operacao */
+    gg_trace_add(&cl1, GG_OP_DISPATCH, NULL, NULL, arg, fa, 2); /* outra root signature */
+    gg_trace_add(&cl2, GG_OP_DISPATCH, &rs, NULL, arg, fb, 1);
     CHECK_EQ(gg_trace_get(&cl1, s, GG_SITES, &dropped), 3);
     CHECK_EQ(dropped, 0);
     CHECK_EQ(s[0].count, 2);
     CHECK_EQ(s[0].op, GG_OP_DISPATCH);
     CHECK(s[0].rs == &rs);
+    CHECK(s[0].pso == &pso);                                  /* PSO da 1a ocorrencia */
     CHECK_EQ(s[0].nframes, 2);
     CHECK(s[0].frames[1] == (void *)0x140002000);
     CHECK_EQ(s[0].arg[0], 8);
@@ -112,7 +113,7 @@ TEST(gpuguard_trace_per_list)
     CHECK_EQ(gg_trace_get(&cl2, s, GG_SITES, NULL), 1);
     for (i = 0; i < GG_SITES + 3; i++) {                       /* pontos alem do limite: so contados */
         void *f[1] = { (void *)(uintptr_t)(0x140100000 + i * 16) };
-        gg_trace_add(&cl2, GG_OP_DISPATCH, &rs, arg, f, 1);
+        gg_trace_add(&cl2, GG_OP_DISPATCH, &rs, NULL, arg, f, 1);
     }
     CHECK_EQ(gg_trace_get(&cl2, s, GG_SITES, &dropped), GG_SITES);
     CHECK_EQ(dropped, 4);
@@ -250,5 +251,82 @@ TEST(gpuguard_debug7_skips_copies)
     CHECK(log_has("gpuguard: experimento: CopyTextureRegion #1 pulado"));
     CHECK(log_has("gpuguard: experimento: CopyTextureRegion #2 pulado"));
     gg_trace_reset(&cl);
+    gg_trace_on = saved;
+}
+
+/* D3D12Debug=8 (gg_trace_on 6): draws registrados (com root signature grafica e PSO) mas fora da GPU;
+   D3D12Debug=9 (gg_trace_on 7): so o Dispatch da compute interna passa */
+static int real_draws, real_dispatches;
+static void STDMETHODCALLTYPE fake_draw(ID3D12GraphicsCommandList *l, UINT a, UINT b, UINT c, UINT d)
+{
+    (void)l; (void)a; (void)b; (void)c; (void)d;
+    real_draws++;
+}
+static void STDMETHODCALLTYPE fake_draw_indexed(ID3D12GraphicsCommandList *l, UINT a, UINT b, UINT c, INT d, UINT e)
+{
+    (void)l; (void)a; (void)b; (void)c; (void)d; (void)e;
+    real_draws++;
+}
+static void STDMETHODCALLTYPE fake_set_pso(ID3D12GraphicsCommandList *l, ID3D12PipelineState *ps) { (void)l; (void)ps; }
+static void STDMETHODCALLTYPE fake_dispatch(ID3D12GraphicsCommandList *l, UINT x, UINT y, UINT z)
+{
+    (void)l; (void)x; (void)y; (void)z;
+    real_dispatches++;
+}
+
+TEST(gpuguard_draw_trace_and_debug8)
+{
+    static int cl, grs, pso;
+    gg_site s[GG_SITES];
+    int saved = gg_trace_on;
+    ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)&cl;
+    real_draw = fake_draw; real_draw_indexed = fake_draw_indexed; real_set_pso = fake_set_pso;
+    log_capture();
+    gg_trace_on = 1;
+    gg_cl_rs(&cl, 0, &grs, 1);
+    hook_set_pso(l, (ID3D12PipelineState *)&pso);
+    CHECK(gg_cl_rs(&cl, GG_CL_PSO, NULL, 0) == &pso);
+    CHECK(gg_cl_rs(&cl, 0, NULL, 0) == &grs);                 /* PSO nao apaga a root signature */
+    hook_draw(l, 3, 1, 0, 0);
+    hook_draw_indexed(l, 36, 2, 6, 0, 0);
+    CHECK_EQ(real_draws, 2);
+    CHECK_EQ(gg_trace_get(&cl, s, GG_SITES, NULL), 2);
+    CHECK_EQ(s[0].op, GG_OP_DRAW);
+    CHECK(s[0].rs == &grs);
+    CHECK(s[0].pso == &pso);
+    CHECK_EQ(s[0].arg[0], 3);
+    CHECK_EQ(s[1].op, GG_OP_DRAW_INDEXED);
+    CHECK_EQ(s[1].arg[0], 36);
+    CHECK_EQ(s[1].arg[2], 6);
+    CHECK(log_has("gpuguard: ponto novo de DrawInstanced (3,1,0)"));
+    gg_trace_on = 6;
+    hook_draw(l, 3, 1, 0, 0);
+    hook_draw_indexed(l, 36, 2, 6, 0, 0);
+    CHECK_EQ(real_draws, 2);
+    CHECK(log_has("gpuguard: experimento: draw #1 pulado"));
+    CHECK(log_has("gpuguard: experimento: draw #2 pulado"));
+    gg_trace_reset(&cl);
+    gg_trace_on = saved;
+}
+
+TEST(gpuguard_debug9_skips_game_dispatch)
+{
+    static int cl, game_rs, internal;
+    int saved = gg_trace_on;
+    void *saved_internal = internal_rs;
+    ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)&cl;
+    real_dispatch = fake_dispatch;
+    internal_rs = &internal;
+    log_capture();
+    gg_trace_on = 7;
+    gg_cl_rs(&cl, 1, &game_rs, 1);
+    hook_dispatch(l, 4, 4, 1);
+    CHECK_EQ(real_dispatches, 0);
+    CHECK(log_has("gpuguard: experimento: Dispatch fora da compute interna #1 pulado"));
+    gg_cl_rs(&cl, 1, &internal, 1);
+    hook_dispatch(l, 30, 1080, 1);
+    CHECK_EQ(real_dispatches, 1);
+    gg_trace_reset(&cl);
+    internal_rs = saved_internal;
     gg_trace_on = saved;
 }

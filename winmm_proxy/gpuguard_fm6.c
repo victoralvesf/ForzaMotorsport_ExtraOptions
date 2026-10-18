@@ -12,7 +12,8 @@
  *  - endereco de GPU envenenado (0xdeadbeef / 0xbeefdead.. / fora de 48 bits) em CBV, root views, vertex/index
  *    buffer e stream out: loga a pilha; CBV vira nulo; root view/buffer vira 0 (nulo) no lugar do endereco.
  * Com o rastreio (D3D12Debug>=3): CopyTextureRegion conferido (subrecurso/footprint/regiao, gg_copy_check) e chamadas
- * de residencia (MakeResident/Evict/...) contadas; ambos so registram.
+ * de residencia (MakeResident/Evict/...) contadas; ambos so registram. Draws (DrawInstanced/DrawIndexedInstanced/
+ * ExecuteIndirect) e ClearRenderTargetView entram no rastreio por lista com a root signature grafica e o PSO atual.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -138,7 +139,8 @@ uint32_t gg_table_size(const D3D12_ROOT_DESCRIPTOR_TABLE1 *t)
 #define GG_CL_SLOTS 2048
 
 typedef struct { void *rs; uint32_t n; uint32_t size[GG_MAX_PARAMS]; } gg_rs;
-typedef struct { void *cl; void *rs[2]; } gg_cl;   /* rs[0] grafica, rs[1] compute */
+typedef struct { void *cl; void *rs[3]; } gg_cl;   /* rs[0] grafica, rs[1] compute, rs[2] = PSO atual (GG_CL_PSO) */
+#define GG_CL_PSO 2
 
 static gg_rs rs_tab[GG_RS_SLOTS];
 static gg_cl cl_tab[GG_CL_SLOTS];
@@ -173,7 +175,7 @@ uint32_t gg_rs_table(void *rs, uint32_t param)
     return r;
 }
 
-/* root signature atual de uma command list (compute 0/1): do_set grava `set`, senao so consulta */
+/* root signature atual de uma command list (compute 0/1; GG_CL_PSO = PSO): do_set grava `set`, senao so consulta */
 void *gg_cl_rs(void *cl, int compute, void *set, int do_set)
 {
     unsigned h = hptr(cl, GG_CL_SLOTS), k;
@@ -193,20 +195,25 @@ void *gg_cl_rs(void *cl, int compute, void *set, int do_set)
  * no Reset, e o dred_watch grava os das listas que mostra. */
 
 #define GG_SITE_FRAMES 6
-#define GG_SITES 12
+#define GG_SITES 24
 #define GG_TRACE_SLOTS 2048
 
-enum { GG_OP_DISPATCH, GG_OP_COPY_TEXTURE };
+enum { GG_OP_DISPATCH, GG_OP_COPY_TEXTURE, GG_OP_DRAW, GG_OP_DRAW_INDEXED, GG_OP_EXECUTE_INDIRECT, GG_OP_CLEAR_RTV };
+static const char *const gg_op_name[] = {
+    "Dispatch", "CopyTextureRegion", "DrawInstanced", "DrawIndexedInstanced", "ExecuteIndirect", "ClearRenderTargetView",
+};
 
 typedef struct {
     uint32_t hash, count, op, nframes;
-    void *rs;
-    uint32_t arg[3];              /* 1a ocorrencia: grupos do Dispatch / destino x,y,z da copia */
+    void *rs, *pso;               /* root signature (compute no Dispatch, grafica no resto); PSO da 1a ocorrencia */
+    uint32_t arg[3];              /* 1a ocorrencia: grupos do Dispatch / destino x,y,z da copia / contagens do draw */
     void *frames[GG_SITE_FRAMES];
 } gg_site;
 typedef struct { void *cl; uint32_t n, dropped; gg_site s[GG_SITES]; } gg_trace;
 
-int gg_trace_on;                  /* D3D12Debug - 2: 1 = rastreio; 2 = + pula a compute interna; 5 = + pula CopyTextureRegion */
+/* D3D12Debug - 2: 1 = rastreio; 2 = + pula a compute interna; 5 = + pula CopyTextureRegion; 6 = + pula os draws;
+   7 = + pula os Dispatch fora da compute interna */
+int gg_trace_on;
 static void *volatile internal_rs; /* root signature "k12 + tab[SRV 1, UAV 1]" (compute interna do Azimuth) */
 
 /* forma da root signature da compute interna do Azimuth (resolve/conversao 1920x1080 + copia, suspeita do page fault) */
@@ -237,7 +244,7 @@ static gg_trace *gg_trace_slot(void *cl, int make)
     return NULL;
 }
 
-void gg_trace_add(void *cl, uint32_t op, void *rs, const uint32_t *arg, void *const *frames, uint32_t nframes)
+void gg_trace_add(void *cl, uint32_t op, void *rs, void *pso, const uint32_t *arg, void *const *frames, uint32_t nframes)
 {
     uint32_t hash = 2166136261u ^ op, i;
     gg_trace *t;
@@ -251,7 +258,7 @@ void gg_trace_add(void *cl, uint32_t op, void *rs, const uint32_t *arg, void *co
         if (i == t->n) {
             if (t->n < GG_SITES) {
                 gg_site *s = &t->s[t->n++];
-                s->hash = hash; s->count = 1; s->op = op; s->rs = rs; s->nframes = nframes;
+                s->hash = hash; s->count = 1; s->op = op; s->rs = rs; s->pso = pso; s->nframes = nframes;
                 memcpy(s->arg, arg, sizeof s->arg);
                 memcpy(s->frames, frames, nframes * sizeof *frames);
             } else t->dropped++;
@@ -378,6 +385,13 @@ static void (STDMETHODCALLTYPE *real_dispatch)(ID3D12GraphicsCommandList *, UINT
 static void (STDMETHODCALLTYPE *real_copytex)(ID3D12GraphicsCommandList *, const D3D12_TEXTURE_COPY_LOCATION *, UINT, UINT, UINT,
                                               const D3D12_TEXTURE_COPY_LOCATION *, const D3D12_BOX *);
 static HRESULT (STDMETHODCALLTYPE *real_reset)(ID3D12GraphicsCommandList *, ID3D12CommandAllocator *, ID3D12PipelineState *);
+static void (STDMETHODCALLTYPE *real_draw)(ID3D12GraphicsCommandList *, UINT, UINT, UINT, UINT);
+static void (STDMETHODCALLTYPE *real_draw_indexed)(ID3D12GraphicsCommandList *, UINT, UINT, UINT, INT, UINT);
+static void (STDMETHODCALLTYPE *real_exec_indirect)(ID3D12GraphicsCommandList *, ID3D12CommandSignature *, UINT, ID3D12Resource *,
+                                                    UINT64, ID3D12Resource *, UINT64);
+static void (STDMETHODCALLTYPE *real_clear_rtv)(ID3D12GraphicsCommandList *, D3D12_CPU_DESCRIPTOR_HANDLE, const FLOAT *, UINT,
+                                                const D3D12_RECT *);
+static void (STDMETHODCALLTYPE *real_set_pso)(ID3D12GraphicsCommandList *, ID3D12PipelineState *);
 
 static UINT res_inc;
 
@@ -435,9 +449,8 @@ void gg_trace_dump(void *cl)
     uint32_t dropped = 0, n = gg_trace_get(cl, s, GG_SITES, &dropped), i, j;
     for (i = 0; i < n; i++) {
         char buf[400], one[40];
-        int len = wsprintfA(buf, "gpuguard: lista %p: %s x%u (1o %u,%u,%u) rs %p;", cl,
-                            s[i].op == GG_OP_DISPATCH ? "Dispatch" : "CopyTextureRegion", s[i].count,
-                            s[i].arg[0], s[i].arg[1], s[i].arg[2], s[i].rs);
+        int len = wsprintfA(buf, "gpuguard: lista %p: %s x%u (1o %u,%u,%u) rs %p pso %p;", cl, gg_op_name[s[i].op],
+                            s[i].count, s[i].arg[0], s[i].arg[1], s[i].arg[2], s[i].rs, s[i].pso);
         for (j = 0; j < s[i].nframes; j++) {
             label(one, s[i].frames[j]);
             len += wsprintfA(buf + len, "%s", one);
@@ -668,9 +681,9 @@ static void STDMETHODCALLTYPE hook_so(ID3D12GraphicsCommandList *l, UINT start, 
 
 /* 1o uso de cada ponto de chamada no processo (a lista do page fault pode ja ter sido solta quando o DRED a mostra:
    pCommandList nulo no no) */
-static void log_new_site(void *cl, uint32_t op, void *rs, const uint32_t *arg, void *const *f, uint32_t n)
+static void log_new_site(void *cl, uint32_t op, void *rs, void *pso, const uint32_t *arg, void *const *f, uint32_t n)
 {
-    static uint32_t seen[256];
+    static uint32_t seen[1024];
     static volatile LONG nseen;
     static SRWLOCK lock = SRWLOCK_INIT;
     uint32_t hash = 2166136261u ^ op, i;
@@ -680,12 +693,11 @@ static void log_new_site(void *cl, uint32_t op, void *rs, const uint32_t *arg, v
     hash = (hash ^ (uint32_t)((uintptr_t)rs >> 4)) * 16777619u;
     AcquireSRWLockExclusive(&lock);
     for (i = 0; i < (uint32_t)nseen && seen[i] != hash; i++) {}
-    if (i < (uint32_t)nseen || nseen >= 256) { ReleaseSRWLockExclusive(&lock); return; }
+    if (i < (uint32_t)nseen || nseen >= 1024) { ReleaseSRWLockExclusive(&lock); return; }
     seen[nseen++] = hash;
     ReleaseSRWLockExclusive(&lock);
-    len = wsprintfA(buf, "gpuguard: ponto novo de %s (%u,%u,%u) rs %p lista %p tid=%lu;",
-                    op == GG_OP_DISPATCH ? "Dispatch" : "CopyTextureRegion", arg[0], arg[1], arg[2], rs, cl,
-                    GetCurrentThreadId());
+    len = wsprintfA(buf, "gpuguard: ponto novo de %s (%u,%u,%u) rs %p pso %p lista %p tid=%lu;", gg_op_name[op],
+                    arg[0], arg[1], arg[2], rs, pso, cl, GetCurrentThreadId());
     for (i = 0; i < n; i++) {
         label(one, f[i]);
         len += wsprintfA(buf + len, "%s", one);
@@ -693,19 +705,82 @@ static void log_new_site(void *cl, uint32_t op, void *rs, const uint32_t *arg, v
     wlog("%s", buf);
 }
 
+/* registra a operacao na lista (rastreio + 1o uso do ponto); devolve a root signature usada */
+static void *trace_op(ID3D12GraphicsCommandList *l, uint32_t op, int compute, const uint32_t *arg)
+{
+    void *f[GG_SITE_FRAMES], *rs = op == GG_OP_COPY_TEXTURE ? NULL : gg_cl_rs(l, compute, NULL, 0);
+    void *pso = op == GG_OP_COPY_TEXTURE ? NULL : gg_cl_rs(l, GG_CL_PSO, NULL, 0);
+    uint32_t n = known_frames(f, GG_SITE_FRAMES);
+    gg_trace_add(l, op, rs, pso, arg, f, n);
+    log_new_site(l, op, rs, pso, arg, f, n);
+    return rs;
+}
+
+/* experimento: a operacao nao chega ao D3D12 (log nas potencias de 2) */
+static void skip_note(volatile LONG *ctr, const char *what)
+{
+    LONG k = InterlockedIncrement(ctr);
+    if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: %s #%ld pulado", what, k);
+}
+
 static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x, UINT y, UINT z)
 {
-    void *f[GG_SITE_FRAMES], *rs = gg_cl_rs(l, 1, NULL, 0);
-    uint32_t arg[3] = { x, y, z }, n = known_frames(f, GG_SITE_FRAMES);
-    gg_trace_add(l, GG_OP_DISPATCH, rs, arg, f, n);
-    log_new_site(l, GG_OP_DISPATCH, rs, arg, f, n);
+    uint32_t arg[3] = { x, y, z };
+    void *rs = trace_op(l, GG_OP_DISPATCH, 1, arg);
     if (gg_trace_on == 2 && rs && rs == internal_rs) {
         static volatile LONG skipped;
         LONG k = InterlockedIncrement(&skipped);
         if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: Dispatch #%ld da compute interna pulado (%u,%u,%u)", k, x, y, z);
         return;
     }
+    if (gg_trace_on == 7 && rs != internal_rs) {   /* EXPERIMENTO D3D12Debug=9 (17_fm6.txt PASSO 28) */
+        static volatile LONG skipped;
+        skip_note(&skipped, "Dispatch fora da compute interna");
+        return;
+    }
     real_dispatch(l, x, y, z);
+}
+
+/* draws: EXPERIMENTO D3D12Debug=8 (17_fm6.txt PASSO 28) = nenhum chega a GPU */
+static volatile LONG draws_skipped;
+
+static void STDMETHODCALLTYPE hook_draw(ID3D12GraphicsCommandList *l, UINT vc, UINT ic, UINT sv, UINT si)
+{
+    uint32_t arg[3] = { vc, ic, sv };
+    trace_op(l, GG_OP_DRAW, 0, arg);
+    if (gg_trace_on == 6) { skip_note(&draws_skipped, "draw"); return; }
+    real_draw(l, vc, ic, sv, si);
+}
+
+static void STDMETHODCALLTYPE hook_draw_indexed(ID3D12GraphicsCommandList *l, UINT idx, UINT ic, UINT si, INT bv, UINT sinst)
+{
+    uint32_t arg[3] = { idx, ic, si };
+    trace_op(l, GG_OP_DRAW_INDEXED, 0, arg);
+    if (gg_trace_on == 6) { skip_note(&draws_skipped, "draw"); return; }
+    real_draw_indexed(l, idx, ic, si, bv, sinst);
+}
+
+static void STDMETHODCALLTYPE hook_exec_indirect(ID3D12GraphicsCommandList *l, ID3D12CommandSignature *sig, UINT max,
+                                                 ID3D12Resource *args, UINT64 off, ID3D12Resource *cnt, UINT64 cnt_off)
+{
+    uint32_t arg[3] = { max, (uint32_t)off, cnt != NULL };
+    trace_op(l, GG_OP_EXECUTE_INDIRECT, 0, arg);
+    if (gg_trace_on == 6) { skip_note(&draws_skipped, "draw"); return; }
+    real_exec_indirect(l, sig, max, args, off, cnt, cnt_off);
+}
+
+static void STDMETHODCALLTYPE hook_clear_rtv(ID3D12GraphicsCommandList *l, D3D12_CPU_DESCRIPTOR_HANDLE rtv, const FLOAT *color,
+                                             UINT n, const D3D12_RECT *rects)
+{
+    uint32_t arg[3] = { n, 0, 0 };
+    trace_op(l, GG_OP_CLEAR_RTV, 0, arg);
+    real_clear_rtv(l, rtv, color, n, rects);
+}
+
+static void STDMETHODCALLTYPE hook_set_pso(ID3D12GraphicsCommandList *l, ID3D12PipelineState *ps)
+{
+    gg_cl_rs(l, GG_CL_PSO, ps, 1);
+    real_set_pso(l, ps);
 }
 
 /* CopyTextureRegion: argumentos fora do recurso -> relatorio proprio (com pilha); formatos de copia novos -> log */
@@ -754,15 +829,12 @@ static void check_copytex(const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y
 static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y,
                                            UINT z, const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *box)
 {
-    void *f[GG_SITE_FRAMES];
-    uint32_t arg[3] = { x, y, z }, n = known_frames(f, GG_SITE_FRAMES);
-    gg_trace_add(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
-    log_new_site(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
+    uint32_t arg[3] = { x, y, z };
+    trace_op(l, GG_OP_COPY_TEXTURE, 0, arg);
     check_copytex(dst, x, y, z, src, box);
     if (gg_trace_on == 5) {         /* EXPERIMENTO D3D12Debug=7 (17_fm6.txt PASSO 27): nenhuma copia chega a GPU */
         static volatile LONG skipped;
-        LONG k = InterlockedIncrement(&skipped);
-        if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: CopyTextureRegion #%ld pulado", k);
+        skip_note(&skipped, "CopyTextureRegion");
         return;
     }
     real_copytex(l, dst, x, y, z, src, box);
@@ -771,6 +843,7 @@ static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D
 static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
 {
     gg_trace_reset(l);
+    gg_cl_rs(l, GG_CL_PSO, ps, 1);
     return real_reset(l, a, ps);
 }
 
@@ -808,10 +881,15 @@ static void hook_list_vtable(void *obj)
         swap((void **)&l->lpVtbl->Dispatch, hook_dispatch, (void **)&real_dispatch);
         swap((void **)&l->lpVtbl->CopyTextureRegion, hook_copytex, (void **)&real_copytex);
         swap((void **)&l->lpVtbl->Reset, hook_reset, (void **)&real_reset);
+        swap((void **)&l->lpVtbl->DrawInstanced, hook_draw, (void **)&real_draw);
+        swap((void **)&l->lpVtbl->DrawIndexedInstanced, hook_draw_indexed, (void **)&real_draw_indexed);
+        swap((void **)&l->lpVtbl->ExecuteIndirect, hook_exec_indirect, (void **)&real_exec_indirect);
+        swap((void **)&l->lpVtbl->ClearRenderTargetView, hook_clear_rtv, (void **)&real_clear_rtv);
+        swap((void **)&l->lpVtbl->SetPipelineState, hook_set_pso, (void **)&real_set_pso);
     }
     l->lpVtbl->Release(l);
     wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO%s)",
-         gg_trace_on ? ", rastreio de Dispatch/CopyTextureRegion" : "");
+         gg_trace_on ? ", rastreio de Dispatch/CopyTextureRegion/draws/ClearRTV/PSO" : "");
 }
 
 static HRESULT STDMETHODCALLTYPE hook_list(ID3D12Device *dev, UINT mask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *a,
