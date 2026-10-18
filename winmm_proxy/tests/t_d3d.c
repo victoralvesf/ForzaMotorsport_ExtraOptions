@@ -773,3 +773,55 @@ TEST(fm6_context_table_layout)
         CHECK(srvs_slot == 0x43 && srvs_start == 5 && srvs_n == 1);
     }
 }
+
+/* UpdateSubresource de placement buffer no contexto diferido do FM6 -> memoria do jogo; resto -> Azimuth 0x30 */
+static int upd_calls;
+static void *upd_res;
+static void fake_update_sub(void *ctx, void *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp)
+{
+    (void)ctx; (void)sub; (void)box; (void)src; (void)rp; (void)dp;
+    upd_calls++;
+    upd_res = res;
+}
+
+TEST(fm6_deferred_update_placement_buffer)
+{
+    static void *az_tab[0x10e], *src_tab[0x10e], *def[0x10e];
+    static uint8_t ctx[0xd00], res[0x200], mem[64];
+    static const UINT box[6] = { 8, 0, 0, 12, 1, 1 };
+    uint8_t data[64];
+    int i;
+    for (i = 0; i < 64; i++) data[i] = (uint8_t)(i + 1);
+    fake_azimuth(0);
+    for (i = 0; i < 0x10e; i++) src_tab[i] = (void *)(uintptr_t)(0x1000 + i);
+    fm6_ctx_table(def, src_tab, 0);
+    CHECK(def[0x31] == (void *)0x1030);                        /* imediato: metodo do Azimuth */
+    fm6_ctx_table(def, src_tab, 1);
+    CHECK(def[0x31] == (void *)fm6_UpdateSubresource);
+    az_tab[0x30] = (void *)fake_update_sub;
+    *(void ***)ctx = az_tab;
+    ctx[0xc48] = 1;                                            /* diferido */
+    *(int *)(res + 0x38) = 5;
+    *(UINT *)(res + 0x70) = 64;
+    res[0x88] = 1;
+    *(uint8_t **)(res + 0x168) = mem;
+    fm6_UpdateSubresource(ctx, res, 0, box, data, 0, 0);       /* [8, 12) */
+    CHECK_EQ(upd_calls, 0);
+    CHECK(mem[7] == 0 && mem[8] == 1 && mem[11] == 4 && mem[12] == 0);
+    fm6_UpdateSubresource(ctx, res, 0, NULL, data, 0, 0);      /* sem box: buffer inteiro */
+    CHECK_EQ(upd_calls, 0);
+    CHECK(mem[0] == 1 && mem[63] == 64);
+    upd_calls = 0;
+    {   /* fora do placement / fora dos limites / imediato -> Azimuth (que valida e para) */
+        static const UINT past[6] = { 60, 0, 0, 68, 1, 1 };
+        fm6_UpdateSubresource(ctx, res, 0, past, data, 0, 0);
+        CHECK_EQ(upd_calls, 1);
+        res[0x88] = 0;
+        fm6_UpdateSubresource(ctx, res, 0, box, data, 0, 0);
+        CHECK_EQ(upd_calls, 2);
+        res[0x88] = 1;
+        ctx[0xc48] = 0;
+        fm6_UpdateSubresource(ctx, res, 0, box, data, 0, 0);
+        CHECK(upd_calls == 3 && upd_res == res);
+    }
+}

@@ -1326,6 +1326,37 @@ static const struct { uint8_t slot; void *fn; } fm6_ctx_srvs[] = {
     { 0x3c, (void *)fm6_set_srvs_0x3c }, { 0x40, (void *)fm6_set_srvs_0x40 }, { 0x44, (void *)fm6_set_srvs_0x44 },
 };
 
+/* UpdateSubresource (FM6 0x31 = Azimuth 0x30) de um placement buffer num contexto diferido (game+0x207247): o
+   Azimuth para ("... on a deferred context", validador 0x1401a6fc0). Placement buffer do Azimuth (CreatePlacementBuffer
+   0x140121870, so constantes): +0x38 tipo 5, +0x70 ByteWidth, +0x88 placement, +0x168 memoria do jogo (0 = liberada);
+   o conteudo e a memoria do jogo, copiada por lista diferida no ExecuteCommandList (0x14011bd40). No console o
+   driver escreveria essa memoria; aqui a copia vai para a memoria na gravacao (= o jogo escrevendo o buffer).
+   Diferenca: varias atualizacoes do mesmo buffer na mesma lista ficam so com a ultima (log das primeiras). */
+#define AZ_CTX_DEFERRED   0xc48
+#define AZ_RES_TYPE       0x38
+#define AZ_BUF_WIDTH      0x70
+#define AZ_BUF_PLACEMENT  0x88
+#define AZ_BUF_MEMORY     0x168
+typedef void (*update_sub_fn)(void *ctx, void *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp);
+static void fm6_UpdateSubresource(void *ctx, uint8_t *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp)
+{
+    if (res && src && sub == 0 && ((uint8_t *)ctx)[AZ_CTX_DEFERRED] && *(int *)(res + AZ_RES_TYPE) == 5 &&
+        res[AZ_BUF_PLACEMENT] && *(uint8_t **)(res + AZ_BUF_MEMORY)) {
+        UINT w = *(UINT *)(res + AZ_BUF_WIDTH), lo = box ? box[0] : 0, hi = box ? box[3] : w;
+        if (lo < hi && hi <= w) {
+            static volatile LONG n;
+            LONG k = InterlockedIncrement(&n);
+            memcpy(*(uint8_t **)(res + AZ_BUF_MEMORY) + lo, src, hi - lo);
+            if (k <= 8 || (k & (k - 1)) == 0)
+                wlog("d3d: UpdateSubresource #%ld de placement buffer no diferido %p: buf %p (%u bytes) [%u, %u) "
+                     "-> memoria %p, chamador %p", k, ctx, (void *)res, w, lo, hi,
+                     *(void **)(res + AZ_BUF_MEMORY), __builtin_return_address(0));   /* g_game e so do FM5 */
+            return;
+        }
+    }
+    ((update_sub_fn)(*(void ***)ctx)[fm6_ctx_slot(0x31)])(ctx, res, sub, box, src, rp, dp);
+}
+
 /* monta em dst (0x870 bytes, ja copiados) a tabela do FM6 a partir da tabela do Azimuth src; devolve quantos slots
    triviais do driver entraram no lugar do stub fatal (ou de um slot novo) */
 static int fm6_ctx_table(void **dst, void *const *src, int deferred)
@@ -1344,6 +1375,7 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         n++;
     }
     for (i = 0; i < sizeof fm6_ctx_srvs / sizeof *fm6_ctx_srvs; i++) dst[fm6_ctx_srvs[i].slot] = fm6_ctx_srvs[i].fn;
+    if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
     for (s = 0; s < FM6_CTX_SLOTS; s++)
         if (!dst[s]) dst[s] = g_base + RVA_STUB_SLOT(s);       /* novo sem comportamento: nao acontece hoje */
     return n;
