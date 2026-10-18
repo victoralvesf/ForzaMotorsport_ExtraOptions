@@ -4,7 +4,8 @@
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
  * D3D12Debug=3: sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
- * UINT64_MAX) e grava no log as listas que nao terminaram, com as operacoes em volta da ultima executada.
+ * UINT64_MAX) e grava no log as ultimas listas com a contagem de operacoes e, de cada uma, os pontos de chamada de
+ * Dispatch/CopyTextureRegion guardados pela trava (gpuguard_fm6.c, gg_trace_*).
  * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c): o device nasce
  * antes do apply_patches, quando o jogo ainda nao e conhecido.
  */
@@ -20,6 +21,8 @@ extern uint8_t *g_base;
 extern int cfg_int(const wchar_t *key, int def);
 extern void wlog(const char *fmt, ...);
 extern void gpuguard_install(IUnknown *dev);
+extern void gg_trace_dump(void *cl);
+extern int gg_trace_on;
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
 static create_device_fn real_create_device;
@@ -96,6 +99,7 @@ static DWORD WINAPI dred_watch(void *param)
         buf[len] = 0;
         wlog("debug12: DRED: no %d/%d lista %p fila %p: %u de %u operacoes;%s", idx, total, (void *)node->pCommandList,
              (void *)node->pCommandQueue, last, node->BreadcrumbCount, buf);
+        gg_trace_dump(node->pCommandList);
     }
     wlog("debug12: DRED: %d listas mostradas", shown);
     return 0;
@@ -185,6 +189,7 @@ int debug12_install(void)
     DWORD old;
 
     g_mode = cfg_int(L"D3D12Debug", 0);
+    gg_trace_on = g_mode == 3;
     d3d12 = GetModuleHandleW(L"d3d12.dll");
     if (!d3d12 || *slot != (void *)GetProcAddress(d3d12, "D3D12CreateDevice")) {
         wlog("debug12: slot da IAT %#x nao e D3D12CreateDevice; debug layer NAO ativada", RVA_IAT_D3D12_CREATE_DEVICE);

@@ -87,3 +87,36 @@ TEST(gpuguard_root_signature_per_list)
     gg_cl_rs(&cl1, 1, &rs2, 1);
     CHECK(gg_cl_rs(&cl1, 1, NULL, 0) == &rs2);
 }
+
+TEST(gpuguard_trace_per_list)
+{
+    static int cl1, cl2, rs;
+    void *fa[2] = { (void *)0x140001000, (void *)0x140002000 }, *fb[1] = { (void *)0x140003000 };
+    uint32_t arg[3] = { 8, 8, 1 }, dropped = 99, i;
+    gg_site s[GG_SITES];
+    gg_trace_add(&cl1, GG_OP_DISPATCH, &rs, arg, fa, 2);
+    gg_trace_add(&cl1, GG_OP_DISPATCH, &rs, arg, fa, 2);     /* mesmo ponto: so conta */
+    gg_trace_add(&cl1, GG_OP_COPY_TEXTURE, NULL, arg, fa, 2); /* mesma pilha, outra operacao */
+    gg_trace_add(&cl1, GG_OP_DISPATCH, NULL, arg, fa, 2);     /* outra root signature */
+    gg_trace_add(&cl2, GG_OP_DISPATCH, &rs, arg, fb, 1);
+    CHECK_EQ(gg_trace_get(&cl1, s, GG_SITES, &dropped), 3);
+    CHECK_EQ(dropped, 0);
+    CHECK_EQ(s[0].count, 2);
+    CHECK_EQ(s[0].op, GG_OP_DISPATCH);
+    CHECK(s[0].rs == &rs);
+    CHECK_EQ(s[0].nframes, 2);
+    CHECK(s[0].frames[1] == (void *)0x140002000);
+    CHECK_EQ(s[0].arg[0], 8);
+    CHECK_EQ(s[1].op, GG_OP_COPY_TEXTURE);
+    CHECK(s[2].rs == NULL);
+    CHECK_EQ(gg_trace_get(&cl2, s, GG_SITES, NULL), 1);
+    for (i = 0; i < GG_SITES + 3; i++) {                       /* pontos alem do limite: so contados */
+        void *f[1] = { (void *)(uintptr_t)(0x140100000 + i * 16) };
+        gg_trace_add(&cl2, GG_OP_DISPATCH, &rs, arg, f, 1);
+    }
+    CHECK_EQ(gg_trace_get(&cl2, s, GG_SITES, &dropped), GG_SITES);
+    CHECK_EQ(dropped, 4);
+    gg_trace_reset(&cl1);                                     /* Reset da lista: comeca de novo */
+    CHECK_EQ(gg_trace_get(&cl1, s, GG_SITES, NULL), 0);
+    CHECK_EQ(gg_trace_get(&rs, s, GG_SITES, NULL), 0);        /* lista desconhecida */
+}

@@ -185,6 +185,90 @@ void *gg_cl_rs(void *cl, int compute, void *set, int do_set)
     return r;
 }
 
+/* ---- diagnostico (D3D12Debug=3): quem grava Dispatch/CopyTextureRegion em cada command list ----
+ * O DRED so da a contagem de operacoes da ultima lista antes do page fault (64 Dispatch + 64 CopyTextureRegion);
+ * aqui cada lista guarda os pontos de chamada distintos (pilha em game/azimuth + root signature de compute), zerados
+ * no Reset, e o dred_watch grava os das listas que mostra. */
+
+#define GG_SITE_FRAMES 6
+#define GG_SITES 12
+#define GG_TRACE_SLOTS 2048
+
+enum { GG_OP_DISPATCH, GG_OP_COPY_TEXTURE };
+
+typedef struct {
+    uint32_t hash, count, op, nframes;
+    void *rs;
+    uint32_t arg[3];              /* 1a ocorrencia: grupos do Dispatch / destino x,y,z da copia */
+    void *frames[GG_SITE_FRAMES];
+} gg_site;
+typedef struct { void *cl; uint32_t n, dropped; gg_site s[GG_SITES]; } gg_trace;
+
+int gg_trace_on;
+static gg_trace trace_tab[GG_TRACE_SLOTS];
+static SRWLOCK trace_lock = SRWLOCK_INIT;
+
+/* registro da lista (cria se `make`); chamado com trace_lock */
+static gg_trace *gg_trace_slot(void *cl, int make)
+{
+    unsigned h = hptr(cl, GG_TRACE_SLOTS), k;
+    for (k = 0; k < GG_TRACE_SLOTS; k++, h = (h + 1) & (GG_TRACE_SLOTS - 1)) {
+        if (trace_tab[h].cl == cl) return &trace_tab[h];
+        if (!trace_tab[h].cl) {
+            if (!make) return NULL;
+            trace_tab[h].cl = cl;
+            return &trace_tab[h];
+        }
+    }
+    return NULL;
+}
+
+void gg_trace_add(void *cl, uint32_t op, void *rs, const uint32_t *arg, void *const *frames, uint32_t nframes)
+{
+    uint32_t hash = 2166136261u ^ op, i;
+    gg_trace *t;
+    if (nframes > GG_SITE_FRAMES) nframes = GG_SITE_FRAMES;
+    for (i = 0; i < nframes; i++) hash = (hash ^ (uint32_t)(uintptr_t)frames[i]) * 16777619u;
+    hash = (hash ^ (uint32_t)((uintptr_t)rs >> 4)) * 16777619u;
+    AcquireSRWLockExclusive(&trace_lock);
+    if ((t = gg_trace_slot(cl, 1))) {
+        for (i = 0; i < t->n; i++)
+            if (t->s[i].hash == hash && t->s[i].op == op && t->s[i].rs == rs) { t->s[i].count++; break; }
+        if (i == t->n) {
+            if (t->n < GG_SITES) {
+                gg_site *s = &t->s[t->n++];
+                s->hash = hash; s->count = 1; s->op = op; s->rs = rs; s->nframes = nframes;
+                memcpy(s->arg, arg, sizeof s->arg);
+                memcpy(s->frames, frames, nframes * sizeof *frames);
+            } else t->dropped++;
+        }
+    }
+    ReleaseSRWLockExclusive(&trace_lock);
+}
+
+void gg_trace_reset(void *cl)
+{
+    gg_trace *t;
+    AcquireSRWLockExclusive(&trace_lock);
+    if ((t = gg_trace_slot(cl, 0))) { t->n = 0; t->dropped = 0; }
+    ReleaseSRWLockExclusive(&trace_lock);
+}
+
+/* copia (para o teste e para o log) dos pontos da lista; devolve quantos */
+uint32_t gg_trace_get(void *cl, gg_site *out, uint32_t max, uint32_t *dropped)
+{
+    gg_trace *t;
+    uint32_t n = 0;
+    AcquireSRWLockShared(&trace_lock);
+    if ((t = gg_trace_slot(cl, 0))) {
+        n = t->n < max ? t->n : max;
+        memcpy(out, t->s, n * sizeof *out);
+        if (dropped) *dropped = t->dropped;
+    }
+    ReleaseSRWLockShared(&trace_lock);
+    return n;
+}
+
 /* ---- hooks ---- */
 
 static void (STDMETHODCALLTYPE *real_cbv)(ID3D12Device *, const D3D12_CONSTANT_BUFFER_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
@@ -208,6 +292,10 @@ static root_va_fn real_ccbv, real_gcbv, real_csrv, real_gsrv, real_cuav, real_gu
 static void (STDMETHODCALLTYPE *real_ib)(ID3D12GraphicsCommandList *, const D3D12_INDEX_BUFFER_VIEW *);
 static void (STDMETHODCALLTYPE *real_vb)(ID3D12GraphicsCommandList *, UINT, UINT, const D3D12_VERTEX_BUFFER_VIEW *);
 static void (STDMETHODCALLTYPE *real_so)(ID3D12GraphicsCommandList *, UINT, UINT, const D3D12_STREAM_OUTPUT_BUFFER_VIEW *);
+static void (STDMETHODCALLTYPE *real_dispatch)(ID3D12GraphicsCommandList *, UINT, UINT, UINT);
+static void (STDMETHODCALLTYPE *real_copytex)(ID3D12GraphicsCommandList *, const D3D12_TEXTURE_COPY_LOCATION *, UINT, UINT, UINT,
+                                              const D3D12_TEXTURE_COPY_LOCATION *, const D3D12_BOX *);
+static HRESULT (STDMETHODCALLTYPE *real_reset)(ID3D12GraphicsCommandList *, ID3D12CommandAllocator *, ID3D12PipelineState *);
 
 static UINT res_inc;
 
@@ -241,6 +329,38 @@ static void report(const char *what, uint64_t v)
         if (one[0]) len += wsprintfA(buf + len, "%s", one);
     }
     wlog("%s", buf);
+}
+
+/* pilha so com os quadros do jogo e do azimuth.exe */
+static uint32_t known_frames(void **out, uint32_t max)
+{
+    void *frames[32];
+    uint32_t n = RtlCaptureStackBackTrace(2, 32, frames, NULL), i, k = 0;
+    for (i = 0; i < n && k < max; i++) {
+        uint8_t *a = frames[i];
+        if ((g_fm6_game && a >= g_fm6_game && a < g_fm6_game + 0x8000000) || (a >= g_base && a < g_base + 0x1000000))
+            out[k++] = a;
+    }
+    return k;
+}
+
+/* grava no log os pontos de chamada guardados de uma lista (dred_watch) */
+void gg_trace_dump(void *cl)
+{
+    gg_site s[GG_SITES];
+    uint32_t dropped = 0, n = gg_trace_get(cl, s, GG_SITES, &dropped), i, j;
+    for (i = 0; i < n; i++) {
+        char buf[400], one[40];
+        int len = wsprintfA(buf, "gpuguard: lista %p: %s x%u (1o %u,%u,%u) rs %p;", cl,
+                            s[i].op == GG_OP_DISPATCH ? "Dispatch" : "CopyTextureRegion", s[i].count,
+                            s[i].arg[0], s[i].arg[1], s[i].arg[2], s[i].rs);
+        for (j = 0; j < s[i].nframes; j++) {
+            label(one, s[i].frames[j]);
+            len += wsprintfA(buf + len, "%s", one);
+        }
+        wlog("%s", buf);
+    }
+    if (dropped) wlog("gpuguard: lista %p: %u chamadas em pontos alem dos %d guardados", cl, dropped, GG_SITES);
 }
 
 static uint64_t guard_va(const char *what, uint64_t va)
@@ -291,6 +411,40 @@ static void check_table(ID3D12GraphicsCommandList *l, int compute, UINT param, D
     }
 }
 
+/* resumo de uma root signature no log (D3D12Debug=3): parametros e tabelas, "U" = range sem limite */
+static void log_rootsig(void *rs, const D3D12_ROOT_SIGNATURE_DESC1 *d)
+{
+    static volatile LONG shown;
+    static const char *const kinds[] = { "SRV", "UAV", "CBV", "SMP" };
+    char buf[900];
+    int len;
+    UINT i, j;
+    if (InterlockedIncrement(&shown) > 120) return;
+    len = wsprintfA(buf, "gpuguard: rs %p: %u params:", rs, d->NumParameters);
+    for (i = 0; i < d->NumParameters && len < 820; i++) {
+        const D3D12_ROOT_PARAMETER1 *p = &d->pParameters[i];
+        if (p->ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            len += wsprintfA(buf + len, " %u=tab[", i);
+            for (j = 0; j < p->DescriptorTable.NumDescriptorRanges && len < 820; j++) {
+                const D3D12_DESCRIPTOR_RANGE1 *r = &p->DescriptorTable.pDescriptorRanges[j];
+                if (r->NumDescriptors == UINT_MAX)
+                    len += wsprintfA(buf + len, "%s%s U t%u s%u", j ? "," : "", kinds[r->RangeType & 3],
+                                     r->BaseShaderRegister, r->RegisterSpace);
+                else
+                    len += wsprintfA(buf + len, "%s%s %u t%u s%u", j ? "," : "", kinds[r->RangeType & 3],
+                                     r->NumDescriptors, r->BaseShaderRegister, r->RegisterSpace);
+            }
+            len += wsprintfA(buf + len, "]");
+        } else if (p->ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
+            len += wsprintfA(buf + len, " %u=k%u", i, p->Constants.Num32BitValues);
+        } else {
+            static const char *const views[] = { "cbv", "srv", "uav" };
+            len += wsprintfA(buf + len, " %u=%s", i, views[(p->ParameterType - 2) % 3]);
+        }
+    }
+    wlog("%s", buf);
+}
+
 static HRESULT STDMETHODCALLTYPE hook_rootsig(ID3D12Device *dev, UINT mask, const void *blob, SIZE_T len, REFIID riid, void **out)
 {
     static PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER deser;
@@ -307,6 +461,7 @@ static HRESULT STDMETHODCALLTYPE hook_rootsig(ID3D12Device *dev, UINT mask, cons
                 if (vd->Desc_1_1.pParameters[i].ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE)
                     size[i] = gg_table_size(&vd->Desc_1_1.pParameters[i].DescriptorTable);
             gg_rs_add(*out, size, n);
+            if (gg_trace_on) log_rootsig(*out, &vd->Desc_1_1);
         }
         ds->lpVtbl->Release(ds);
     }
@@ -426,6 +581,58 @@ static void STDMETHODCALLTYPE hook_so(ID3D12GraphicsCommandList *l, UINT start, 
     real_so(l, start, n, v);
 }
 
+/* 1o uso de cada ponto de chamada no processo (a lista do page fault pode ja ter sido solta quando o DRED a mostra:
+   pCommandList nulo no no) */
+static void log_new_site(void *cl, uint32_t op, void *rs, const uint32_t *arg, void *const *f, uint32_t n)
+{
+    static uint32_t seen[256];
+    static volatile LONG nseen;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    uint32_t hash = 2166136261u ^ op, i;
+    char buf[400], one[40];
+    int len;
+    for (i = 0; i < n; i++) hash = (hash ^ (uint32_t)(uintptr_t)f[i]) * 16777619u;
+    hash = (hash ^ (uint32_t)((uintptr_t)rs >> 4)) * 16777619u;
+    AcquireSRWLockExclusive(&lock);
+    for (i = 0; i < (uint32_t)nseen && seen[i] != hash; i++) {}
+    if (i < (uint32_t)nseen || nseen >= 256) { ReleaseSRWLockExclusive(&lock); return; }
+    seen[nseen++] = hash;
+    ReleaseSRWLockExclusive(&lock);
+    len = wsprintfA(buf, "gpuguard: ponto novo de %s (%u,%u,%u) rs %p lista %p tid=%lu;",
+                    op == GG_OP_DISPATCH ? "Dispatch" : "CopyTextureRegion", arg[0], arg[1], arg[2], rs, cl,
+                    GetCurrentThreadId());
+    for (i = 0; i < n; i++) {
+        label(one, f[i]);
+        len += wsprintfA(buf + len, "%s", one);
+    }
+    wlog("%s", buf);
+}
+
+static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x, UINT y, UINT z)
+{
+    void *f[GG_SITE_FRAMES], *rs = gg_cl_rs(l, 1, NULL, 0);
+    uint32_t arg[3] = { x, y, z }, n = known_frames(f, GG_SITE_FRAMES);
+    gg_trace_add(l, GG_OP_DISPATCH, rs, arg, f, n);
+    log_new_site(l, GG_OP_DISPATCH, rs, arg, f, n);
+    real_dispatch(l, x, y, z);
+}
+
+static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y,
+                                           UINT z, const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *box)
+{
+    void *f[GG_SITE_FRAMES];
+    uint32_t arg[3] = { x, y, z }, n = known_frames(f, GG_SITE_FRAMES);
+    gg_trace_add(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
+    log_new_site(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
+    real_copytex(l, dst, x, y, z, src, box);
+}
+
+static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
+{
+    gg_trace_reset(l);
+    return real_reset(l, a, ps);
+}
+
 /* troca um slot de vtable (memoria somente leitura da dll) e guarda o original */
 static void swap(void **slot, void *hook, void **orig)
 {
@@ -456,8 +663,14 @@ static void hook_list_vtable(void *obj)
     swap((void **)&l->lpVtbl->SetGraphicsRootSignature, hook_grs, (void **)&real_grs);
     swap((void **)&l->lpVtbl->SetComputeRootDescriptorTable, hook_ctab, (void **)&real_ctab);
     swap((void **)&l->lpVtbl->SetGraphicsRootDescriptorTable, hook_gtab, (void **)&real_gtab);
+    if (gg_trace_on) {
+        swap((void **)&l->lpVtbl->Dispatch, hook_dispatch, (void **)&real_dispatch);
+        swap((void **)&l->lpVtbl->CopyTextureRegion, hook_copytex, (void **)&real_copytex);
+        swap((void **)&l->lpVtbl->Reset, hook_reset, (void **)&real_reset);
+    }
     l->lpVtbl->Release(l);
-    wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO)");
+    wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO%s)",
+         gg_trace_on ? ", rastreio de Dispatch/CopyTextureRegion" : "");
 }
 
 static HRESULT STDMETHODCALLTYPE hook_list(ID3D12Device *dev, UINT mask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *a,
