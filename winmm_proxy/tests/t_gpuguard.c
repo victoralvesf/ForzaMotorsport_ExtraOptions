@@ -1,6 +1,6 @@
 /*
- * Testes de gpuguard_fm6.c: deteccao do veneno 0xdeadbeef (endereco de GPU e descritor) e bitmap de slots
- * gravados por heap de descritores.
+ * Testes de gpuguard_fm6.c: deteccao do veneno 0xdeadbeef em enderecos de GPU, bitmap de slots gravados por heap
+ * de descritores, tamanho das tabelas da root signature e root signature atual por command list.
  */
 #include "../gpuguard_fm6.c"
 #include "test.h"
@@ -16,22 +16,13 @@ TEST(gpuguard_va_poisoned)
     CHECK(!gg_va_poisoned(0));
 }
 
-TEST(gpuguard_desc_poisoned)
-{
-    uint32_t d[8] = { 0x1000, 0x20000, 0xdeadbeef, 0, 0xdeadbeef, 0xdeadbeef, 0, 0 };
-    CHECK(gg_desc_poisoned(d, 8));
-    CHECK(!gg_desc_poisoned(d, 5));     /* um 0xdeadbeef sozinho pode ser dado legitimo */
-    d[5] = 0;
-    CHECK(!gg_desc_poisoned(d, 8));
-}
-
 TEST(gpuguard_heap_slots)
 {
     static uint8_t mem[64 * 32], mem2[16 * 32];
     uintptr_t a = (uintptr_t)mem;
     gg_heap_reset();
     CHECK_EQ(gg_written(a), (unsigned long long)-1);   /* fora de heap conhecido: sem opiniao */
-    gg_heap_add(a, 64, 32);
+    gg_heap_add(a, 64, 32, 0);
     CHECK_EQ(gg_written(a + 5 * 32), 0);
     gg_mark(a + 4 * 32, 3);                             /* slots 4..6 */
     CHECK_EQ(gg_written(a + 3 * 32), 0);
@@ -41,10 +32,58 @@ TEST(gpuguard_heap_slots)
     gg_mark(a + 62 * 32, 5);                            /* passa do fim: so 62..63 */
     CHECK_EQ(gg_written(a + 63 * 32), 1);
     CHECK_EQ(gg_written(a + 64 * 32), (unsigned long long)-1);
-    gg_heap_add((uintptr_t)mem2, 16, 32);
+    gg_heap_add((uintptr_t)mem2, 16, 32, 0);
     CHECK_EQ(gg_written(a + 4 * 32), 1);                /* outro heap nao mexe neste */
-    gg_heap_add(a + 32 * 32, 8, 32);                    /* sobrepoe: memoria reaproveitada -> heap antigo sai */
+    gg_heap_add(a + 32 * 32, 8, 32, 0);                 /* sobrepoe: memoria reaproveitada -> heap antigo sai */
     CHECK_EQ(gg_written(a + 4 * 32), (unsigned long long)-1);
     CHECK_EQ(gg_written(a + 32 * 32), 0);
     gg_heap_reset();
+}
+
+TEST(gpuguard_gpu_handle_to_cpu)
+{
+    static uint8_t mem[16 * 32];
+    gg_heap_reset();
+    gg_heap_add((uintptr_t)mem, 16, 32, 0x10000000ull);
+    CHECK_EQ(gg_gpu_to_cpu(0x10000000ull + 3 * 32), (uintptr_t)mem + 3 * 32);
+    CHECK_EQ(gg_gpu_to_cpu(0x10000000ull + 16 * 32), 0);   /* fim do heap */
+    CHECK_EQ(gg_gpu_to_cpu(0x0fffffe0ull), 0);
+    gg_heap_reset();
+}
+
+TEST(gpuguard_table_size)
+{
+    D3D12_DESCRIPTOR_RANGE1 r[3] = {
+        { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 14, 0, 0, 0, 0 },
+        { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 8, 0, 0, 0, D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND },   /* 14..21 */
+        { D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 2, 0, 0, 0, 30 },                                    /* 30..31 */
+    };
+    D3D12_ROOT_DESCRIPTOR_TABLE1 t = { 2, r };
+    CHECK_EQ(gg_table_size(&t), 22);
+    t.NumDescriptorRanges = 3;
+    CHECK_EQ(gg_table_size(&t), 32);
+    r[1].NumDescriptors = UINT_MAX;                     /* sem limite: nao conferida */
+    CHECK_EQ(gg_table_size(&t), 0);
+    r[1].NumDescriptors = 8;
+    r[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+    CHECK_EQ(gg_table_size(&t), 0);
+}
+
+TEST(gpuguard_root_signature_per_list)
+{
+    static int rs1, rs2, cl1, cl2;
+    uint32_t size[3] = { 0, 22, 4 };
+    gg_rs_add(&rs1, size, 3);
+    CHECK_EQ(gg_rs_table(&rs1, 1), 22);
+    CHECK_EQ(gg_rs_table(&rs1, 2), 4);
+    CHECK_EQ(gg_rs_table(&rs1, 3), 0);                  /* parametro alem do fim */
+    CHECK_EQ(gg_rs_table(&rs2, 1), 0);                  /* root signature desconhecida */
+    CHECK_EQ(gg_rs_table(NULL, 1), 0);
+    gg_cl_rs(&cl1, 1, &rs1, 1);
+    gg_cl_rs(&cl1, 0, &rs2, 1);
+    CHECK(gg_cl_rs(&cl1, 1, NULL, 0) == &rs1);
+    CHECK(gg_cl_rs(&cl1, 0, NULL, 0) == &rs2);
+    CHECK(gg_cl_rs(&cl2, 1, NULL, 0) == NULL);          /* lista sem root signature */
+    gg_cl_rs(&cl1, 1, &rs2, 1);
+    CHECK(gg_cl_rs(&cl1, 1, NULL, 0) == &rs2);
 }

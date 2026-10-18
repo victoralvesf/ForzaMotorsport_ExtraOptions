@@ -5,7 +5,8 @@
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
  * D3D12Debug=3: sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
  * UINT64_MAX) e grava no log as listas que nao terminaram, com as operacoes em volta da ultima executada.
- * No FM6 o hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c).
+ * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c): o device nasce
+ * antes do apply_patches, quando o jogo ainda nao e conhecido.
  */
 #define INITGUID
 #include <windows.h>
@@ -18,7 +19,6 @@
 extern uint8_t *g_base;
 extern int cfg_int(const wchar_t *key, int def);
 extern void wlog(const char *fmt, ...);
-extern int is_fm6(void);
 extern void gpuguard_install(IUnknown *dev);
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
@@ -148,7 +148,7 @@ static HRESULT WINAPI hook_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL le
     HRESULT hr;
     if (g_mode) enable_debug_layer();
     hr = real_create_device(adapter, level, riid, out);
-    if (SUCCEEDED(hr) && out && *out && is_fm6()) gpuguard_install((IUnknown *)*out);
+    if (SUCCEEDED(hr) && out && *out) gpuguard_install((IUnknown *)*out);
     if (!g_mode) return hr;
     if (g_mode == 3 && SUCCEEDED(hr) && out && *out) {
         static int watching;
