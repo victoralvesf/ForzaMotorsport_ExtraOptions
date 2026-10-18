@@ -737,6 +737,7 @@ TEST(fm6_context_table_layout)
     src[0x1d] = az + 0xf5f30 + 0x1d * 0x100;                    /* stubs fatais do Azimuth */
     src[0x70] = az + 0xf5f30 + 0x70 * 0x100;
     src[0xc6] = az + 0xf5f30 + 0xc6 * 0x100;
+    src[0xca] = az + 0xf5f30 + 0xca * 0x100;
     CHECK(site_imm(imm, src, 0x870) == imm);
     CHECK(site_def(def, src, 0x870) == def);
     CHECK(imm[0] == (void *)0x1000 && imm[7] == (void *)0x1007);
@@ -757,6 +758,8 @@ TEST(fm6_context_table_layout)
     CHECK(def[0x1e] == az + 0xf5f30 + 0x1d * 0x100 && def[0xc9] == az + 0xf5f30 + 0xc6 * 0x100);
     CHECK_EQ(((long (*)(void))def[0x71])(), 0);
     CHECK(def[0xc7] == (void *)0x10c4);
+    CHECK_EQ(((long (*)(void))imm[0xcd])(), 0);                 /* SetGraphicsShaderLimits: sem efeito */
+    CHECK_EQ(((long (*)(void))def[0xcd])(), 0);
     {   /* XXSetShaderResources do FM6 (ppViews, StartSlot, packed) -> metodo do Azimuth em [ctx] (start, n, ppViews) */
         static void *az_tab[0x10e], *ctx[1] = { az_tab }, *views[2];
         typedef void (*fm6_srvs_fn)(void *, void *const *, UINT, UINT);

@@ -1304,6 +1304,9 @@ static const struct { uint8_t slot; long (*imm)(void), (*def)(void); } fm6_ctx_t
     { 0x9f, NULL, ctx_ret0 }, { 0xa0, NULL, ctx_ret0 }, { 0xa1, NULL, ctx_ret0 }, { 0xa2, NULL, ctx_ret0 },
     { 0xc9, ctx_fail, NULL }, { 0xca, ctx_fail, NULL },
     { 0xcb, ctx_ret0, NULL }, { 0xcc, ctx_ret0, NULL },
+    /* SetGraphicsShaderLimits (Azimuth 0xca, stub fatal; game+0x440823): no driver so copia 0x3c bytes de limites
+       de onda/CU por estagio p/ o estado do hardware (umd 0x77c60), sem retorno -> sem efeito no PC */
+    { 0xcd, ctx_ret0, ctx_ret0 },
     { 0xdc, ctx_ret0, ctx_ret0 },
     { 0xde, ctx_fail, NULL }, { 0xdf, ctx_ret0, NULL },
     { 0xe2, ctx_ret0, NULL },
