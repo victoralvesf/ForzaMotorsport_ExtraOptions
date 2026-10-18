@@ -720,6 +720,13 @@ static void fake_set_srvs(void *ctx, UINT start, UINT n, void *const *views, UIN
 }
 static void fake_set_srvs_19(void *c, UINT s, UINT n, void *const *v) { fake_set_srvs(c, s, n, v, 0x19); }
 static void fake_set_srvs_43(void *c, UINT s, UINT n, void *const *v) { fake_set_srvs(c, s, n, v, 0x43); }
+static void fake_set_srvs_09(void *c, UINT s, UINT n, void *const *v) { fake_set_srvs(c, s, n, v, 0x09); }
+static void *ib_ctx, *ib_buf;
+static UINT ib_fmt, ib_off;
+static void fake_set_ib(void *ctx, UINT hwfmt, void *buf, UINT off)
+{
+    ib_ctx = ctx; ib_fmt = hwfmt; ib_buf = buf; ib_off = off;
+}
 
 TEST(fm6_context_table_layout)
 {
@@ -771,6 +778,23 @@ TEST(fm6_context_table_layout)
         CHECK_EQ(srvs_n, 2);
         ((fm6_srvs_fn)def[0x44])(ctx, views, 5, (0x140 + 5 * 32) | 0x70000);               /* CS, 1 view */
         CHECK(srvs_slot == 0x43 && srvs_start == 5 && srvs_n == 1);
+    }
+    {   /* SetFast* (FM6 0xa3.., Azimuth 0xa0.. stub fatal) -> Set* padrao; IASetFastIndexBuffer (game+0x131a2d) */
+        static void *az_tab[0x10e], *ctx[1] = { az_tab };
+        static void *src2[0x10e], *imm2[0x10e];
+        for (i = 0; i < 0x10e; i++) src2[i] = (void *)(uintptr_t)(0x1000 + i);
+        src2[0xb3] = az + 0xf5f30 + 0xb3 * 0x100;
+        src2[0xa1] = az + 0xf5f30 + 0xa1 * 0x100;
+        CHECK(site_imm(imm2, src2, 0x870) == imm2);
+        CHECK(imm2[0xa3] == (void *)0x10a0);                    /* implementado no Azimuth: intacto */
+        az_tab[0x14] = (void *)fake_set_ib;
+        ((void (*)(void *, UINT, void *))imm2[0xb6])(ctx, 1, (void *)0x1b1b);
+        CHECK(ib_ctx == ctx && ib_buf == (void *)0x1b1b);
+        CHECK_EQ(ib_fmt, 1);
+        CHECK_EQ(ib_off, 0);
+        az_tab[0x09] = (void *)fake_set_srvs_09;
+        ((void (*)(void *, UINT, void *))imm2[0xa4])(ctx, 4, (void *)0x5a5a);   /* PSSetFastShaderResource */
+        CHECK(srvs_slot == 0x09 && srvs_start == 4 && srvs_n == 1 && srvs_views[0] == (void *)0x5a5a);
     }
 }
 

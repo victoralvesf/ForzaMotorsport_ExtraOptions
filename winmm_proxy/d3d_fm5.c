@@ -1326,6 +1326,20 @@ static const struct { uint8_t slot; void *fn; } fm6_ctx_srvs[] = {
     { 0x3c, (void *)fm6_set_srvs_0x3c }, { 0x40, (void *)fm6_set_srvs_0x40 }, { 0x44, (void *)fm6_set_srvs_0x44 },
 };
 
+/* X SetFast* (FM6 0xa3..0xb6 = Azimuth 0xa0..0xb3, stubs fatais): no umd do FM6 tem os mesmos tamanhos do FH2
+   (umd_vtdiff "equ"; IASetFastIndexBuffer 0x1c010 = (hwfmt, buffer), como o 0x18c90 do FH2) -> os wrappers do FM5
+   sobre os Set* padrao do Azimuth em [ctx], na mesma ordem (game+0x131a2d: IASetFastIndexBuffer(1, ib)). */
+#define FM6_FAST_FIRST 0xa3
+static void *const fm6_ctx_fast[] = {
+    (void *)ctx_PSSetFastConstantBuffer, (void *)ctx_PSSetFastShaderResource, (void *)ctx_PSSetFastSampler,
+    (void *)ctx_VSSetFastConstantBuffer, (void *)ctx_VSSetFastShaderResource, (void *)ctx_VSSetFastSampler,
+    (void *)ctx_GSSetFastConstantBuffer, (void *)ctx_GSSetFastShaderResource, (void *)ctx_GSSetFastSampler,
+    (void *)ctx_CSSetFastConstantBuffer, (void *)ctx_CSSetFastShaderResource, (void *)ctx_CSSetFastSampler,
+    (void *)ctx_HSSetFastConstantBuffer, (void *)ctx_HSSetFastShaderResource, (void *)ctx_HSSetFastSampler,
+    (void *)ctx_DSSetFastConstantBuffer, (void *)ctx_DSSetFastShaderResource, (void *)ctx_DSSetFastSampler,
+    (void *)ctx_IASetFastVertexBuffer, (void *)ctx_IASetFastIndexBuffer,
+};
+
 /* UpdateSubresource (FM6 0x31 = Azimuth 0x30) de um placement buffer num contexto diferido (game+0x207247): o
    Azimuth para ("... on a deferred context", validador 0x1401a6fc0). Placement buffer do Azimuth (CreatePlacementBuffer
    0x140121870, so constantes): +0x38 tipo 5, +0x70 ByteWidth, +0x88 placement, +0x168 memoria do jogo (0 = liberada);
@@ -1375,6 +1389,10 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         n++;
     }
     for (i = 0; i < sizeof fm6_ctx_srvs / sizeof *fm6_ctx_srvs; i++) dst[fm6_ctx_srvs[i].slot] = fm6_ctx_srvs[i].fn;
+    for (i = 0; i < sizeof fm6_ctx_fast / sizeof *fm6_ctx_fast; i++) {
+        int s = FM6_FAST_FIRST + (int)i, a = fm6_ctx_slot(s);
+        if (src[a] == g_base + RVA_STUB_SLOT(a)) dst[s] = fm6_ctx_fast[i];
+    }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
     for (s = 0; s < FM6_CTX_SLOTS; s++)
         if (!dst[s]) dst[s] = g_base + RVA_STUB_SLOT(s);       /* novo sem comportamento: nao acontece hoje */
