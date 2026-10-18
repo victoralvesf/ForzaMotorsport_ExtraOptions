@@ -854,6 +854,41 @@ TEST(fm6_deferred_update_placement_buffer)
     }
 }
 
+/* SOSetTargets do FM6 (0x26 = Azimuth 0x25, stub fatal): desligar (0, NULL, NULL) = no-op; buffer -> Azimuth */
+static int so_calls;
+static UINT so_n;
+static void fake_so_set(void *ctx, UINT n, void *const *bufs, const UINT *offsets)
+{
+    (void)ctx; (void)bufs; (void)offsets;
+    so_calls++;
+    so_n = n;
+}
+
+TEST(fm6_so_set_targets_unbind)
+{
+    static void *az_tab[0x10e], *src_tab[0x10e], *tab[0x10e];
+    static uint8_t ctx[0x100];
+    void *nulls[2] = { NULL, NULL }, *bufs[2] = { NULL, (void *)0x77 };
+    uint8_t *az = fake_azimuth(0);
+    int i;
+    for (i = 0; i < 0x10e; i++) src_tab[i] = (void *)(uintptr_t)(0x1000 + i);
+    fm6_ctx_table(tab, src_tab, 0);
+    CHECK(tab[0x26] == (void *)0x1025);                        /* Azimuth com metodo proprio: intacto */
+    src_tab[0x25] = az + 0xf5f30 + 0x25 * 0x100;
+    fm6_ctx_table(tab, src_tab, 0);
+    CHECK(tab[0x26] == (void *)fm6_SOSetTargets);
+    fm6_ctx_table(tab, src_tab, 1);
+    CHECK(tab[0x26] == (void *)fm6_SOSetTargets);
+    az_tab[0x25] = (void *)fake_so_set;
+    *(void ***)ctx = az_tab;
+    so_calls = 0;
+    ((void (*)(void *, UINT, void *const *, const UINT *))tab[0x26])(ctx, 0, NULL, NULL);   /* game+0x21c61d */
+    ((void (*)(void *, UINT, void *const *, const UINT *))tab[0x26])(ctx, 2, nulls, NULL);
+    CHECK_EQ(so_calls, 0);
+    ((void (*)(void *, UINT, void *const *, const UINT *))tab[0x26])(ctx, 2, bufs, NULL);
+    CHECK(so_calls == 1 && so_n == 2);
+}
+
 /* Batches de recursos do FM6: montadores do jogo (game+0xda9b94 CB, 0xda9cac SRV) gravam o objeto no registro e o
    SetFastResourcesFromBatch (FM6 0xd7) aplica com o Set* padrao do Azimuth em [ctx] */
 static int batch_calls;

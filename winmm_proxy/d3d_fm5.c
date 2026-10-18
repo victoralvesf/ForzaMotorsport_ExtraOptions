@@ -1422,6 +1422,21 @@ static void fm6_UpdateSubresource(void *ctx, uint8_t *res, UINT sub, const UINT 
     ((update_sub_fn)(*(void ***)ctx)[fm6_ctx_slot(0x31)])(ctx, res, sub, box, src, rp, dp);
 }
 
+/* SOSetTargets (FM6 0x26 = Azimuth 0x25, stub fatal; o Azimuth nao tem stream out e os PSOs nao tem SO): o unico
+   chamador pelo contexto (game+0x21c61d) desliga o stream out com (0, NULL, NULL) -> sem efeito no PC. Algum
+   buffer de verdade -> stub do Azimuth (para com os argumentos). */
+#define FM6_SLOT_SO_SET 0x26
+typedef void (*so_set_fn)(void *ctx, UINT n, void *const *bufs, const UINT *offsets);
+static void fm6_SOSetTargets(void *ctx, UINT n, void *const *bufs, const UINT *offsets)
+{
+    UINT i;
+    for (i = 0; bufs && i < n; i++)
+        if (bufs[i]) {
+            ((so_set_fn)(*(void ***)ctx)[fm6_ctx_slot(FM6_SLOT_SO_SET)])(ctx, n, bufs, offsets);
+            return;
+        }
+}
+
 /* Batches de recursos do FM6 (SetFastResourcesFromBatch, FM6 0xd7 = Azimuth 0xd4, stub fatal; game+0xda9ad1). No
    console o jogo monta o batch sozinho: game+0xda9b94 (CB) e game+0xda9cac (SRV) apontam [ctx+0x40]/[ctx+0x48] do
    contexto para a memoria do batch (o BeginResourceBatch inline) e gravam pacotes da CE prontos: cabecalho
@@ -1731,6 +1746,8 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         if (src[a] == g_base + RVA_STUB_SLOT(a)) dst[s] = fm6_ctx_fast[i];
     }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
+    if (src[fm6_ctx_slot(FM6_SLOT_SO_SET)] == g_base + RVA_STUB_SLOT(fm6_ctx_slot(FM6_SLOT_SO_SET)))
+        dst[FM6_SLOT_SO_SET] = (void *)fm6_SOSetTargets;
     if (src[AZ_SLOT_EXECUTE] != g_base + RVA_STUB_SLOT(AZ_SLOT_EXECUTE))
         dst[0x3b] = (void *)fm6_ExecuteCommandList;
     if (deferred && src[AZ_SLOT_FINISH] != g_base + RVA_STUB_SLOT(AZ_SLOT_FINISH))
