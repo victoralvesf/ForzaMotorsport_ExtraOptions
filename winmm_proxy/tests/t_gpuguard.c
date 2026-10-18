@@ -534,7 +534,8 @@ static int lite_draws, lite_tabs;
 static UINT lite_tab_i;
 static UINT64 lite_tab_g;
 static HRESULT STDMETHODCALLTYPE lite_qi(ID3D12GraphicsCommandList *l, REFIID iid, void **out) { (void)iid; *out = l; return S_OK; }
-static ULONG STDMETHODCALLTYPE lite_release(ID3D12GraphicsCommandList *l) { (void)l; return 1; }
+static ULONG lite_refs = 1;
+static ULONG STDMETHODCALLTYPE lite_release(ID3D12GraphicsCommandList *l) { (void)l; return lite_refs; }
 static void STDMETHODCALLTYPE lite_grs(ID3D12GraphicsCommandList *l, ID3D12RootSignature *rs) { (void)l; (void)rs; }
 static void STDMETHODCALLTYPE lite_set_pso(ID3D12GraphicsCommandList *l, ID3D12PipelineState *ps) { (void)l; (void)ps; }
 static HRESULT STDMETHODCALLTYPE lite_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
@@ -601,8 +602,45 @@ TEST(gpuguard_null_uavs_without_trace)
     lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&pso);
     lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
     CHECK(lite_draws == 5 && lite_tabs == 2 && lite_tab_i == 2);
+    CHECK(lite_vt.Release == hook_list_release);
+    lite_refs = 0;                                            /* ultima referencia: registro da lista sai */
+    lite_vt.Release(l);
+    CHECK(gg_cl_rs(l, 0, NULL, 0) == NULL && gg_cl_rs(l, GG_CL_PSO, NULL, 0) == NULL);
+    lite_refs = 1;
     null_uav_gpu = 0;
     gg_trace_on = saved;
+}
+
+/* tabelas por lista: tirar uma lista nao quebra a cadeia das que colidiram com ela; tabela nao enche com listas
+   criadas e destruidas (PASSO 33: o fps caia ate travar) */
+TEST(gpuguard_list_forget)
+{
+    void *k[8];
+    int i, n = 0, cycle, before = 0, after = 0;
+    uintptr_t p;
+    unsigned h0 = hptr((void *)(uintptr_t)0x20000000u, GG_CL_SLOTS);
+    for (p = 0x20000000u; n < 8 && p < 0x20000000u + 0x1000000u; p += 16)   /* 8 listas com a mesma casa */
+        if (hptr((void *)p, GG_CL_SLOTS) == h0) k[n++] = (void *)p;
+    CHECK_EQ(n, 8);
+    for (i = 0; i < n; i++) gg_cl_rs(k[i], 0, (void *)(uintptr_t)(0x100 + i), 1);
+    CHECK(gg_cl_forget(k[1]));
+    CHECK(gg_cl_rs(k[1], 0, NULL, 0) == NULL);
+    for (i = 0; i < n; i++)
+        if (i != 1) CHECK(gg_cl_rs(k[i], 0, NULL, 0) == (void *)(uintptr_t)(0x100 + i));
+    CHECK(!gg_cl_forget(k[1]));
+    for (i = 0; i < n; i++) gg_cl_forget(k[i]);
+    for (i = 0; i < GG_CL_SLOTS; i++) before += (cl_tab[i].cl != NULL) + (ia_tab[i].cl != NULL) + (gfx_tab[i].cl != NULL);
+    /* 3x a tabela inteira de listas novas, cada uma destruida: nada sobra e a ultima continua registravel */
+    for (cycle = 0; cycle < 3 * GG_CL_SLOTS; cycle++) {
+        void *cl = (void *)(uintptr_t)(0x30000000u + (uintptr_t)cycle * 0x40);
+        gg_cl_gtab(cl, 1, 1);
+        gg_ia_state(cl, 2, 0, 0, NULL, 1);
+        gg_gfx_set(cl, 0, 1, 0x55, NULL, 0);
+        CHECK_EQ(gg_cl_gtab(cl, 1, 2), 3);
+        CHECK(gg_cl_forget(cl));
+    }
+    for (i = 0; i < GG_CL_SLOTS; i++) after += (cl_tab[i].cl != NULL) + (ia_tab[i].cl != NULL) + (gfx_tab[i].cl != NULL);
+    CHECK_EQ(after, before);
 }
 
 TEST(gpuguard_missing_uav_tables)

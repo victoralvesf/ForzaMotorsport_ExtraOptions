@@ -1728,6 +1728,18 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
         }
     }
     ReleaseSRWLockShared(&fm6_cl_lock);
+    {   /* a mesma lista aninhada mais de uma vez -> mesma command list do D3D12 de novo antes da fence (erro 553 da
+           debug layer antes do 0x887a0007, 17_fm6.txt PASSO 33): so conta */
+        static volatile LONG reps;
+        int j, dup = 0;
+        for (i = 0; i < n && !dup; i++)
+            for (j = i + 1; j < n; j++)
+                if (items[i] == items[j]) { dup = 1; break; }
+        if (dup) {
+            LONG k = InterlockedIncrement(&reps);
+            if ((k & (k - 1)) == 0) wlog("d3d: ExecuteCommandList %p com lista aninhada repetida (%d pecas) (#%ld)", cl, n, k);
+        }
+    }
     for (i = 0; i < n; i++) {
         ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, items[i], restore);
         fm6_obj_release(items[i]);

@@ -173,6 +173,33 @@ static SRWLOCK rs_lock = SRWLOCK_INIT, cl_lock = SRWLOCK_INIT;
 
 static unsigned hptr(const void *p, unsigned n) { return (unsigned)(((uintptr_t)p >> 4) * 2654435761u) & (n - 1); }
 
+/* tira `key` (1o campo de cada registro) de uma tabela de endereco aberto com sondagem linear por hptr, sem quebrar
+   as cadeias: cada registro seguinte que pode ocupar o buraco volta para ele (o chamador segura o lock da tabela).
+   Sem isso as listas destruidas ficavam para sempre, a tabela enchia e cada draw sondava a tabela inteira (o fps
+   caia ate travar, 17_fm6.txt PASSO 33) */
+static int lp_remove(void *tab, size_t esz, unsigned n, const void *key)
+{
+    uint8_t *t = tab;
+    unsigned i = hptr(key, n), j, c;
+    if (!key) return 0;
+#define LP_KEY(s) (*(void *const *)(t + (size_t)(s) * esz))
+    for (c = 0; LP_KEY(i) != key; c++, i = (i + 1) & (n - 1))
+        if (c == n || !LP_KEY(i)) return 0;
+    for (j = i, c = 0; c < n; c++) {
+        unsigned k;
+        j = (j + 1) & (n - 1);
+        if (j == i || !LP_KEY(j)) break;
+        k = hptr(LP_KEY(j), n);
+        if (((j - k) & (n - 1)) >= ((j - i) & (n - 1))) {   /* a casa k vem antes do buraco (ou e ele) */
+            memcpy(t + (size_t)i * esz, t + (size_t)j * esz, esz);
+            i = j;
+        }
+    }
+#undef LP_KEY
+    memset(t + (size_t)i * esz, 0, esz);
+    return 1;
+}
+
 void gg_rs_add(void *rs, const uint32_t *size, uint32_t n)
 {
     unsigned h = hptr(rs, GG_RS_SLOTS), k;
@@ -640,180 +667,181 @@ static HRESULT STDMETHODCALLTYPE hook_rootsig(ID3D12Device *dev, UINT mask, cons
     return hr;
 }
 
-/* ---- espelho do conteudo dos descritores (17_fm6.txt PASSO 28): o handle de CPU na AMD nao aponta para os bytes,
- * entao cada Create*View grava aqui o que foi criado e os CopyDescriptors* propagam; o dump do estado do draw mostra
- * o que cada tabela tem na hora do draw. ---- */
-
-/* procura o slot (chamado com heap_lock) */
-static gg_desc *desc_slot(uintptr_t h)
-{
-    int i;
-    for (i = 0; i < nheaps; i++) {
-        gg_heap *p = &heaps[i];
-        if (h >= p->start && h < p->start + (uintptr_t)p->count * p->inc && p->desc)
-            return &p->desc[(h - p->start) / p->inc];
-    }
-    return NULL;
-}
-
-void gg_desc_set(uintptr_t h, const gg_desc *d)
-{
-    gg_desc *s;
-    AcquireSRWLockExclusive(&heap_lock);
-    if ((s = desc_slot(h))) *s = *d;
-    ReleaseSRWLockExclusive(&heap_lock);
-}
-
-int gg_desc_get(uintptr_t h, gg_desc *out)
-{
-    gg_desc *s;
-    AcquireSRWLockShared(&heap_lock);
-    if ((s = desc_slot(h))) *out = *s;
-    ReleaseSRWLockShared(&heap_lock);
-    return s != NULL;
-}
-
-/* CopyDescriptors: os ranges de destino e de origem andam juntos, descritor a descritor */
-void gg_desc_copy(UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE *dst, const UINT *dsz, UINT ns,
-                  const D3D12_CPU_DESCRIPTOR_HANDLE *src, const UINT *ssz, uint32_t inc)
-{
-    UINT di = 0, dj = 0, si = 0, sj = 0;
-    AcquireSRWLockExclusive(&heap_lock);
-    while (di < nd && si < ns) {
-        UINT dn = dsz ? dsz[di] : 1, sn = ssz ? ssz[si] : 1;
-        if (dj >= dn) { di++; dj = 0; continue; }
-        if (sj >= sn) { si++; sj = 0; continue; }
-        {
-            gg_desc *d = desc_slot(dst[di].ptr + (uintptr_t)dj * inc), *s = desc_slot(src[si].ptr + (uintptr_t)sj * inc);
-            if (d) { if (s) *d = *s; else memset(d, 0, sizeof *d); }
-        }
-        dj++; sj++;
-    }
-    ReleaseSRWLockExclusive(&heap_lock);
-}
-
-static void desc_from_resource(gg_desc *g, ID3D12Resource *r)
-{
-    D3D12_HEAP_PROPERTIES hp;
-    D3D12_HEAP_FLAGS hf;
-    if (!r) { g->flags |= GG_DF_NO_RESOURCE; return; }
-    {
-        D3D12_RESOURCE_DESC rd;
-        r->lpVtbl->GetDesc(r, &rd);
-        g->rdim = (uint8_t)rd.Dimension;
-        g->w = (uint32_t)rd.Width; g->h = rd.Height;
-        if (rd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) g->va = r->lpVtbl->GetGPUVirtualAddress(r);
-    }
-    if (FAILED(r->lpVtbl->GetHeapProperties(r, &hp, &hf))) g->flags |= GG_DF_RESERVED;
-}
-
-static const char *const gg_dk_name[] = { "vazio", "CBV", "SRV", "UAV", "nulo(trava)" };
-
-/* uma linha por slot gravado no espelho */
-static int desc_text(char *out, uint32_t i, const gg_desc *d)
-{
-    if (d->kind == GG_DK_NONE) return wsprintfA(out, " [%u]vazio", i);
-    return wsprintfA(out, " [%u]%s d%u f%u res %p r%u %ux%u va 0x%lx%08lx%s%s", i, gg_dk_name[d->kind], d->dim, d->fmt,
-                     d->res, d->rdim, d->w, d->h, (unsigned long)(d->va >> 32), (unsigned long)d->va,
-                     d->flags & GG_DF_RESERVED ? " RESERVADO" : "", d->flags & GG_DF_NO_RESOURCE ? " sem-recurso" : "");
-}
-
-/* ---- estado grafico por lista para o dump: tabelas, root views, IB, VBs ---- */
-#define GG_ROOT_PARAMS 32
-#define GG_DUMP_VBS 8
-typedef struct {
-    void *cl;
-    uint64_t tab[GG_ROOT_PARAMS], va[GG_ROOT_PARAMS];
-    D3D12_INDEX_BUFFER_VIEW ib;
-    D3D12_VERTEX_BUFFER_VIEW vb[GG_DUMP_VBS];
-} gg_gfx;
-static gg_gfx gfx_tab[GG_CL_SLOTS];
-static SRWLOCK gfx_lock = SRWLOCK_INIT;
-
-/* registro da lista (chamado com gfx_lock exclusivo) */
-static gg_gfx *gfx_slot(void *cl)
-{
-    unsigned h = hptr(cl, GG_CL_SLOTS), k;
-    for (k = 0; k < GG_CL_SLOTS; k++, h = (h + 1) & (GG_CL_SLOTS - 1)) {
-        if (gfx_tab[h].cl == cl) return &gfx_tab[h];
-        if (!gfx_tab[h].cl) { memset(&gfx_tab[h], 0, sizeof gfx_tab[h]); gfx_tab[h].cl = cl; return &gfx_tab[h]; }
-    }
-    return NULL;
-}
-
-/* what: 0 = tabela, 1 = root view, 2 = IB, 3 = VBs, 4 = Reset */
-void gg_gfx_set(void *cl, int what, uint32_t i, uint64_t v, const void *views, uint32_t n)
-{
-    gg_gfx *g;
-    AcquireSRWLockExclusive(&gfx_lock);
-    if ((g = gfx_slot(cl))) {
-        if (what == 0 && i < GG_ROOT_PARAMS) g->tab[i] = v;
-        else if (what == 1 && i < GG_ROOT_PARAMS) g->va[i] = v;
-        else if (what == 2) { if (views) g->ib = *(const D3D12_INDEX_BUFFER_VIEW *)views; else memset(&g->ib, 0, sizeof g->ib); }
-        else if (what == 3) {
-            uint32_t k;
-            for (k = 0; k < n && i + k < GG_DUMP_VBS; k++)
-                if (views) g->vb[i + k] = ((const D3D12_VERTEX_BUFFER_VIEW *)views)[k]; else memset(&g->vb[i + k], 0, sizeof g->vb[0]);
-        } else if (what == 4) { memset(g, 0, sizeof *g); g->cl = cl; }
-    }
-    ReleaseSRWLockExclusive(&gfx_lock);
-}
-
-int gg_gfx_get(void *cl, gg_gfx *out)
-{
-    unsigned h = hptr(cl, GG_CL_SLOTS), k;
-    int r = 0;
-    AcquireSRWLockShared(&gfx_lock);
-    for (k = 0; k < GG_CL_SLOTS && gfx_tab[h].cl; k++, h = (h + 1) & (GG_CL_SLOTS - 1))
-        if (gfx_tab[h].cl == cl) { *out = gfx_tab[h]; r = 1; break; }
-    ReleaseSRWLockShared(&gfx_lock);
-    return r;
-}
-
-#define GG_DUMP_SLOTS 24
-
+/* ---- espelho do conteudo dos descritores (17_fm6.txt PASSO 28): o handle de CPU na AMD nao aponta para os bytes,
+ * entao cada Create*View grava aqui o que foi criado e os CopyDescriptors* propagam; o dump do estado do draw mostra
+ * o que cada tabela tem na hora do draw. ---- */
+
+/* procura o slot (chamado com heap_lock) */
+static gg_desc *desc_slot(uintptr_t h)
+{
+    int i;
+    for (i = 0; i < nheaps; i++) {
+        gg_heap *p = &heaps[i];
+        if (h >= p->start && h < p->start + (uintptr_t)p->count * p->inc && p->desc)
+            return &p->desc[(h - p->start) / p->inc];
+    }
+    return NULL;
+}
+
+void gg_desc_set(uintptr_t h, const gg_desc *d)
+{
+    gg_desc *s;
+    AcquireSRWLockExclusive(&heap_lock);
+    if ((s = desc_slot(h))) *s = *d;
+    ReleaseSRWLockExclusive(&heap_lock);
+}
+
+int gg_desc_get(uintptr_t h, gg_desc *out)
+{
+    gg_desc *s;
+    AcquireSRWLockShared(&heap_lock);
+    if ((s = desc_slot(h))) *out = *s;
+    ReleaseSRWLockShared(&heap_lock);
+    return s != NULL;
+}
+
+/* CopyDescriptors: os ranges de destino e de origem andam juntos, descritor a descritor */
+void gg_desc_copy(UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE *dst, const UINT *dsz, UINT ns,
+                  const D3D12_CPU_DESCRIPTOR_HANDLE *src, const UINT *ssz, uint32_t inc)
+{
+    UINT di = 0, dj = 0, si = 0, sj = 0;
+    AcquireSRWLockExclusive(&heap_lock);
+    while (di < nd && si < ns) {
+        UINT dn = dsz ? dsz[di] : 1, sn = ssz ? ssz[si] : 1;
+        if (dj >= dn) { di++; dj = 0; continue; }
+        if (sj >= sn) { si++; sj = 0; continue; }
+        {
+            gg_desc *d = desc_slot(dst[di].ptr + (uintptr_t)dj * inc), *s = desc_slot(src[si].ptr + (uintptr_t)sj * inc);
+            if (d) { if (s) *d = *s; else memset(d, 0, sizeof *d); }
+        }
+        dj++; sj++;
+    }
+    ReleaseSRWLockExclusive(&heap_lock);
+}
+
+static void desc_from_resource(gg_desc *g, ID3D12Resource *r)
+{
+    D3D12_HEAP_PROPERTIES hp;
+    D3D12_HEAP_FLAGS hf;
+    if (!r) { g->flags |= GG_DF_NO_RESOURCE; return; }
+    {
+        D3D12_RESOURCE_DESC rd;
+        r->lpVtbl->GetDesc(r, &rd);
+        g->rdim = (uint8_t)rd.Dimension;
+        g->w = (uint32_t)rd.Width; g->h = rd.Height;
+        if (rd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) g->va = r->lpVtbl->GetGPUVirtualAddress(r);
+    }
+    /* so com rastreio: em recurso reservado cada chamada vira um erro da debug layer (34 mil no log, PASSO 33) */
+    if (gg_trace_on && FAILED(r->lpVtbl->GetHeapProperties(r, &hp, &hf))) g->flags |= GG_DF_RESERVED;
+}
+
+static const char *const gg_dk_name[] = { "vazio", "CBV", "SRV", "UAV", "nulo(trava)" };
+
+/* uma linha por slot gravado no espelho */
+static int desc_text(char *out, uint32_t i, const gg_desc *d)
+{
+    if (d->kind == GG_DK_NONE) return wsprintfA(out, " [%u]vazio", i);
+    return wsprintfA(out, " [%u]%s d%u f%u res %p r%u %ux%u va 0x%lx%08lx%s%s", i, gg_dk_name[d->kind], d->dim, d->fmt,
+                     d->res, d->rdim, d->w, d->h, (unsigned long)(d->va >> 32), (unsigned long)d->va,
+                     d->flags & GG_DF_RESERVED ? " RESERVADO" : "", d->flags & GG_DF_NO_RESOURCE ? " sem-recurso" : "");
+}
+
+/* ---- estado grafico por lista para o dump: tabelas, root views, IB, VBs ---- */
+#define GG_ROOT_PARAMS 32
+#define GG_DUMP_VBS 8
+typedef struct {
+    void *cl;
+    uint64_t tab[GG_ROOT_PARAMS], va[GG_ROOT_PARAMS];
+    D3D12_INDEX_BUFFER_VIEW ib;
+    D3D12_VERTEX_BUFFER_VIEW vb[GG_DUMP_VBS];
+} gg_gfx;
+static gg_gfx gfx_tab[GG_CL_SLOTS];
+static SRWLOCK gfx_lock = SRWLOCK_INIT;
+
+/* registro da lista (chamado com gfx_lock exclusivo) */
+static gg_gfx *gfx_slot(void *cl)
+{
+    unsigned h = hptr(cl, GG_CL_SLOTS), k;
+    for (k = 0; k < GG_CL_SLOTS; k++, h = (h + 1) & (GG_CL_SLOTS - 1)) {
+        if (gfx_tab[h].cl == cl) return &gfx_tab[h];
+        if (!gfx_tab[h].cl) { memset(&gfx_tab[h], 0, sizeof gfx_tab[h]); gfx_tab[h].cl = cl; return &gfx_tab[h]; }
+    }
+    return NULL;
+}
+
+/* what: 0 = tabela, 1 = root view, 2 = IB, 3 = VBs, 4 = Reset */
+void gg_gfx_set(void *cl, int what, uint32_t i, uint64_t v, const void *views, uint32_t n)
+{
+    gg_gfx *g;
+    AcquireSRWLockExclusive(&gfx_lock);
+    if ((g = gfx_slot(cl))) {
+        if (what == 0 && i < GG_ROOT_PARAMS) g->tab[i] = v;
+        else if (what == 1 && i < GG_ROOT_PARAMS) g->va[i] = v;
+        else if (what == 2) { if (views) g->ib = *(const D3D12_INDEX_BUFFER_VIEW *)views; else memset(&g->ib, 0, sizeof g->ib); }
+        else if (what == 3) {
+            uint32_t k;
+            for (k = 0; k < n && i + k < GG_DUMP_VBS; k++)
+                if (views) g->vb[i + k] = ((const D3D12_VERTEX_BUFFER_VIEW *)views)[k]; else memset(&g->vb[i + k], 0, sizeof g->vb[0]);
+        } else if (what == 4) { memset(g, 0, sizeof *g); g->cl = cl; }
+    }
+    ReleaseSRWLockExclusive(&gfx_lock);
+}
+
+int gg_gfx_get(void *cl, gg_gfx *out)
+{
+    unsigned h = hptr(cl, GG_CL_SLOTS), k;
+    int r = 0;
+    AcquireSRWLockShared(&gfx_lock);
+    for (k = 0; k < GG_CL_SLOTS && gfx_tab[h].cl; k++, h = (h + 1) & (GG_CL_SLOTS - 1))
+        if (gfx_tab[h].cl == cl) { *out = gfx_tab[h]; r = 1; break; }
+    ReleaseSRWLockShared(&gfx_lock);
+    return r;
+}
+
+#define GG_DUMP_SLOTS 24
+
 uint32_t gg_pso_info(void *pso);
 void gg_pso_info_str(uint32_t info, char *out);
 
-/* estado completo do draw no log (os primeiros DrawIndexed de cada tipo) */
-static void dump_draw_state(ID3D12GraphicsCommandList *l, const char *what, const uint32_t *arg, uint32_t hash)
-{
-    static gg_gfx g;
-    static SRWLOCK lock = SRWLOCK_INIT;
-    void *rs = gg_cl_rs(l, 0, NULL, 0);
-    char buf[2048];
-    int len;
-    uint32_t i, j;
-    AcquireSRWLockExclusive(&lock);
-    if (!gg_gfx_get(l, &g)) memset(&g, 0, sizeof g);
-    wlog("gpuguard: estado %s (%u,%u,%u) hash %08lx lista %p rs %p; IB va 0x%lx%08lx %u bytes fmt %u", what, arg[0], arg[1],
-         arg[2], (unsigned long)hash, (void *)l, rs, (unsigned long)(g.ib.BufferLocation >> 32), (unsigned long)g.ib.BufferLocation,
-         g.ib.SizeInBytes, (unsigned)g.ib.Format);
-    for (len = 0, i = 0; i < GG_DUMP_VBS; i++)
-        if (g.vb[i].BufferLocation)
-            len += wsprintfA(buf + len, " vb%u 0x%lx%08lx %u/%u", i, (unsigned long)(g.vb[i].BufferLocation >> 32),
-                             (unsigned long)g.vb[i].BufferLocation, g.vb[i].SizeInBytes, g.vb[i].StrideInBytes);
+/* estado completo do draw no log (os primeiros DrawIndexed de cada tipo) */
+static void dump_draw_state(ID3D12GraphicsCommandList *l, const char *what, const uint32_t *arg, uint32_t hash)
+{
+    static gg_gfx g;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    void *rs = gg_cl_rs(l, 0, NULL, 0);
+    char buf[2048];
+    int len;
+    uint32_t i, j;
+    AcquireSRWLockExclusive(&lock);
+    if (!gg_gfx_get(l, &g)) memset(&g, 0, sizeof g);
+    wlog("gpuguard: estado %s (%u,%u,%u) hash %08lx lista %p rs %p; IB va 0x%lx%08lx %u bytes fmt %u", what, arg[0], arg[1],
+         arg[2], (unsigned long)hash, (void *)l, rs, (unsigned long)(g.ib.BufferLocation >> 32), (unsigned long)g.ib.BufferLocation,
+         g.ib.SizeInBytes, (unsigned)g.ib.Format);
+    for (len = 0, i = 0; i < GG_DUMP_VBS; i++)
+        if (g.vb[i].BufferLocation)
+            len += wsprintfA(buf + len, " vb%u 0x%lx%08lx %u/%u", i, (unsigned long)(g.vb[i].BufferLocation >> 32),
+                             (unsigned long)g.vb[i].BufferLocation, g.vb[i].SizeInBytes, g.vb[i].StrideInBytes);
     wlog("gpuguard:   VBs:%s", len ? buf : " nenhum");
     gg_pso_info_str(gg_pso_info(gg_cl_rs(l, GG_CL_PSO, NULL, 0)), buf);
-    wlog("gpuguard:   PSO: %s", buf);
-    for (i = 0; i < GG_ROOT_PARAMS; i++) {
-        if (g.va[i])
-            wlog("gpuguard:   p%u root view va 0x%lx%08lx", i, (unsigned long)(g.va[i] >> 32), (unsigned long)g.va[i]);
-        if (g.tab[i]) {
-            uint32_t n = gg_rs_table(rs, i);
-            uintptr_t cpu = gg_gpu_to_cpu(g.tab[i]);
-            len = wsprintfA(buf, "gpuguard:   p%u tabela gpu 0x%lx%08lx (%u slots):", i, (unsigned long)(g.tab[i] >> 32),
-                            (unsigned long)g.tab[i], n);
-            for (j = 0; cpu && j < n && j < GG_DUMP_SLOTS && len < 1800; j++) {
-                gg_desc d;
-                memset(&d, 0, sizeof d);
-                gg_desc_get(cpu + (uintptr_t)j * res_inc, &d);
-                len += desc_text(buf + len, j, &d);
-            }
-            wlog("%s", buf);
-        }
-    }
-    ReleaseSRWLockExclusive(&lock);
+    wlog("gpuguard:   PSO: %s", buf);
+    for (i = 0; i < GG_ROOT_PARAMS; i++) {
+        if (g.va[i])
+            wlog("gpuguard:   p%u root view va 0x%lx%08lx", i, (unsigned long)(g.va[i] >> 32), (unsigned long)g.va[i]);
+        if (g.tab[i]) {
+            uint32_t n = gg_rs_table(rs, i);
+            uintptr_t cpu = gg_gpu_to_cpu(g.tab[i]);
+            len = wsprintfA(buf, "gpuguard:   p%u tabela gpu 0x%lx%08lx (%u slots):", i, (unsigned long)(g.tab[i] >> 32),
+                            (unsigned long)g.tab[i], n);
+            for (j = 0; cpu && j < n && j < GG_DUMP_SLOTS && len < 1800; j++) {
+                gg_desc d;
+                memset(&d, 0, sizeof d);
+                gg_desc_get(cpu + (uintptr_t)j * res_inc, &d);
+                len += desc_text(buf + len, j, &d);
+            }
+            wlog("%s", buf);
+        }
+    }
+    ReleaseSRWLockExclusive(&lock);
 }
 
 static void STDMETHODCALLTYPE hook_cbv(ID3D12Device *dev, const D3D12_CONSTANT_BUFFER_VIEW_DESC *d, D3D12_CPU_DESCRIPTOR_HANDLE h)
@@ -934,7 +962,7 @@ static void bind_null_uavs(ID3D12GraphicsCommandList *l)
         LONG k;
         if (!(miss & 1)) continue;
         g.ptr = null_uav_gpu;
-        gg_gfx_set(l, 0, i, g.ptr, NULL, 0);
+        if (gg_trace_on) gg_gfx_set(l, 0, i, g.ptr, NULL, 0);
         gg_cl_gtab(l, 1, 1ull << i);
         real_gtab(l, i, g);
         k = InterlockedIncrement(&bound);
@@ -978,7 +1006,7 @@ static void STDMETHODCALLTYPE hook_ctab(ID3D12GraphicsCommandList *l, UINT i, D3
 static void STDMETHODCALLTYPE hook_gtab(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE g)
 {
     check_table(l, 0, i, g);
-    gg_gfx_set(l, 0, i, g.ptr, NULL, 0);
+    if (gg_trace_on) gg_gfx_set(l, 0, i, g.ptr, NULL, 0);
     if (i < 64) gg_cl_gtab(l, 1, 1ull << i);
     real_gtab(l, i, g);
 }
@@ -987,21 +1015,21 @@ static void STDMETHODCALLTYPE hook_ccbv(ID3D12GraphicsCommandList *l, UINT i, D3
 static void STDMETHODCALLTYPE hook_gcbv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va)
 {
     va = guard_va("SetGraphicsRootConstantBufferView", va);
-    gg_gfx_set(l, 1, i, va, NULL, 0);
+    if (gg_trace_on) gg_gfx_set(l, 1, i, va, NULL, 0);
     real_gcbv(l, i, va);
 }
 static void STDMETHODCALLTYPE hook_csrv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_csrv(l, i, guard_va("SetComputeRootShaderResourceView", va)); }
 static void STDMETHODCALLTYPE hook_gsrv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va)
 {
     va = guard_va("SetGraphicsRootShaderResourceView", va);
-    gg_gfx_set(l, 1, i, va, NULL, 0);
+    if (gg_trace_on) gg_gfx_set(l, 1, i, va, NULL, 0);
     real_gsrv(l, i, va);
 }
 static void STDMETHODCALLTYPE hook_cuav(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_cuav(l, i, guard_va("SetComputeRootUnorderedAccessView", va)); }
 static void STDMETHODCALLTYPE hook_guav(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va)
 {
     va = guard_va("SetGraphicsRootUnorderedAccessView", va);
-    gg_gfx_set(l, 1, i, va, NULL, 0);
+    if (gg_trace_on) gg_gfx_set(l, 1, i, va, NULL, 0);
     real_guav(l, i, va);
 }
 
@@ -1375,8 +1403,10 @@ static void STDMETHODCALLTYPE hook_ib(ID3D12GraphicsCommandList *l, const D3D12_
         report("IASetIndexBuffer", v->BufferLocation);
         c = *v; c.BufferLocation = 0; c.SizeInBytes = 0; v = &c;
     }
-    gg_ia_state(l, 2, 0, 0, NULL, v && v->BufferLocation);
-    gg_gfx_set(l, 2, 0, 0, v, 0);
+    if (gg_trace_on) {               /* so o check_ia/dump do rastreio leem */
+        gg_ia_state(l, 2, 0, 0, NULL, v && v->BufferLocation);
+        gg_gfx_set(l, 2, 0, 0, v, 0);
+    }
     real_ib(l, v);
 }
 
@@ -1393,8 +1423,10 @@ static void STDMETHODCALLTYPE hook_vb(ID3D12GraphicsCommandList *l, UINT start, 
         v = c;
         break;
     }
-    gg_ia_state(l, 1, start, n, v, 0);
-    gg_gfx_set(l, 3, start, 0, v, n);
+    if (gg_trace_on) {
+        gg_ia_state(l, 1, start, n, v, 0);
+        gg_gfx_set(l, 3, start, 0, v, n);
+    }
     real_vb(l, start, n, v);
 }
 
@@ -1761,6 +1793,46 @@ static void swap(void **slot, void *hook, void **orig)
     VirtualProtect(slot, sizeof *slot, old, &old);
 }
 
+/* lista destruida (ou criada num endereco reaproveitado): tira o registro de todas as tabelas por lista */
+static volatile LONG lists_live, lists_made;
+
+int gg_cl_forget(void *cl)
+{
+    int n = 0;
+    AcquireSRWLockExclusive(&cl_lock);
+    n += lp_remove(cl_tab, sizeof *cl_tab, GG_CL_SLOTS, cl);
+    ReleaseSRWLockExclusive(&cl_lock);
+    AcquireSRWLockExclusive(&ia_lock);
+    n += lp_remove(ia_tab, sizeof *ia_tab, GG_CL_SLOTS, cl);
+    ReleaseSRWLockExclusive(&ia_lock);
+    AcquireSRWLockExclusive(&gfx_lock);
+    n += lp_remove(gfx_tab, sizeof *gfx_tab, GG_CL_SLOTS, cl);
+    ReleaseSRWLockExclusive(&gfx_lock);
+    AcquireSRWLockExclusive(&trace_lock);
+    n += lp_remove(trace_tab, sizeof *trace_tab, GG_TRACE_SLOTS, cl);
+    ReleaseSRWLockExclusive(&trace_lock);
+    return n;
+}
+
+static ULONG (STDMETHODCALLTYPE *real_list_release)(ID3D12GraphicsCommandList *);
+static ULONG STDMETHODCALLTYPE hook_list_release(ID3D12GraphicsCommandList *l)
+{
+    ULONG r = real_list_release(l);
+    if (r == 0) {
+        gg_cl_forget(l);
+        InterlockedDecrement(&lists_live);
+    }
+    return r;
+}
+
+/* lista nova: registro velho do mesmo endereco fora; contagem nas potencias de 2 (vazamento de listas = fps caindo) */
+static void list_created(void *obj)
+{
+    LONG k = InterlockedIncrement(&lists_made), live = InterlockedIncrement(&lists_live);
+    gg_cl_forget(obj);
+    if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command lists criadas, %ld vivas", k, live);
+}
+
 static void hook_list_vtable(void *obj)
 {
     ID3D12GraphicsCommandList *l = NULL;
@@ -1780,6 +1852,7 @@ static void hook_list_vtable(void *obj)
     swap((void **)&l->lpVtbl->SetGraphicsRootSignature, hook_grs, (void **)&real_grs);
     swap((void **)&l->lpVtbl->SetComputeRootDescriptorTable, hook_ctab, (void **)&real_ctab);
     swap((void **)&l->lpVtbl->SetGraphicsRootDescriptorTable, hook_gtab, (void **)&real_gtab);
+    swap((void **)&l->lpVtbl->Release, hook_list_release, (void **)&real_list_release);
     if (gg_trace_on) {
         swap((void **)&l->lpVtbl->Dispatch, hook_dispatch, (void **)&real_dispatch);
         swap((void **)&l->lpVtbl->CopyTextureRegion, hook_copytex, (void **)&real_copytex);
@@ -1805,7 +1878,10 @@ static HRESULT STDMETHODCALLTYPE hook_list(ID3D12Device *dev, UINT mask, D3D12_C
                                            ID3D12PipelineState *ps, REFIID riid, void **out)
 {
     HRESULT hr = real_list(dev, mask, type, a, ps, riid, out);
-    if (SUCCEEDED(hr) && out && *out && type != D3D12_COMMAND_LIST_TYPE_COPY) hook_list_vtable(*out);
+    if (SUCCEEDED(hr) && out && *out) {   /* copia: sem hooks, mas usa a mesma vtable (Release conta) */
+        if (type != D3D12_COMMAND_LIST_TYPE_COPY) hook_list_vtable(*out);
+        list_created(*out);
+    }
     return hr;
 }
 
@@ -1813,7 +1889,10 @@ static HRESULT STDMETHODCALLTYPE hook_list1(ID3D12Device4 *dev, UINT mask, D3D12
                                             REFIID riid, void **out)
 {
     HRESULT hr = real_list1(dev, mask, type, f, riid, out);
-    if (SUCCEEDED(hr) && out && *out && type != D3D12_COMMAND_LIST_TYPE_COPY) hook_list_vtable(*out);
+    if (SUCCEEDED(hr) && out && *out) {   /* copia: sem hooks, mas usa a mesma vtable (Release conta) */
+        if (type != D3D12_COMMAND_LIST_TYPE_COPY) hook_list_vtable(*out);
+        list_created(*out);
+    }
     return hr;
 }
 
