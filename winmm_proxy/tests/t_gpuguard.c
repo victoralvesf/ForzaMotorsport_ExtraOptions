@@ -417,8 +417,9 @@ TEST(gpuguard_ia_missing_slots)
     st.t2 = 23;                                            /* subobjeto desconhecido: para */
     CHECK(gg_stream_layout(&st, sizeof st) == NULL);
 
-    gg_pso_add(&pso, &il, 0x1234, 0x303);
-    gg_pso_add(&pso2, NULL, 0, 0);
+    gg_pso_add(&pso, &il, 0x1234, 0x303, &cl);
+    gg_pso_add(&pso2, NULL, 0, 0, NULL);
+    CHECK(gg_pso_rs(&pso) == &cl && gg_pso_rs(&pso2) == NULL && gg_pso_rs(&il) == NULL);
     CHECK_EQ(gg_pso_slots(&pso), 5);
     CHECK_EQ(gg_pso_slots(&pso2), 0);
     CHECK_EQ(gg_pso_slots(&cl), -1);
@@ -535,6 +536,12 @@ static UINT64 lite_tab_g;
 static HRESULT STDMETHODCALLTYPE lite_qi(ID3D12GraphicsCommandList *l, REFIID iid, void **out) { (void)iid; *out = l; return S_OK; }
 static ULONG STDMETHODCALLTYPE lite_release(ID3D12GraphicsCommandList *l) { (void)l; return 1; }
 static void STDMETHODCALLTYPE lite_grs(ID3D12GraphicsCommandList *l, ID3D12RootSignature *rs) { (void)l; (void)rs; }
+static void STDMETHODCALLTYPE lite_set_pso(ID3D12GraphicsCommandList *l, ID3D12PipelineState *ps) { (void)l; (void)ps; }
+static HRESULT STDMETHODCALLTYPE lite_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
+{
+    (void)l; (void)a; (void)ps;
+    return S_OK;
+}
 static void STDMETHODCALLTYPE lite_draw_indexed(ID3D12GraphicsCommandList *l, UINT a, UINT b, UINT c, INT d, UINT e)
 {
     (void)l; (void)a; (void)b; (void)c; (void)d; (void)e;
@@ -550,7 +557,7 @@ static void STDMETHODCALLTYPE lite_gtab(ID3D12GraphicsCommandList *l, UINT i, D3
 
 TEST(gpuguard_null_uavs_without_trace)
 {
-    static int rs;
+    static int rs, rs1, pso, pso1;
     uint32_t size[3] = { 4, 0, 8 };
     int saved = gg_trace_on;
     ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)&lite_cl;
@@ -559,26 +566,48 @@ TEST(gpuguard_null_uavs_without_trace)
     lite_vt.DrawIndexedInstanced = lite_draw_indexed;
     lite_vt.SetGraphicsRootDescriptorTable = lite_gtab;
     lite_vt.SetGraphicsRootSignature = lite_grs;
+    lite_vt.SetPipelineState = lite_set_pso;
+    lite_vt.Reset = lite_reset;
     gg_trace_on = 0;
     hook_list_vtable(l);
     CHECK(lite_vt.DrawInstanced == hook_draw_uav && lite_vt.DrawIndexedInstanced == hook_draw_indexed_uav);
     CHECK(lite_vt.ExecuteIndirect == hook_exec_indirect_uav && lite_vt.Reset == hook_reset_uav);
+    CHECK(lite_vt.SetPipelineState == hook_set_pso);
     CHECK(lite_vt.CopyTextureRegion == NULL);                  /* rastreio continua desligado */
     gg_rs_add(&rs, size, 3);
     gg_rs_set_uav(&rs, 1ull << 2);
+    gg_rs_add(&rs1, size, 1);                                  /* 1 parametro, sem tabela de UAV */
+    gg_pso_add(&pso, NULL, 0, 0x313, &rs);
+    gg_pso_add(&pso1, NULL, 0, 0x303, &rs1);
     null_uav_gpu = 0x1023e0000ull;
     lite_vt.SetGraphicsRootSignature(l, (ID3D12RootSignature *)&rs);
+    lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&pso);
     lite_vt.DrawIndexedInstanced(l, 126, 1, 71904, -14155, 0);
     CHECK(lite_draws == 1 && lite_tabs == 1 && lite_tab_i == 2 && lite_tab_g == 0x1023e0000ull);
     lite_vt.DrawIndexedInstanced(l, 126, 1, 71904, -14155, 0);
     CHECK(lite_draws == 2 && lite_tabs == 1);                  /* ja ligada */
+
+    /* lista registrada com a root signature velha, PSO de outra (1 parametro): nada de bind fora dos limites */
+    lite_vt.Reset(l, NULL, NULL);
+    CHECK(gg_cl_rs(l, 0, NULL, 0) == NULL && gg_cl_rs(l, GG_CL_PSO, NULL, 0) == NULL);
+    lite_vt.SetGraphicsRootSignature(l, (ID3D12RootSignature *)&rs);
+    lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&pso1);
+    lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
+    CHECK(lite_draws == 3 && lite_tabs == 1);
+    CHECK(log_has("gpuguard: root signature da lista"));
+    lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&lite_cl);   /* PSO desconhecido: idem */
+    lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
+    CHECK(lite_draws == 4 && lite_tabs == 1);
+    lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&pso);
+    lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
+    CHECK(lite_draws == 5 && lite_tabs == 2 && lite_tab_i == 2);
     null_uav_gpu = 0;
     gg_trace_on = saved;
 }
 
 TEST(gpuguard_missing_uav_tables)
 {
-    static int rs, rs2, cl, cl2;
+    static int rs, rs2, cl, cl2, pso, pso2;
     uint32_t size[3] = { 4, 0, 8 };
     D3D12_DESCRIPTOR_RANGE1 uav = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 8, 0, 0, 0, 0 };
     D3D12_DESCRIPTOR_RANGE1 mix[2] = { { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0, 0 },
@@ -605,8 +634,13 @@ TEST(gpuguard_missing_uav_tables)
     CHECK_EQ(gg_rs_uav(&rs2), 0);
     CHECK_EQ(gg_rs_uav(NULL), 0);
 
+    gg_pso_add(&pso, NULL, 0, 0, &rs);
+    gg_pso_add(&pso2, NULL, 0, 0, &rs2);
     gg_cl_rs(&cl, 0, &rs, 1);
+    gg_cl_rs(&cl, GG_CL_PSO, &pso2, 1);
     gg_cl_gtab(&cl, 0, 0);
+    CHECK_EQ(gg_missing_uav_tables(&cl), 0);                 /* PSO de outra root signature: registro suspeito */
+    gg_cl_rs(&cl, GG_CL_PSO, &pso, 1);
     CHECK_EQ(gg_missing_uav_tables(&cl), 4);                 /* tabela 2 nunca definida */
     gg_cl_gtab(&cl, 1, 1ull << 0);
     CHECK_EQ(gg_missing_uav_tables(&cl), 4);

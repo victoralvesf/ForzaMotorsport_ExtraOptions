@@ -902,11 +902,26 @@ static void null_uavs_fill(ID3D12Device *dev, uintptr_t cpu, uint64_t gpu)
     wlog("gpuguard: %u UAVs nulos no fim do heap visivel (gpu %#llx)", GG_NULL_UAVS, (unsigned long long)gpu);
 }
 
-/* tabelas so de UAV da root signature grafica que a lista nao definiu (bit por parametro) */
+void *gg_pso_rs(void *pso);
+
+/* tabelas so de UAV da root signature grafica que a lista nao definiu (bit por parametro). So se o PSO atual foi
+   criado com a root signature que a lista registrou: no boot com a debug layer a lista apontava uma root signature
+   velha e o bind caia fora dos limites ("param 20, root signature com 1 parametro", PASSO 32) -> nada */
 uint64_t gg_missing_uav_tables(void *cl)
 {
-    uint64_t need = gg_rs_uav(gg_cl_rs(cl, 0, NULL, 0));
-    return need ? need & ~gg_cl_gtab(cl, 1, 0) : 0;
+    void *rs = gg_cl_rs(cl, 0, NULL, 0), *pso = gg_cl_rs(cl, GG_CL_PSO, NULL, 0), *prs;
+    uint64_t need = gg_rs_uav(rs);
+    if (!need) return 0;
+    prs = gg_pso_rs(pso);
+    if (prs != rs) {
+        static volatile LONG odd;
+        LONG k = InterlockedIncrement(&odd);
+        if ((k & (k - 1)) == 0)
+            wlog("gpuguard: root signature da lista %p != a do PSO %p (pso %p, lista %p, tid %lu) -> UAVs nulos nao ligados (#%ld)",
+                 rs, prs, pso, cl, GetCurrentThreadId(), k);
+        return 0;
+    }
+    return need & ~gg_cl_gtab(cl, 1, 0);
 }
 
 static void bind_null_uavs(ID3D12GraphicsCommandList *l)
@@ -995,7 +1010,8 @@ static void STDMETHODCALLTYPE hook_guav(ID3D12GraphicsCommandList *l, UINT i, D3
  * layout le e, por lista, os slots com buffer e se ha index buffer; o draw que le slot vazio vira relatorio. ---- */
 
 #define GG_PSO_SLOTS 8192
-typedef struct { void *pso; uint32_t slots, nelem, hash, info; } gg_pso;   /* hash: gg_shader_hash (estavel entre boots) */
+typedef struct { void *pso, *rs; uint32_t slots, nelem, hash, info; } gg_pso;   /* hash: gg_shader_hash (estavel entre boots);
+                                                                           rs: root signature da criacao */
 #define GG_PSO_SO 0x20u
 #define GG_PSO_EXTRA_STAGES (0x1cu | GG_PSO_SO)   /* DS, HS, GS ou stream output */
 typedef struct { void *cl; uint32_t vb; int ib; } gg_ia;
@@ -1086,7 +1102,7 @@ static uint32_t stream_hash(const D3D12_PIPELINE_STATE_STREAM_DESC *d, uint32_t 
     return gg_shader_hash(bc);
 }
 
-void gg_pso_add(void *pso, const D3D12_INPUT_LAYOUT_DESC *il, uint32_t hash, uint32_t info)
+void gg_pso_add(void *pso, const D3D12_INPUT_LAYOUT_DESC *il, uint32_t hash, uint32_t info, void *rs)
 {
     unsigned h = hptr(pso, GG_PSO_SLOTS), k;
     AcquireSRWLockExclusive(&pso_lock);
@@ -1097,6 +1113,7 @@ void gg_pso_add(void *pso, const D3D12_INPUT_LAYOUT_DESC *il, uint32_t hash, uin
             pso_tab[h].nelem = il ? il->NumElements : 0;
             pso_tab[h].hash = hash;
             pso_tab[h].info = info;
+            pso_tab[h].rs = rs;
             break;
         }
     ReleaseSRWLockExclusive(&pso_lock);
@@ -1126,6 +1143,26 @@ uint32_t gg_pso_info(void *pso)
         if (pso_tab[h].pso == pso) { r = pso_tab[h].info; break; }
     ReleaseSRWLockShared(&pso_lock);
     return r;
+}
+
+/* root signature com que o PSO foi criado (NULL = desconhecido ou embutida no shader) */
+void *gg_pso_rs(void *pso)
+{
+    unsigned h = hptr(pso, GG_PSO_SLOTS), k;
+    void *r = NULL;
+    if (!pso) return NULL;
+    AcquireSRWLockShared(&pso_lock);
+    for (k = 0; k < GG_PSO_SLOTS && pso_tab[h].pso; k++, h = (h + 1) & (GG_PSO_SLOTS - 1))
+        if (pso_tab[h].pso == pso) { r = pso_tab[h].rs; break; }
+    ReleaseSRWLockShared(&pso_lock);
+    return r;
+}
+
+/* root signature do subobjeto ROOT_SIGNATURE do stream (NULL se nao tem) */
+static void *gg_stream_rs(const D3D12_PIPELINE_STATE_STREAM_DESC *d)
+{
+    void *const *rs = gg_stream_find(d->pPipelineStateSubobjectStream, d->SizeInBytes, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE);
+    return rs ? *rs : NULL;
 }
 
 /* "VS PS DS HS GS SO topo N" (out com 40 bytes) */
@@ -1217,7 +1254,7 @@ static HRESULT STDMETHODCALLTYPE hook_gpso(ID3D12Device *dev, const D3D12_GRAPHI
     HRESULT hr = real_gpso(dev, d, riid, out);
     if (SUCCEEDED(hr) && out && *out && d) {
         uint32_t info, h = desc_hash(d, &info);
-        gg_pso_add(*out, &d->InputLayout, h, info);
+        gg_pso_add(*out, &d->InputLayout, h, info, d->pRootSignature);
     }
     return hr;
 }
@@ -1227,7 +1264,7 @@ static HRESULT STDMETHODCALLTYPE hook_spso(ID3D12Device2 *dev, const D3D12_PIPEL
     HRESULT hr = real_spso(dev, d, riid, out);
     if (SUCCEEDED(hr) && out && *out && d) {
         uint32_t info, h = stream_hash(d, &info);
-        gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), h, info);
+        gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), h, info, gg_stream_rs(d));
     }
     return hr;
 }
@@ -1287,7 +1324,7 @@ static HRESULT STDMETHODCALLTYPE hook_lib_gfx(ID3D12PipelineLibrary *lib, LPCWST
     } else {
         hr = real_lib_gfx(lib, name, d, riid, out);
     }
-    if (SUCCEEDED(hr) && out && *out && d) gg_pso_add(*out, &d->InputLayout, h, info);
+    if (SUCCEEDED(hr) && out && *out && d) gg_pso_add(*out, &d->InputLayout, h, info, d->pRootSignature);
     return hr;
 }
 
@@ -1306,7 +1343,7 @@ static HRESULT STDMETHODCALLTYPE hook_lib_stream(ID3D12PipelineLibrary1 *lib, LP
         hr = real_lib_stream(lib, name, d, riid, out);
     }
     if (SUCCEEDED(hr) && out && *out && d)
-        gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), h, info);
+        gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), h, info, gg_stream_rs(d));
     return hr;
 }
 
@@ -1679,6 +1716,7 @@ static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D
 static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
 {
     gg_trace_reset(l);
+    gg_cl_rs(l, 0, NULL, 1);
     gg_cl_rs(l, GG_CL_PSO, ps, 1);
     gg_ia_state(l, 3, 0, 0, NULL, 0);
     gg_gfx_set(l, 4, 0, 0, NULL, 0);
@@ -1687,9 +1725,11 @@ static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12
 }
 
 /* sem rastreio (D3D12Debug < 3, o caso normal): so a correcao dos UAVs nulos (PASSO 29) nos draws; o Reset zera a
-   mascara das tabelas definidas */
+   root signature e a mascara das tabelas definidas e guarda o PSO inicial (conferido contra a root signature) */
 static HRESULT STDMETHODCALLTYPE hook_reset_uav(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
 {
+    gg_cl_rs(l, 0, NULL, 1);
+    gg_cl_rs(l, GG_CL_PSO, ps, 1);
     gg_cl_gtab(l, 0, 0);
     return real_reset(l, a, ps);
 }
@@ -1754,6 +1794,7 @@ static void hook_list_vtable(void *obj)
         swap((void **)&l->lpVtbl->DrawInstanced, hook_draw_uav, (void **)&real_draw);
         swap((void **)&l->lpVtbl->DrawIndexedInstanced, hook_draw_indexed_uav, (void **)&real_draw_indexed);
         swap((void **)&l->lpVtbl->ExecuteIndirect, hook_exec_indirect_uav, (void **)&real_exec_indirect);
+        swap((void **)&l->lpVtbl->SetPipelineState, hook_set_pso, (void **)&real_set_pso);
     }
     l->lpVtbl->Release(l);
     wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO, UAVs nulos nos draws%s)",
