@@ -347,6 +347,32 @@ TEST(fm6_skip_intro_patches_exe)
     dump_log_on_fail();
 }
 
+/* exe real do FM6: SkipPresentationVideo esvazia o IntroVideo nos dois leitores da coluna do GameDB */
+TEST(fm6_skip_presentation_video_patches_exe)
+{
+    uint8_t *game = pe_map(FM6_EXE, NULL);
+    if (!game) { test_skip("exe do FM6 ausente"); return; }
+    log_capture();
+    ini6_set(NULL);
+    fm6_patches(game);
+    CHECK_HEX(game + 0xce1c55, "488d4b28e832d846ff");
+    CHECK_HEX(game + 0xce1eb4, "85c07519");
+    ini6_set("[FM6]\nSkipPresentationVideo=1\n");
+    fm6_patches(game);
+    CHECK_HEX(game + 0xce1c55, "488d4b280f1f4400004533c0b201");
+    CHECK_HEX(game + 0xce1eb4, "85c06690488d15");
+    CHECK(log_has("FM6: SkipPresentationVideo=1"));
+    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("FM6: SkipIntro=1"));
+    /* 2a vez: bytes ja trocados -> nada muda */
+    fm6_patches(game);
+    CHECK(log_has("FM6: SkipPresentationVideo: site nao confere, ignorado"));
+    CHECK_HEX(game + 0xce1eb4, "85c06690");
+    ini6_set(NULL);
+    pe_unmap(game);
+    dump_log_on_fail();
+}
+
 /* D3D12Debug=5: criterio de recurso reservado do title_storage (azimuth 0x13bae0) -> xor eax,eax ; ret */
 TEST(fm6_debug5_committed_placement)
 {

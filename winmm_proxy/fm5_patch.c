@@ -61,6 +61,12 @@ static const uint32_t fm5_splash_intro_cmps[] = { 0x13a33e, 0x13a825, 0x13b9ce }
    no logo parade 0xa08e78 (Health_Disclaimer/forzatech) e "cmp [rax+0x30d7],r15b ; jne" (r15 = 0) -> jmp */
 static const uint32_t fm6_splash_intro_cmps[] = { 0xa06b33, 0xa06c4d, 0xa07e0c };
 #define FM6_LOGO_PARADE_CMP 0xa08eb6
+/* SkipPresentationVideo: o video vem do GameDB (CareerRaceIntros.IntroVideo; IE_Blockbuster.bk2 na intro 100, a da
+   1a corrida; Porsche_IE/Nascar_Intro nas dos DLCs). Os dois leitores da coluna passam a devolver vazio, o caso
+   normal de todas as outras corridas: 0xce1a04 preenche a intro (wstring em +0x28 via move-assign 0x14f490 -> nop)
+   e 0xce1e50 so devolve o caminho (jne da linha achada -> nop = L"") */
+#define FM6_INTRO_VIDEO_SET  0xce1c55  /* lea rcx,[rbx+0x28] ; call 0x14f490 */
+#define FM6_INTRO_VIDEO_PATH 0xce1eb4  /* test eax,eax ; jne */
 
 uint8_t *g_base;
 static FILE *g_log;
@@ -910,6 +916,17 @@ static void fm6_patches(uint8_t *game)
             wlog("FM6: SkipIntro=1 (disablesplashintro forcado: T10_MS_Combined.bk2 e logo parade pulados)");
         }
     }
+    if (cfg6_int(L"SkipPresentationVideo", 0)) {
+        static const uint8_t nop5[5] = { 0x0f, 0x1f, 0x44, 0x00, 0x00 }, nop2[2] = { 0x66, 0x90 };
+        if (!bytes_match(game + FM6_INTRO_VIDEO_SET, "488d4b28e832d846ff", 9) ||
+            !bytes_match(game + FM6_INTRO_VIDEO_PATH, "85c07519", 4))
+            wlog("FM6: SkipPresentationVideo: site nao confere, ignorado");
+        else {
+            write_mem(game + FM6_INTRO_VIDEO_SET + 4, nop5, 5);
+            write_mem(game + FM6_INTRO_VIDEO_PATH + 2, nop2, 2);
+            wlog("FM6: SkipPresentationVideo=1 (IntroVideo das intros de carreira vazio: IE_Blockbuster.bk2 pulado)");
+        }
+    }
 }
 
 static void hook_apply_patches(void *image, const void *options)
@@ -1162,7 +1179,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
              cfg_int(L"EnableMarketplace", 0));
         wcscpy(slash ? slash + 1 : path, L"azimuth_fm6.ini");
         wcscpy(g_ini6, path);
-        wlog("config: %ls (SkipIntro=%d)", g_ini6, cfg6_int(L"SkipIntro", 0));
+        wlog("config: %ls (SkipIntro=%d SkipPresentationVideo=%d)", g_ini6, cfg6_int(L"SkipIntro", 0),
+             cfg6_int(L"SkipPresentationVideo", 0));
         load_real_winmm();
         g_base = (uint8_t *)GetModuleHandleW(NULL);
         GetModuleFileNameW(NULL, path, MAX_PATH);
