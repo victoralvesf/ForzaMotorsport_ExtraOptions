@@ -683,6 +683,8 @@ TEST(fm6_create_device_uses_azimuth_device)
         CHECK(srv_res == (void *)res && srv_desc[0] == 26);
     }
     CHECK(fm6_dev_vt[0x3b] == az + 0xf5f30 + 0x3b * 0x100);                   /* fora da lista: intacto */
+    CHECK(fm6_dev_vt[0xb] == (void *)fm6_CreateInputLayout && fm6_dev_vt[0xc] == (void *)fm6_create_shader_0x0c);
+    CHECK(fm6_dev_vt[0xe] == (void *)fm6_create_shader_0x0e && fm6_dev_vt[0x12] == (void *)fm6_create_shader_0x12);
     /* tabelas por tipo: IDXGIFactory (0xe) sem o slot 5, recurso (5) com o slot 8 novo */
     CHECK(fm6_type_tab[0xe][4] == (void *)0x104 && fm6_type_tab[0xe][5] == (void *)0x106);
     {   /* CreateSwapChainForCoreWindow (0x11 -> 0x10): descritor de game+0x53d3fb sem a flag 0x100000 */

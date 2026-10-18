@@ -25,7 +25,7 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
 ## Project layout
 - `azimuth.exe` (in the root), `data\` (Azimuth DLLs, `data\logs\azimuth.log` + `.dmp`, `data\azimuth.ini`)
 - `winmm_proxy\` — proxy source: `fm5_patch.c` (patches/record/hooks/ini), `d3d_fm5.c` (D3D11 bridge),
-  `winrt_fm5.c`, `shape_fm5.c`, `debug12_fm5.c`, `gfx_fm5.c`; `tests\` = proxy tests; `d3d_thunks.S` and `winmm_stubs.S` are **generated**
+  `winrt_fm5.c`, `shape_fm5.c`, `debug12_fm5.c`, `gfx_fm5.c`, `shader_fm6.c` (FM6 console DXBC opcodes); `tests\` = proxy tests; `d3d_thunks.S` and `winmm_stubs.S` are **generated**
   (`tools\gen_d3d_thunks.py`, `tools\gen_winmm_stubs.py`).
 - `winmm.dll` (root) = installed proxy (delete it = original Azimuth).
 - `azimuth_fm5.ini` section `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`, `D3D12Debug`) and `azimuth_fm5.log` (proxy log).

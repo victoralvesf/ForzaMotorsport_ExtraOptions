@@ -1230,6 +1230,49 @@ static long fm6_CreateShaderResourceView(void *dev, void *res, const UINT *desc,
     return srv_fmask(dev, res, desc, out, orig_fm6_create_tex2d, orig_fm6_create_srv);
 }
 
+/* Create*Shader / CreateInputLayout do FM6: o bytecode passa por fm6_shader_rewrite (shader_fm6.c: max3 do console
+   -> max) antes do Azimuth, que copia o bytecode (vetor proprio) -> o convertido e liberado na volta. O input
+   layout recebe o mesmo bytecode convertido (o Azimuth casa shaders por hash). */
+uint8_t *fm6_shader_rewrite(const void *code, size_t size, size_t *out_size);
+#define FM6_SHADER_FIRST 0x0c                          /* VS 0xc, GS 0xd, GS+SO 0xe, PS 0xf, HS 0x10, DS 0x11, CS 0x12 */
+static void *orig_fm6_shader[7], *orig_fm6_input_layout;
+typedef long (*create_shader_fn)(void *dev, const void *code, SIZE_T len, void *linkage, void **out);
+typedef long (*create_gsso_fn)(void *dev, const void *code, SIZE_T len, const void *decl, UINT n, const UINT *strides,
+                               UINT nstrides, UINT rast, void *linkage, void **out);
+typedef long (*create_il_fn)(void *dev, const void *descs, UINT n, const void *code, SIZE_T len, void **out);
+#define FM6_SHADER(s)                                                                                           \
+    static long fm6_create_shader_##s(void *dev, const void *code, SIZE_T len, void *lk, void **out)          \
+    {                                                                                                           \
+        size_t n = 0;                                                                                           \
+        uint8_t *p = fm6_shader_rewrite(code, len, &n);                                                         \
+        long hr = ((create_shader_fn)orig_fm6_shader[s - FM6_SHADER_FIRST])(dev, p ? p : code, p ? n : len, lk, out); \
+        free(p);                                                                                                \
+        return hr;                                                                                              \
+    }
+FM6_SHADER(0x0c) FM6_SHADER(0x0d) FM6_SHADER(0x0f) FM6_SHADER(0x10) FM6_SHADER(0x11) FM6_SHADER(0x12)
+static long fm6_create_shader_0x0e(void *dev, const void *code, SIZE_T len, const void *decl, UINT nd,
+                                   const UINT *strides, UINT ns, UINT rast, void *lk, void **out)
+{
+    size_t n = 0;
+    uint8_t *p = fm6_shader_rewrite(code, len, &n);
+    long hr = ((create_gsso_fn)orig_fm6_shader[2])(dev, p ? p : code, p ? n : len, decl, nd, strides, ns, rast, lk, out);
+    free(p);
+    return hr;
+}
+static long fm6_CreateInputLayout(void *dev, const void *descs, UINT nd, const void *code, SIZE_T len, void **out)
+{
+    size_t n = 0;
+    uint8_t *p = fm6_shader_rewrite(code, len, &n);
+    long hr = ((create_il_fn)orig_fm6_input_layout)(dev, descs, nd, p ? p : code, p ? n : len, out);
+    free(p);
+    return hr;
+}
+static void *const fm6_shader_hooks[7] = {
+    (void *)fm6_create_shader_0x0c, (void *)fm6_create_shader_0x0d, (void *)fm6_create_shader_0x0e,
+    (void *)fm6_create_shader_0x0f, (void *)fm6_create_shader_0x10, (void *)fm6_create_shader_0x11,
+    (void *)fm6_create_shader_0x12,
+};
+
 static int fm6_device_fixups(void **vt)
 {
     size_t i;
@@ -1239,6 +1282,12 @@ static int fm6_device_fixups(void **vt)
         vt[5] = (void *)fm6_CreateTexture2D;
         orig_fm6_create_srv = (srv_fn)vt[7];
         vt[7] = (void *)fm6_CreateShaderResourceView;
+        orig_fm6_input_layout = vt[0xb];
+        vt[0xb] = (void *)fm6_CreateInputLayout;
+        for (i = 0; i < 7; i++) {
+            orig_fm6_shader[i] = vt[FM6_SHADER_FIRST + i];
+            vt[FM6_SHADER_FIRST + i] = fm6_shader_hooks[i];
+        }
     }
     for (i = 0; i < sizeof fm6_dev_trivial / sizeof *fm6_dev_trivial; i++) {
         int s = fm6_dev_trivial[i].slot;
