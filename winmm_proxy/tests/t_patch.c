@@ -5,6 +5,7 @@
 #include "../fm5_patch.c"
 #include "test.h"
 #include <stdlib.h>
+extern void debug12_create_device(void);   /* debug12_fm5.c (so o endereco) */
 
 /* ---- log / ini / g_base falso (usados pelos outros t_*.c) ---- */
 static char log_path[MAX_PATH];
@@ -715,6 +716,17 @@ TEST(install_on_real_azimuth)
     CHECK(log_has("hook 0x203b60 instalado"));                  /* despacho de tabela (GameChat do FM6) */
     /* LocalSpaceStatics slot 8 (GetForMachineAsync): stub fatal 0x189bd0 -> proxy (winrt_fm5.c) */
     CHECK(*(uint8_t **)(az + 0x2b6628) != az + 0x189bd0 && log_has("patch 0x2b6628: LocalSpaceStatics"));
+    /* D3D12CreateDevice (debug12_fm5.c): o call [rip] em 0x567df passa a ler um ponteiro nosso, nao a IAT 0x26f868
+       (o RenderDoc reescreve a IAT); a IAT fica intacta */
+    {
+        uint8_t *call = az + 0x567df;
+        int32_t disp;
+        CHECK_HEX(call, "ff15");
+        memcpy(&disp, call + 2, 4);
+        CHECK(call + 6 + disp != az + 0x26f868);
+        CHECK(*(void **)(call + 6 + disp) == (void *)debug12_create_device);
+        CHECK(log_has("debug12: hook no call 0x567df"));
+    }
     dump_log_on_fail();
     pe_unmap(az);
 }

@@ -1,6 +1,8 @@
 /*
  * Diagnostico: debug layer do D3D12 (azimuth_fm5.ini [FM5] D3D12Debug=1; =2 tambem GPU-based validation).
- * O azimuth.exe importa d3d12.dll!D3D12CreateDevice por ordinal (101) no slot da IAT 0x26f868. O hook liga a
+ * O azimuth.exe importa d3d12.dll!D3D12CreateDevice por ordinal (101) no slot da IAT 0x26f868, usado so pelo
+ * call [rip] em 0x567df. O hook troca o disp32 desse call por um ponteiro nosso perto da imagem (a IAT fica como
+ * esta: o RenderDoc reescreve as IATs depois de nos e apagava um hook ali) e chama o que estiver na IAT. Ele liga a
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
  * D3D12Debug=3 (4 = + experimento do gpuguard_fm6.c: pula a compute interna k12 + [SRV, UAV]; 5 = + placement textures
@@ -13,12 +15,16 @@
 #define INITGUID
 #include <windows.h>
 #include <stdint.h>
+#include <string.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 
 #define RVA_IAT_D3D12_CREATE_DEVICE 0x26f868  /* d3d12.dll ordinal 101 */
+#define RVA_CALL_D3D12_CREATE_DEVICE 0x567df /* ff 15 disp32 -> IAT 0x26f868 (unico uso) */
 
 extern uint8_t *g_base;
+extern uint8_t *alloc_near(uint8_t *mod, size_t size);
+extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
 extern int cfg_int(const wchar_t *key, int def);
 extern void wlog(const char *fmt, ...);
 extern void gpuguard_install(IUnknown *dev);
@@ -29,7 +35,6 @@ extern void gg_parse_hashes(const char *str);
 extern int cfg_str(const wchar_t *key, char *out, int len);
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
-static create_device_fn real_create_device;
 static volatile LONG msg_count;
 
 static void __stdcall on_message(D3D12_MESSAGE_CATEGORY cat, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id,
@@ -152,11 +157,12 @@ static void enable_debug_layer(void)
     wlog("debug12: debug layer do D3D12 ativada (modo %d)", g_mode);
 }
 
-static HRESULT WINAPI hook_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level, REFIID riid, void **out)
+HRESULT WINAPI debug12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level, REFIID riid, void **out)
 {
     HRESULT hr;
     if (g_mode) enable_debug_layer();
-    hr = real_create_device(adapter, level, riid, out);
+    /* o que estiver na IAT agora: d3d12.dll ou o hook do RenderDoc (device embrulhado, capturado com a trava) */
+    hr = (*(create_device_fn *)(g_base + RVA_IAT_D3D12_CREATE_DEVICE))(adapter, level, riid, out);
     if (SUCCEEDED(hr) && out && *out) gpuguard_install((IUnknown *)*out);
     if (!g_mode) return hr;
     if (g_mode >= 3 && SUCCEEDED(hr) && out && *out) {
@@ -189,8 +195,8 @@ static HRESULT WINAPI hook_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL le
 
 int debug12_install(void)
 {
-    HMODULE d3d12;
-    void **slot = (void **)(g_base + RVA_IAT_D3D12_CREATE_DEVICE);
+    uint8_t *call = g_base + RVA_CALL_D3D12_CREATE_DEVICE, *ptr;
+    int32_t disp;
     DWORD old;
 
     g_mode = cfg_int(L"D3D12Debug", 0);
@@ -200,15 +206,21 @@ int debug12_install(void)
         char hashes[1024];
         if (cfg_str(L"DrawSkipHashes", hashes, sizeof hashes)) gg_parse_hashes(hashes);
     }
-    d3d12 = GetModuleHandleW(L"d3d12.dll");
-    if (!d3d12 || *slot != (void *)GetProcAddress(d3d12, "D3D12CreateDevice")) {
-        wlog("debug12: slot da IAT %#x nao e D3D12CreateDevice; debug layer NAO ativada", RVA_IAT_D3D12_CREATE_DEVICE);
+    /* call qword [rip+0x219083] (-> IAT 0x26f868) */
+    if (!bytes_match(call, "ff1583902100", 6)) {
+        wlog("debug12: call do D3D12CreateDevice em %#x nao confere; trava e debug layer NAO ativadas",
+             RVA_CALL_D3D12_CREATE_DEVICE);
         return 1;
     }
-    real_create_device = (create_device_fn)*slot;
-    VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old);
-    *slot = (void *)hook_create_device;
-    VirtualProtect(slot, sizeof *slot, old, &old);
-    wlog("debug12: hook no slot %#x (D3D12Debug=%d)", RVA_IAT_D3D12_CREATE_DEVICE, g_mode);
+    if (!(ptr = alloc_near(g_base, 8))) {
+        wlog("debug12: sem memoria perto do azimuth.exe; trava e debug layer NAO ativadas");
+        return 1;
+    }
+    *(void **)ptr = (void *)debug12_create_device;
+    disp = (int32_t)(ptr - (call + 6));
+    VirtualProtect(call + 2, 4, PAGE_EXECUTE_READWRITE, &old);
+    memcpy(call + 2, &disp, 4);
+    VirtualProtect(call + 2, 4, old, &old);
+    wlog("debug12: hook no call %#x do D3D12CreateDevice (D3D12Debug=%d)", RVA_CALL_D3D12_CREATE_DEVICE, g_mode);
     return 1;
 }
