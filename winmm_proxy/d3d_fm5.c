@@ -1343,11 +1343,17 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
 #define AZ_SLOT_CLEARST   0x6e
 #define AZ_LIST_STATE     0x48          /* estado do D3D12 da lista; nulo = draw bundle */
 #define FM6_KEEP_RTS      0xffffffffu   /* D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL */
+/* Azimuth (layout com o slot 7) por estagio do driver (0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS): CB e SRV */
+static const uint8_t fm6_stage_cb[6] = { 0x08, 0x3e, 0x42, 0x17, 0x11, 0x47 };
+static const uint8_t fm6_stage_srv[6] = { 0x19, 0x3b, 0x3f, 0x1f, 0x09, 0x43 };
 typedef struct {
     UINT nrtv, nvp, nsc;
     void *rtv[8], *dsv;
     float vp[16][6];
     RECT sc[16];
+    /* CB/SRV estacionados pelo SetFastResourcesFromBatch (n = ultimo slot ligado + 1, por estagio do driver) */
+    uint8_t ncb[6], nsrv[6];
+    void *cb[6][14], *srv[6][128];
 } fm6_om;
 typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; fm6_om st; } fm6_dctx_info;
 static fm6_dctx_info fm6_dctx[128];
@@ -1452,6 +1458,23 @@ static void fm6_def_RSSetScissorRects(void *ctx, UINT n, const RECT *r)
     }
     ((void (*)(void *, UINT, const RECT *))fm6_az_fn(ctx, AZ_SLOT_SCISSORS))(ctx, n, r);
 }
+/* RemapConstantBufferInheritance / RemapShaderResourceInheritance (FM6 0x9f/0xa0 = Azimuth 0x9c/0x9d) do diferido:
+   so conta os do bundle (estagio/slot de destino <- origem) e repassa */
+#define AZ_SLOT_REMAP_CB 0x9c
+static void fm6_def_remap(int srv, void *ctx, UINT ds, UINT dslot, UINT ss, UINT sslot)
+{
+    static volatile LONG n[2];
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    LONG k = InterlockedIncrement(&n[srv]);
+    if (k <= 8 || (k & (k - 1)) == 0)
+        wlog("d3d: heranca: Remap%sInheritance #%ld no diferido d%d (flags %#x): estagio %u slot %u <- estagio %u "
+             "slot %u", srv ? "ShaderResource" : "ConstantBuffer", k, d ? d->idx : -1, d ? d->flags : 0, ds, dslot,
+             ss, sslot);
+    ((void (*)(void *, UINT, UINT, UINT, UINT))fm6_az_fn(ctx, AZ_SLOT_REMAP_CB + srv))(ctx, ds, dslot, ss, sslot);
+}
+static void fm6_def_RemapCB(void *ctx, UINT ds, UINT dslot, UINT ss, UINT sslot) { fm6_def_remap(0, ctx, ds, dslot, ss, sslot); }
+static void fm6_def_RemapSRV(void *ctx, UINT ds, UINT dslot, UINT ss, UINT sslot) { fm6_def_remap(1, ctx, ds, dslot, ss, sslot); }
+
 static void fm6_def_ClearState(void *ctx)
 {
     fm6_om_reset(ctx);
@@ -1463,12 +1486,41 @@ typedef struct { void **vt; volatile LONG ref; fm6_om st; } fm6_om_item;
 static ULONG fm6_om_item_addref(fm6_om_item *o) { return (ULONG)InterlockedIncrement(&o->ref); }
 static ULONG fm6_om_item_release(fm6_om_item *o);
 static void *fm6_om_item_vt[3] = { NULL, (void *)fm6_om_item_addref, (void *)fm6_om_item_release };
+static void fm6_obj_ref(void *o, int add)
+{
+    if (o) ((ULONG (*)(void *))(*(void ***)o)[add ? 1 : 2])(o);
+}
 static void fm6_om_views(fm6_om *st, int add)
 {
-    UINT i;
-    for (i = 0; i < st->nrtv; i++)
-        if (st->rtv[i]) ((ULONG (*)(void *))(*(void ***)st->rtv[i])[add ? 1 : 2])(st->rtv[i]);
-    if (st->dsv) ((ULONG (*)(void *))(*(void ***)st->dsv)[add ? 1 : 2])(st->dsv);
+    UINT i, s;
+    for (i = 0; i < st->nrtv; i++) fm6_obj_ref(st->rtv[i], add);
+    fm6_obj_ref(st->dsv, add);
+    for (s = 0; s < 6; s++) {
+        for (i = 0; i < st->ncb[s]; i++) fm6_obj_ref(st->cb[s][i], add);
+        for (i = 0; i < st->nsrv[s]; i++) fm6_obj_ref(st->srv[s][i], add);
+    }
+}
+
+/* FromBatch num diferido: guarda o recurso estacionado (o bundle aninhado le os estagios 5/1/2/3 pelos remaps) */
+static void fm6_res_note(void *ctx, int srv, UINT stage, UINT slot, void *obj)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (!d || stage >= 6 || slot >= (srv ? 128u : 14u)) return;
+    if (srv) {
+        d->st.srv[stage][slot] = obj;
+        if (slot >= d->st.nsrv[stage]) d->st.nsrv[stage] = (uint8_t)(slot + 1);
+    } else {
+        d->st.cb[stage][slot] = obj;
+        if (slot >= d->st.ncb[stage]) d->st.ncb[stage] = (uint8_t)(slot + 1);
+    }
+}
+
+static int fm6_om_has_res(const fm6_om *st)
+{
+    int s;
+    for (s = 0; s < 6; s++)
+        if (st->ncb[s] || st->nsrv[s]) return 1;
+    return 0;
 }
 static ULONG fm6_om_item_release(fm6_om_item *o)
 {
@@ -1488,7 +1540,7 @@ static fm6_om_item *fm6_om_snapshot(void *ctx)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
     fm6_om_item *o;
-    if (!d || (!d->st.nrtv && !d->st.dsv && !d->st.nvp)) return NULL;
+    if (!d || (!d->st.nrtv && !d->st.dsv && !d->st.nvp && !fm6_om_has_res(&d->st))) return NULL;
     if (!(o = malloc(sizeof *o))) return NULL;
     o->vt = fm6_om_item_vt;
     o->ref = 1;
@@ -1502,12 +1554,21 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
 {
     void **az = *(void ***)ctx;
     static volatile LONG logged;
-    ((void (*)(void *, UINT, void *const *, void *))az[AZ_SLOT_OM])(ctx, o->st.nrtv, o->st.rtv, o->st.dsv);
+    UINT s, ncb = 0, nsrv = 0;
+    if (o->st.nrtv || o->st.dsv || o->st.nvp)
+        ((void (*)(void *, UINT, void *const *, void *))az[AZ_SLOT_OM])(ctx, o->st.nrtv, o->st.rtv, o->st.dsv);
     if (o->st.nvp) ((void (*)(void *, UINT, const float *))az[AZ_SLOT_VIEWPORTS])(ctx, o->st.nvp, &o->st.vp[0][0]);
     if (o->st.nsc) ((void (*)(void *, UINT, const RECT *))az[AZ_SLOT_SCISSORS])(ctx, o->st.nsc, o->st.sc);
+    /* os remaps do bundle resolvem a origem no estado do imediato (pacote 0xc, 0x140111820) */
+    for (s = 0; s < 6; s++) {
+        if (o->st.ncb[s]) ((set_fn)az[fm6_stage_cb[s]])(ctx, 0, o->st.ncb[s], o->st.cb[s]);
+        if (o->st.nsrv[s]) ((set_fn)az[fm6_stage_srv[s]])(ctx, 0, o->st.nsrv[s], o->st.srv[s]);
+        ncb += o->st.ncb[s];
+        nsrv += o->st.nsrv[s];
+    }
     if (InterlockedIncrement(&logged) <= 4)
-        wlog("d3d: heranca: bundle aninhado executa com o OM do juntador (%u RTs, DS %p, %u viewports, %u scissors)",
-             o->st.nrtv, o->st.dsv, o->st.nvp, o->st.nsc);
+        wlog("d3d: heranca: bundle aninhado executa com o OM do juntador (%u RTs, DS %p, %u viewports, %u scissors, "
+             "%u slots de CB e %u de SRV estacionados)", o->st.nrtv, o->st.dsv, o->st.nvp, o->st.nsc, ncb, nsrv);
 }
 
 /* lista devolvida pelo FinishCommandList -> diferido que a gravou (anel) */
@@ -1743,9 +1804,6 @@ static void fm6_SOSetTargets(void *ctx, UINT n, void *const *bufs, const UINT *o
 #define FM6_BATCH_PM4_NOP  0x80000000u   /* o jogo completa o batch ate 16 bytes com NOPs tipo 2 */
 typedef struct { uint8_t *cb, *srv; uint32_t cb_size, srv_size; } fm6_batch;
 static const uint8_t fm6_batch_stage[4] = { 5, 1, 2, 3 };
-/* Azimuth (layout com o slot 7) por estagio do driver: CB e SRV */
-static const uint8_t fm6_stage_cb[6] = { 0x08, 0x3e, 0x42, 0x17, 0x11, 0x47 };
-static const uint8_t fm6_stage_srv[6] = { 0x19, 0x3b, 0x3f, 0x1f, 0x09, 0x43 };
 
 static void fm6_batch_put(uint8_t *rec, uint32_t hdr, void *obj)
 {
@@ -1799,6 +1857,7 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
         }
         ((set_fn)(*(void ***)ctx)[hdr & FM6_BATCH_SRV_FLAG ? fm6_stage_srv[stage] : fm6_stage_cb[stage]])
             (ctx, slot, 1, &obj);
+        fm6_res_note(ctx, !!(hdr & FM6_BATCH_SRV_FLAG), stage, slot, obj);
         p += n;
     }
 }
@@ -2153,6 +2212,8 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         dst[0x2d] = (void *)fm6_def_RSSetViewports;
         dst[0x2e] = (void *)fm6_def_RSSetScissorRects;
         dst[0x6f] = (void *)fm6_def_ClearState;
+        if (src[AZ_SLOT_REMAP_CB] != g_base + RVA_STUB_SLOT(AZ_SLOT_REMAP_CB)) dst[0x9f] = (void *)fm6_def_RemapCB;
+        if (src[AZ_SLOT_REMAP_CB + 1] != g_base + RVA_STUB_SLOT(AZ_SLOT_REMAP_CB + 1)) dst[0xa0] = (void *)fm6_def_RemapSRV;
     }
     if (src[fm6_ctx_slot(FM6_SLOT_SO_SET)] == g_base + RVA_STUB_SLOT(fm6_ctx_slot(FM6_SLOT_SO_SET)))
         dst[FM6_SLOT_SO_SET] = (void *)fm6_SOSetTargets;
