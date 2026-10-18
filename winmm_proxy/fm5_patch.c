@@ -830,9 +830,27 @@ extern int shape_install(void);
 extern int debug12_install(void);
 extern int fm6_batch_install(uint8_t *game);
 
+/* EXPERIMENTO D3D12Debug=5 (17_fm6.txt PASSO 24): o criterio 0x14013bae0 de title_storage (so chamado por
+   CreatePlacementTexture2D/3D) escolhe recurso reservado (tiled) em vez de committed; com tiled tier 4 vale p/
+   todo Texture2D/3D. Forcado a 0 (xor eax,eax ; ret) -> placement textures do FM6 viram committed, o mesmo
+   caminho do Azimuth p/ arrays em GPUs com tier < 4. */
+#define RVA_TITLE_STORAGE_RESERVED 0x13bae0
+
+static void fm6_committed_placement_textures(void)
+{
+    static const uint8_t ret0[3] = { 0x31, 0xc0, 0xc3 };
+    if (!bytes_match(g_base + RVA_TITLE_STORAGE_RESERVED, "48895c241055565748", 9)) {
+        wlog("FM6: D3D12Debug=5: site %#x nao confere, ignorado", RVA_TITLE_STORAGE_RESERVED);
+        return;
+    }
+    write_mem(g_base + RVA_TITLE_STORAGE_RESERVED, ret0, 3);
+    wlog("FM6: D3D12Debug=5: placement textures como recurso committed (sem recurso reservado)");
+}
+
 /* opcoes do azimuth_fm6.ini */
 static void fm6_patches(uint8_t *game)
 {
+    if (cfg_int(L"D3D12Debug", 0) == 5) fm6_committed_placement_textures();
     if (cfg6_int(L"SkipIntro", 0)) {
         static const uint8_t nop2[2] = { 0x66, 0x90 }, jmp8 = 0xeb;
         size_t i, n = sizeof fm6_splash_intro_cmps / sizeof *fm6_splash_intro_cmps;

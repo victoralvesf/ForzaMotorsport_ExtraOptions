@@ -347,6 +347,30 @@ TEST(fm6_skip_intro_patches_exe)
     dump_log_on_fail();
 }
 
+/* D3D12Debug=5: criterio de recurso reservado do title_storage (azimuth 0x13bae0) -> xor eax,eax ; ret */
+TEST(fm6_debug5_committed_placement)
+{
+    uint8_t *az = pe_map(AZIMUTH_EXE, NULL), *game = pe_map(FM6_EXE, NULL);
+    if (!az || !game) { pe_unmap(az); pe_unmap(game); test_skip("azimuth.exe/exe do FM6 ausentes"); return; }
+    g_base = az;
+    log_capture();
+    ini6_set(NULL);
+    ini_set("[FM5]\nD3D12Debug=3\n");
+    fm6_patches(game);
+    CHECK_HEX(az + 0x13bae0, "48895c241055565748");
+    ini_set("[FM5]\nD3D12Debug=5\n");
+    fm6_patches(game);
+    CHECK_HEX(az + 0x13bae0, "31c0c324105556574881");
+    CHECK(log_has("FM6: D3D12Debug=5: placement textures como recurso committed"));
+    fm6_patches(game);                            /* bytes ja trocados -> nada muda */
+    CHECK(log_has("FM6: D3D12Debug=5: site 0x13bae0 nao confere, ignorado"));
+    CHECK_HEX(az + 0x13bae0, "31c0c3");
+    ini_set(NULL);
+    pe_unmap(game);
+    pe_unmap(az);
+    dump_log_on_fail();
+}
+
 /* ------------------------------------------------------------------------ */
 /* Registro do FM5 (PASSO 4)                                                  */
 /* ------------------------------------------------------------------------ */
