@@ -1825,12 +1825,64 @@ static ULONG STDMETHODCALLTYPE hook_list_release(ID3D12GraphicsCommandList *l)
     return r;
 }
 
+/* quem cria command lists / allocators (17_fm6.txt PASSO 36: ~4600 listas vivas e "Kernel memory failure" em 20 s):
+   pontos distintos pela pilha em game/azimuth; ponto novo -> log com a pilha, depois contagem nas potencias de 2 */
+#define GG_MAKE_SITES 48
+typedef struct { uint32_t hash; volatile LONG count; } gg_make_site;
+static gg_make_site make_sites[2][GG_MAKE_SITES];
+static volatile LONG make_nsites[2];
+static SRWLOCK make_lock = SRWLOCK_INIT;
+
+static void note_make_site(int what)
+{
+    static const char *const names[] = { "command list", "command allocator" };
+    void *f[8];
+    uint32_t n = known_frames(f, 8), h = 2166136261u, i;
+    LONG c = 0, idx = -1;
+    for (i = 0; i < n && i < 6; i++) h = (h ^ (uint32_t)(uintptr_t)f[i]) * 16777619u;
+    AcquireSRWLockExclusive(&make_lock);
+    for (i = 0; i < (uint32_t)make_nsites[what]; i++)
+        if (make_sites[what][i].hash == h) { idx = (LONG)i; break; }
+    if (idx < 0 && make_nsites[what] < GG_MAKE_SITES) {
+        idx = make_nsites[what]++;
+        make_sites[what][idx].hash = h;
+        make_sites[what][idx].count = 0;
+    }
+    if (idx >= 0) c = ++make_sites[what][idx].count;
+    ReleaseSRWLockExclusive(&make_lock);
+    if (idx < 0 || (c > 1 && (c < 64 || (c & (c - 1))))) return;
+    {
+        char buf[600], one[40];
+        int len = wsprintfA(buf, "gpuguard: %s criada no ponto %ld (#%ld, tid %lu); pilha:", names[what], idx, c,
+                            GetCurrentThreadId());
+        for (i = 0; i < n && len < 540; i++) {
+            label(one, f[i]);
+            len += wsprintfA(buf + len, "%s", one);
+        }
+        wlog("%s", buf);
+    }
+}
+
 /* lista nova: registro velho do mesmo endereco fora; contagem nas potencias de 2 (vazamento de listas = fps caindo) */
 static void list_created(void *obj)
 {
     LONG k = InterlockedIncrement(&lists_made), live = InterlockedIncrement(&lists_live);
     gg_cl_forget(obj);
+    note_make_site(0);
     if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command lists criadas, %ld vivas", k, live);
+}
+
+static HRESULT (STDMETHODCALLTYPE *real_alloc)(ID3D12Device *, D3D12_COMMAND_LIST_TYPE, REFIID, void **);
+static HRESULT STDMETHODCALLTYPE hook_alloc(ID3D12Device *dev, D3D12_COMMAND_LIST_TYPE type, REFIID riid, void **out)
+{
+    static volatile LONG made;
+    HRESULT hr = real_alloc(dev, type, riid, out);
+    if (SUCCEEDED(hr)) {
+        LONG k = InterlockedIncrement(&made);
+        note_make_site(1);
+        if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command allocators criados", k);
+    }
+    return hr;
 }
 
 static void hook_list_vtable(void *obj)
@@ -1968,6 +2020,7 @@ void gpuguard_install(IUnknown *obj)
     swap((void **)&dev->lpVtbl->CopyDescriptors, hook_copy, (void **)&real_copy);
     swap((void **)&dev->lpVtbl->CopyDescriptorsSimple, hook_copy1, (void **)&real_copy1);
     swap((void **)&dev->lpVtbl->CreateCommandList, hook_list, (void **)&real_list);
+    swap((void **)&dev->lpVtbl->CreateCommandAllocator, hook_alloc, (void **)&real_alloc);
     swap((void **)&dev->lpVtbl->CreateGraphicsPipelineState, hook_gpso, (void **)&real_gpso);
     dev->lpVtbl->Release(dev);
     {
