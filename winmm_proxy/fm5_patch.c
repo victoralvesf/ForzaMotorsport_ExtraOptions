@@ -433,6 +433,7 @@ static void fm5_resolution(uint8_t *game, uint32_t height, uint32_t width)
 #define FM5_FRAME_SET_SYNC 0x711620
 static uint8_t *fps_game;
 uint8_t *g_game;           /* base do exe do FM5 (setado em fm5_patches) */
+uint8_t *g_fm6_game;       /* base do exe do FM6 (setado no apply_patches; pilhas do gpuguard_fm6.c) */
 static int fps_force;
 
 /* stub: rbx (preservado) = no da fila do executor 0x682860 ({fn, rcx, rdx, ?, next}) quando chamado de la */
@@ -859,6 +860,7 @@ static void hook_apply_patches(void *image, const void *options)
     if (is_fm6()) {  /* os sites do registro sao do FH2: TLS, heap da APU e batches */
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM6 em %p, sem patches", game);
+        g_fm6_game = game;
         take_tls_template(game);
         implicit_apu_heap("FM6");
         fm6_batch_install(game);

@@ -5,6 +5,7 @@
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
  * D3D12Debug=3: sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
  * UINT64_MAX) e grava no log as listas que nao terminaram, com as operacoes em volta da ultima executada.
+ * No FM6 o hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c).
  */
 #define INITGUID
 #include <windows.h>
@@ -17,6 +18,8 @@
 extern uint8_t *g_base;
 extern int cfg_int(const wchar_t *key, int def);
 extern void wlog(const char *fmt, ...);
+extern int is_fm6(void);
+extern void gpuguard_install(IUnknown *dev);
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
 static create_device_fn real_create_device;
@@ -143,8 +146,10 @@ static void enable_debug_layer(void)
 static HRESULT WINAPI hook_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level, REFIID riid, void **out)
 {
     HRESULT hr;
-    enable_debug_layer();
+    if (g_mode) enable_debug_layer();
     hr = real_create_device(adapter, level, riid, out);
+    if (SUCCEEDED(hr) && out && *out && is_fm6()) gpuguard_install((IUnknown *)*out);
+    if (!g_mode) return hr;
     if (g_mode == 3 && SUCCEEDED(hr) && out && *out) {
         static int watching;
         ID3D12Device *dev = NULL;
@@ -180,7 +185,6 @@ int debug12_install(void)
     DWORD old;
 
     g_mode = cfg_int(L"D3D12Debug", 0);
-    if (!g_mode) return 1;
     d3d12 = GetModuleHandleW(L"d3d12.dll");
     if (!d3d12 || *slot != (void *)GetProcAddress(d3d12, "D3D12CreateDevice")) {
         wlog("debug12: slot da IAT %#x nao e D3D12CreateDevice; debug layer NAO ativada", RVA_IAT_D3D12_CREATE_DEVICE);
