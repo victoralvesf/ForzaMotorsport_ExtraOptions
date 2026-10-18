@@ -641,6 +641,248 @@ static void STDMETHODCALLTYPE hook_gsrv(ID3D12GraphicsCommandList *l, UINT i, D3
 static void STDMETHODCALLTYPE hook_cuav(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_cuav(l, i, guard_va("SetComputeRootUnorderedAccessView", va)); }
 static void STDMETHODCALLTYPE hook_guav(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_guav(l, i, guard_va("SetGraphicsRootUnorderedAccessView", va)); }
 
+/* ---- entrada do IA (17_fm6.txt PASSO 28): o page fault so some sem os DrawIndexedInstanced do replayer; o UMD da
+ * AMD poe 0xdeadbeef.. como endereco de slot de vertex buffer sem buffer. Guarda, por PSO, os slots que o input
+ * layout le e, por lista, os slots com buffer e se ha index buffer; o draw que le slot vazio vira relatorio. ---- */
+
+#define GG_PSO_SLOTS 8192
+typedef struct { void *pso; uint32_t slots, nelem, hash; } gg_pso;   /* hash: gg_shader_hash (estavel entre boots) */
+typedef struct { void *cl; uint32_t vb; int ib; } gg_ia;
+static gg_pso pso_tab[GG_PSO_SLOTS];
+static gg_ia ia_tab[GG_CL_SLOTS];
+static SRWLOCK pso_lock = SRWLOCK_INIT, ia_lock = SRWLOCK_INIT;
+
+/* mascara dos InputSlot lidos pelo input layout */
+uint32_t gg_layout_slots(const D3D12_INPUT_LAYOUT_DESC *il)
+{
+    uint32_t m = 0, i;
+    for (i = 0; il && il->pInputElementDescs && i < il->NumElements; i++)
+        if (il->pInputElementDescs[i].InputSlot < 31) m |= 1u << il->pInputElementDescs[i].InputSlot;
+    return m;
+}
+
+/* subobjeto `type` de um stream de pipeline (NULL se nao tem ou se ha subobjeto desconhecido antes dele) */
+const void *gg_stream_find(const void *stream, SIZE_T size, uint32_t type)
+{
+#define GG_SUB(t) { sizeof(t), _Alignof(t) }
+    static const struct { uint32_t size, align; } sub[] = {
+        GG_SUB(void *), GG_SUB(D3D12_SHADER_BYTECODE), GG_SUB(D3D12_SHADER_BYTECODE), GG_SUB(D3D12_SHADER_BYTECODE),
+        GG_SUB(D3D12_SHADER_BYTECODE), GG_SUB(D3D12_SHADER_BYTECODE), GG_SUB(D3D12_SHADER_BYTECODE),
+        GG_SUB(D3D12_STREAM_OUTPUT_DESC), GG_SUB(D3D12_BLEND_DESC), GG_SUB(UINT), GG_SUB(D3D12_RASTERIZER_DESC),
+        GG_SUB(D3D12_DEPTH_STENCIL_DESC), GG_SUB(D3D12_INPUT_LAYOUT_DESC), GG_SUB(D3D12_INDEX_BUFFER_STRIP_CUT_VALUE),
+        GG_SUB(D3D12_PRIMITIVE_TOPOLOGY_TYPE), GG_SUB(struct D3D12_RT_FORMAT_ARRAY), GG_SUB(DXGI_FORMAT), GG_SUB(DXGI_SAMPLE_DESC),
+        GG_SUB(UINT), GG_SUB(D3D12_CACHED_PIPELINE_STATE), GG_SUB(D3D12_PIPELINE_STATE_FLAGS),
+        GG_SUB(D3D12_DEPTH_STENCIL_DESC1), GG_SUB(D3D12_VIEW_INSTANCING_DESC), { 0, 0 },
+        GG_SUB(D3D12_SHADER_BYTECODE), GG_SUB(D3D12_SHADER_BYTECODE),
+    };
+#undef GG_SUB
+    const uint8_t *p = stream, *end = p + size;
+    while (p && p + 4 <= end) {
+        uint32_t t = *(const uint32_t *)p, off;
+        if (t >= sizeof sub / sizeof *sub || !sub[t].size) return NULL;
+        off = (4 + sub[t].align - 1) & ~(sub[t].align - 1);
+        if (t == type) return p + off;
+        p += (off + sub[t].size + 7) & ~7u;
+    }
+    return NULL;
+}
+
+const D3D12_INPUT_LAYOUT_DESC *gg_stream_layout(const void *stream, SIZE_T size)
+{
+    return gg_stream_find(stream, size, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT);
+}
+
+/* identidade do PSO entre boots: checksum do container DXBC/DXIL (bytes 4..19) de VS, PS, DS, HS e GS */
+uint32_t gg_shader_hash(const D3D12_SHADER_BYTECODE *const bc[5])
+{
+    uint32_t h = 2166136261u, i, j;
+    for (i = 0; i < 5; i++) {
+        const uint8_t *b = bc[i] ? bc[i]->pShaderBytecode : NULL;
+        h = (h ^ i) * 16777619u;
+        if (!b || bc[i]->BytecodeLength < 20) continue;
+        for (j = 4; j < 20; j++) h = (h ^ b[j]) * 16777619u;
+    }
+    return h;
+}
+
+static uint32_t desc_hash(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d)
+{
+    const D3D12_SHADER_BYTECODE *bc[5] = { &d->VS, &d->PS, &d->DS, &d->HS, &d->GS };
+    return gg_shader_hash(bc);
+}
+
+static uint32_t stream_hash(const D3D12_PIPELINE_STATE_STREAM_DESC *d)
+{
+    const D3D12_SHADER_BYTECODE *bc[5];
+    uint32_t i;
+    for (i = 0; i < 5; i++)
+        bc[i] = gg_stream_find(d->pPipelineStateSubobjectStream, d->SizeInBytes, i + 1);   /* VS PS DS HS GS = 1..5 */
+    return gg_shader_hash(bc);
+}
+
+void gg_pso_add(void *pso, const D3D12_INPUT_LAYOUT_DESC *il, uint32_t hash)
+{
+    unsigned h = hptr(pso, GG_PSO_SLOTS), k;
+    AcquireSRWLockExclusive(&pso_lock);
+    for (k = 0; k < GG_PSO_SLOTS; k++, h = (h + 1) & (GG_PSO_SLOTS - 1))
+        if (!pso_tab[h].pso || pso_tab[h].pso == pso) {
+            pso_tab[h].pso = pso;
+            pso_tab[h].slots = gg_layout_slots(il);
+            pso_tab[h].nelem = il ? il->NumElements : 0;
+            pso_tab[h].hash = hash;
+            break;
+        }
+    ReleaseSRWLockExclusive(&pso_lock);
+}
+
+/* hash dos shaders do PSO (0 = desconhecido) */
+uint32_t gg_pso_hash(void *pso)
+{
+    unsigned h = hptr(pso, GG_PSO_SLOTS), k;
+    uint32_t r = 0;
+    if (!pso) return 0;
+    AcquireSRWLockShared(&pso_lock);
+    for (k = 0; k < GG_PSO_SLOTS && pso_tab[h].pso; k++, h = (h + 1) & (GG_PSO_SLOTS - 1))
+        if (pso_tab[h].pso == pso) { r = pso_tab[h].hash; break; }
+    ReleaseSRWLockShared(&pso_lock);
+    return r;
+}
+
+/* slots lidos pelo PSO; -1 = PSO desconhecido */
+int64_t gg_pso_slots(void *pso)
+{
+    unsigned h = hptr(pso, GG_PSO_SLOTS), k;
+    int64_t r = -1;
+    if (!pso) return -1;
+    AcquireSRWLockShared(&pso_lock);
+    for (k = 0; k < GG_PSO_SLOTS && pso_tab[h].pso; k++, h = (h + 1) & (GG_PSO_SLOTS - 1))
+        if (pso_tab[h].pso == pso) { r = pso_tab[h].slots; break; }
+    ReleaseSRWLockShared(&pso_lock);
+    return r;
+}
+
+/* estado do IA da lista: what 0 = consulta, 1 = vertex buffers [start, start+n) de v, 2 = index buffer (ib), 3 = Reset */
+gg_ia gg_ia_state(void *cl, int what, uint32_t start, uint32_t n, const D3D12_VERTEX_BUFFER_VIEW *v, int ib)
+{
+    unsigned h = hptr(cl, GG_CL_SLOTS), k;
+    gg_ia r = { cl, 0, 0 };
+    if (what) AcquireSRWLockExclusive(&ia_lock); else AcquireSRWLockShared(&ia_lock);
+    for (k = 0; k < GG_CL_SLOTS; k++, h = (h + 1) & (GG_CL_SLOTS - 1)) {
+        gg_ia *e = &ia_tab[h];
+        if (e->cl && e->cl != cl) continue;
+        if (!e->cl) { if (!what) break; e->cl = cl; e->vb = 0; e->ib = 0; }
+        if (what == 1) {
+            uint32_t i;
+            for (i = 0; i < n && start + i < 31; i++)
+                if (v && v[i].BufferLocation) e->vb |= 1u << (start + i); else e->vb &= ~(1u << (start + i));
+        } else if (what == 2) e->ib = ib;
+        else if (what == 3) { e->vb = 0; e->ib = 0; }
+        r = *e;
+        break;
+    }
+    if (what) ReleaseSRWLockExclusive(&ia_lock); else ReleaseSRWLockShared(&ia_lock);
+    return r;
+}
+
+/* slots que o draw le sem buffer (bit 31 = draw indexado sem index buffer); 0 = ok ou PSO desconhecido */
+uint32_t gg_ia_missing(void *cl, void *pso, int indexed)
+{
+    int64_t need = gg_pso_slots(pso);
+    gg_ia st;
+    uint32_t miss;
+    if (need < 0) return 0;
+    st = gg_ia_state(cl, 0, 0, 0, NULL, 0);
+    miss = (uint32_t)need & ~st.vb & 0x7fffffffu;
+    if (indexed && !st.ib) miss |= 0x80000000u;
+    return miss;
+}
+
+static volatile LONG ia_reports;
+
+/* confere o draw; devolve a mascara do que falta (relatorio com pilha nos primeiros) */
+static uint32_t check_ia(ID3D12GraphicsCommandList *l, uint32_t op, const uint32_t *arg)
+{
+    void *pso = gg_cl_rs(l, GG_CL_PSO, NULL, 0);
+    uint32_t miss = gg_ia_missing(l, pso, op == GG_OP_DRAW_INDEXED);
+    if (pso && gg_pso_slots(pso) < 0) {
+        static volatile LONG unknown;
+        LONG k = InterlockedIncrement(&unknown);
+        if ((k & (k - 1)) == 0) wlog("gpuguard: draw com PSO de origem desconhecida %p (#%ld)", pso, k);
+    }
+    if (miss) {
+        char what[200];
+        wsprintfA(what, "%s (%u,%u,%u) le slots sem vertex buffer %#lx%s; pso %p lista %p, mascara", gg_op_name[op],
+                  arg[0], arg[1], arg[2], (unsigned long)(miss & 0x7fffffffu), miss >> 31 ? " e sem index buffer" : "",
+                  pso, (void *)l);
+        report_to(&ia_reports, GG_MAX_REPORTS, what, miss);
+    }
+    return miss;
+}
+
+static HRESULT (STDMETHODCALLTYPE *real_gpso)(ID3D12Device *, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *, REFIID, void **);
+static HRESULT (STDMETHODCALLTYPE *real_spso)(ID3D12Device2 *, const D3D12_PIPELINE_STATE_STREAM_DESC *, REFIID, void **);
+
+static HRESULT STDMETHODCALLTYPE hook_gpso(ID3D12Device *dev, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d, REFIID riid, void **out)
+{
+    HRESULT hr = real_gpso(dev, d, riid, out);
+    if (SUCCEEDED(hr) && out && *out && d) gg_pso_add(*out, &d->InputLayout, desc_hash(d));
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE hook_spso(ID3D12Device2 *dev, const D3D12_PIPELINE_STATE_STREAM_DESC *d, REFIID riid, void **out)
+{
+    HRESULT hr = real_spso(dev, d, riid, out);
+    if (SUCCEEDED(hr) && out && *out && d)
+        gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), stream_hash(d));
+    return hr;
+}
+
+/* o Azimuth carrega os PSOs da pipeline library (cache azimuth.pipelines): mesmos descritores, outro caminho */
+static void swap(void **slot, void *hook, void **orig);
+static HRESULT (STDMETHODCALLTYPE *real_lib)(ID3D12Device1 *, const void *, SIZE_T, REFIID, void **);
+static HRESULT (STDMETHODCALLTYPE *real_lib_gfx)(ID3D12PipelineLibrary *, LPCWSTR, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *,
+                                                 REFIID, void **);
+static HRESULT (STDMETHODCALLTYPE *real_lib_stream)(ID3D12PipelineLibrary1 *, LPCWSTR, const D3D12_PIPELINE_STATE_STREAM_DESC *,
+                                                    REFIID, void **);
+
+static HRESULT STDMETHODCALLTYPE hook_lib_gfx(ID3D12PipelineLibrary *lib, LPCWSTR name, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,
+                                              REFIID riid, void **out)
+{
+    HRESULT hr = real_lib_gfx(lib, name, d, riid, out);
+    if (SUCCEEDED(hr) && out && *out && d) gg_pso_add(*out, &d->InputLayout, desc_hash(d));
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE hook_lib_stream(ID3D12PipelineLibrary1 *lib, LPCWSTR name, const D3D12_PIPELINE_STATE_STREAM_DESC *d,
+                                                 REFIID riid, void **out)
+{
+    HRESULT hr = real_lib_stream(lib, name, d, riid, out);
+    if (SUCCEEDED(hr) && out && *out && d)
+        gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), stream_hash(d));
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE hook_lib(ID3D12Device1 *dev, const void *blob, SIZE_T len, REFIID riid, void **out)
+{
+    HRESULT hr = real_lib(dev, blob, len, riid, out);
+    static volatile LONG done;
+    if (SUCCEEDED(hr) && out && *out && !InterlockedCompareExchange(&done, 1, 0)) {
+        ID3D12PipelineLibrary *l0 = NULL;
+        ID3D12PipelineLibrary1 *l1 = NULL;
+        IUnknown *u = *out;
+        if (SUCCEEDED(u->lpVtbl->QueryInterface(u, &IID_ID3D12PipelineLibrary, (void **)&l0))) {
+            swap((void **)&l0->lpVtbl->LoadGraphicsPipeline, hook_lib_gfx, (void **)&real_lib_gfx);
+            l0->lpVtbl->Release(l0);
+        }
+        if (SUCCEEDED(u->lpVtbl->QueryInterface(u, &IID_ID3D12PipelineLibrary1, (void **)&l1))) {
+            swap((void **)&l1->lpVtbl->LoadPipeline, hook_lib_stream, (void **)&real_lib_stream);
+            l1->lpVtbl->Release(l1);
+        }
+        wlog("gpuguard: pipeline library trocada (LoadGraphicsPipeline%s)", l1 ? ", LoadPipeline" : "");
+    }
+    return hr;
+}
+
 static void STDMETHODCALLTYPE hook_ib(ID3D12GraphicsCommandList *l, const D3D12_INDEX_BUFFER_VIEW *v)
 {
     D3D12_INDEX_BUFFER_VIEW c;
@@ -648,6 +890,7 @@ static void STDMETHODCALLTYPE hook_ib(ID3D12GraphicsCommandList *l, const D3D12_
         report("IASetIndexBuffer", v->BufferLocation);
         c = *v; c.BufferLocation = 0; c.SizeInBytes = 0; v = &c;
     }
+    gg_ia_state(l, 2, 0, 0, NULL, v && v->BufferLocation);
     real_ib(l, v);
 }
 
@@ -664,6 +907,7 @@ static void STDMETHODCALLTYPE hook_vb(ID3D12GraphicsCommandList *l, UINT start, 
         v = c;
         break;
     }
+    gg_ia_state(l, 1, start, n, v, 0);
     real_vb(l, start, n, v);
 }
 
@@ -707,7 +951,7 @@ static void log_new_site(void *cl, uint32_t op, void *rs, void *pso, const uint3
 
 /* ---- anel dos ultimos draws/ClearRTV do processo (a lista do page fault ja foi solta quando o DRED a mostra) ---- */
 #define GG_RING 128
-typedef struct { void *cl, *rs, *pso; uint32_t seq, op, direct, arg[3]; } gg_ring_ent;
+typedef struct { void *cl, *rs, *pso; uint32_t seq, op, direct, arg[3], hash; } gg_ring_ent;
 static gg_ring_ent ring[GG_RING];
 static volatile LONG ring_seq;
 
@@ -715,7 +959,7 @@ void gg_ring_add(void *cl, uint32_t op, int direct, void *rs, void *pso, const u
 {
     LONG k = InterlockedIncrement(&ring_seq);
     gg_ring_ent *e = &ring[(uint32_t)k % GG_RING];
-    e->cl = cl; e->rs = rs; e->pso = pso; e->op = op; e->direct = direct;
+    e->cl = cl; e->rs = rs; e->pso = pso; e->op = op; e->direct = direct; e->hash = gg_pso_hash(pso);
     memcpy(e->arg, arg, sizeof e->arg);
     e->seq = (uint32_t)k;
 }
@@ -738,8 +982,9 @@ void gg_ring_dump(void)
     uint32_t n = gg_ring_get(e, GG_RING), i;
     wlog("gpuguard: ultimos %u draws/ClearRTV (mais antigo primeiro):", n);
     for (i = 0; i < n; i++)
-        wlog("gpuguard:  #%u lista %p %s %s (%u,%u,%u) rs %p pso %p", e[i].seq, e[i].cl, gg_op_name[e[i].op],
-             e[i].direct ? "direto" : "replayer", e[i].arg[0], e[i].arg[1], e[i].arg[2], e[i].rs, e[i].pso);
+        wlog("gpuguard:  #%u lista %p %s %s (%u,%u,%u) rs %p pso %p hash %08lx", e[i].seq, e[i].cl, gg_op_name[e[i].op],
+             e[i].direct ? "direto" : "replayer", e[i].arg[0], e[i].arg[1], e[i].arg[2], e[i].rs, e[i].pso,
+             (unsigned long)e[i].hash);
 }
 
 /* registra a operacao na lista (rastreio + 1o uso do ponto); devolve a root signature usada e, em `direct`, se a
@@ -785,17 +1030,69 @@ static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x
 
 /* draws: EXPERIMENTO D3D12Debug=8 (17_fm6.txt PASSO 28) = nao chegam a GPU; DrawSkip no .ini escolhe quais:
    0 = todos, 1 = so os diretos (pilha no jogo), 2 = so os do replayer; 3/4/5 = so ExecuteIndirect/DrawInstanced/
-   DrawIndexedInstanced do replayer */
+   DrawIndexedInstanced do replayer; 6 = so os que leem slot do IA sem buffer (check_ia); 7 = so os
+   DrawIndexedInstanced do replayer cujo hash de PSO esta em DrawSkipHashes (hex, separados por virgula/espaco) */
 static volatile LONG draws_skipped[2];   /* replayer, direto */
 int gg_draw_skip;
+#define GG_SKIP_HASHES 64
+uint32_t gg_skip_hash[GG_SKIP_HASHES], gg_nskip_hash;
 
-int gg_skip_draw(int direct, uint32_t op)
+/* DrawSkipHashes do .ini -> gg_skip_hash */
+void gg_parse_hashes(const char *str)
+{
+    gg_nskip_hash = 0;
+    while (str && *str && gg_nskip_hash < GG_SKIP_HASHES) {
+        char *end;
+        unsigned long v = strtoul(str, &end, 16);
+        if (end == str) { str++; continue; }
+        gg_skip_hash[gg_nskip_hash++] = (uint32_t)v;
+        str = end;
+    }
+}
+
+static int hash_listed(uint32_t h)
+{
+    uint32_t i;
+    for (i = 0; i < gg_nskip_hash; i++) if (gg_skip_hash[i] == h) return 1;
+    return 0;
+}
+
+int gg_skip_draw(int direct, uint32_t op, uint32_t ia_miss, uint32_t pso_hash)
 {
     static const uint32_t only[3] = { GG_OP_EXECUTE_INDIRECT, GG_OP_DRAW, GG_OP_DRAW_INDEXED };
-    if (gg_trace_on != 6 || (gg_draw_skip == 1 && !direct) || (gg_draw_skip >= 2 && direct)) return 0;
+    if (gg_trace_on != 6) return 0;
+    if (gg_draw_skip == 6) {
+        static volatile LONG skipped;
+        if (!ia_miss) return 0;
+        skip_note(&skipped, "draw com IA incompleto");
+        return 1;
+    }
+    if (gg_draw_skip == 7) {
+        static volatile LONG skipped;
+        if (direct || op != GG_OP_DRAW_INDEXED || !hash_listed(pso_hash)) return 0;
+        skip_note(&skipped, "DrawIndexedInstanced do replayer da lista de hashes");
+        return 1;
+    }
+    if ((gg_draw_skip == 1 && !direct) || (gg_draw_skip >= 2 && direct)) return 0;
     if (gg_draw_skip >= 3 && gg_draw_skip <= 5 && op != only[gg_draw_skip - 3]) return 0;
     skip_note(&draws_skipped[direct != 0], direct ? "draw direto" : "draw do replayer");
     return 1;
+}
+
+/* 1o uso de cada hash de PSO nos DrawIndexedInstanced do replayer (lista para a bisseccao com DrawSkip=7) */
+static void log_pso_hash(uint32_t h, const uint32_t *arg)
+{
+    static uint32_t seen[512];
+    static volatile LONG nseen;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    uint32_t i;
+    AcquireSRWLockExclusive(&lock);
+    for (i = 0; i < (uint32_t)nseen && seen[i] != h; i++) {}
+    if (i < (uint32_t)nseen || nseen >= 512) { ReleaseSRWLockExclusive(&lock); return; }
+    seen[nseen++] = h;
+    ReleaseSRWLockExclusive(&lock);
+    wlog("gpuguard: hash de PSO novo no DrawIndexedInstanced do replayer: %08lx (#%ld) (%u,%u,%u)", (unsigned long)h,
+         (long)nseen, arg[0], arg[1], arg[2]);
 }
 
 static void STDMETHODCALLTYPE hook_draw(ID3D12GraphicsCommandList *l, UINT vc, UINT ic, UINT sv, UINT si)
@@ -803,7 +1100,7 @@ static void STDMETHODCALLTYPE hook_draw(ID3D12GraphicsCommandList *l, UINT vc, U
     uint32_t arg[3] = { vc, ic, sv };
     int direct;
     trace_op(l, GG_OP_DRAW, 0, arg, &direct);
-    if (gg_skip_draw(direct, GG_OP_DRAW)) return;
+    if (gg_skip_draw(direct, GG_OP_DRAW, check_ia(l, GG_OP_DRAW, arg), 0)) return;
     real_draw(l, vc, ic, sv, si);
 }
 
@@ -812,7 +1109,9 @@ static void STDMETHODCALLTYPE hook_draw_indexed(ID3D12GraphicsCommandList *l, UI
     uint32_t arg[3] = { idx, ic, si };
     int direct;
     trace_op(l, GG_OP_DRAW_INDEXED, 0, arg, &direct);
-    if (gg_skip_draw(direct, GG_OP_DRAW_INDEXED)) return;
+    uint32_t h = gg_pso_hash(gg_cl_rs(l, GG_CL_PSO, NULL, 0));
+    if (!direct) log_pso_hash(h, arg);
+    if (gg_skip_draw(direct, GG_OP_DRAW_INDEXED, check_ia(l, GG_OP_DRAW_INDEXED, arg), h)) return;
     real_draw_indexed(l, idx, ic, si, bv, sinst);
 }
 
@@ -822,7 +1121,7 @@ static void STDMETHODCALLTYPE hook_exec_indirect(ID3D12GraphicsCommandList *l, I
     uint32_t arg[3] = { max, (uint32_t)off, cnt != NULL };
     int direct;
     trace_op(l, GG_OP_EXECUTE_INDIRECT, 0, arg, &direct);
-    if (gg_skip_draw(direct, GG_OP_EXECUTE_INDIRECT)) return;
+    if (gg_skip_draw(direct, GG_OP_EXECUTE_INDIRECT, 0, 0)) return;
     real_exec_indirect(l, sig, max, args, off, cnt, cnt_off);
 }
 
@@ -901,6 +1200,7 @@ static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12
 {
     gg_trace_reset(l);
     gg_cl_rs(l, GG_CL_PSO, ps, 1);
+    gg_ia_state(l, 3, 0, 0, NULL, 0);
     return real_reset(l, a, ps);
 }
 
@@ -1037,7 +1337,16 @@ void gpuguard_install(IUnknown *obj)
     swap((void **)&dev->lpVtbl->CopyDescriptors, hook_copy, (void **)&real_copy);
     swap((void **)&dev->lpVtbl->CopyDescriptorsSimple, hook_copy1, (void **)&real_copy1);
     swap((void **)&dev->lpVtbl->CreateCommandList, hook_list, (void **)&real_list);
+    swap((void **)&dev->lpVtbl->CreateGraphicsPipelineState, hook_gpso, (void **)&real_gpso);
     dev->lpVtbl->Release(dev);
+    {
+        ID3D12Device2 *dev2 = NULL;
+        if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device2, (void **)&dev2))) {
+            swap((void **)&dev2->lpVtbl->CreatePipelineState, hook_spso, (void **)&real_spso);
+            swap((void **)&dev2->lpVtbl->CreatePipelineLibrary, hook_lib, (void **)&real_lib);
+            dev2->lpVtbl->Release(dev2);
+        }
+    }
     if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device4, (void **)&dev4))) {
         swap((void **)&dev4->lpVtbl->CreateCommandList1, hook_list1, (void **)&real_list1);
         dev4->lpVtbl->Release(dev4);

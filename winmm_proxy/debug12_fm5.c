@@ -25,6 +25,8 @@ extern void gpuguard_install(IUnknown *dev);
 extern void gg_trace_dump(void *cl);
 extern void gg_ring_dump(void);
 extern int gg_trace_on, gg_draw_skip;
+extern void gg_parse_hashes(const char *str);
+extern int cfg_str(const wchar_t *key, char *out, int len);
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
 static create_device_fn real_create_device;
@@ -193,7 +195,11 @@ int debug12_install(void)
 
     g_mode = cfg_int(L"D3D12Debug", 0);
     gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm5_patch.c); 8/9: gpuguard_fm6.c */
-    gg_draw_skip = cfg_int(L"DrawSkip", 0);      /* com D3D12Debug=8: 0 todos, 1 diretos, 2 replayer, 3-5 tipo */
+    gg_draw_skip = cfg_int(L"DrawSkip", 0);      /* com D3D12Debug=8: 0 todos, 1 diretos, 2 replayer, 3-5 tipo, 6 IA, 7 hashes */
+    {
+        char hashes[1024];
+        if (cfg_str(L"DrawSkipHashes", hashes, sizeof hashes)) gg_parse_hashes(hashes);
+    }
     d3d12 = GetModuleHandleW(L"d3d12.dll");
     if (!d3d12 || *slot != (void *)GetProcAddress(d3d12, "D3D12CreateDevice")) {
         wlog("debug12: slot da IAT %#x nao e D3D12CreateDevice; debug layer NAO ativada", RVA_IAT_D3D12_CREATE_DEVICE);

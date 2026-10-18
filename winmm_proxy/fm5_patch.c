@@ -73,6 +73,17 @@ int cfg_int(const wchar_t *key, int def)
     return (int)GetPrivateProfileIntW(L"FM5", key, def, g_ini);
 }
 
+/* texto ASCII da chave (vazio se nao existe); devolve o tamanho */
+int cfg_str(const wchar_t *key, char *out, int len)
+{
+    wchar_t w[1024];
+    DWORD n = GetPrivateProfileStringW(L"FM5", key, L"", w, 1024, g_ini);
+    int i;
+    for (i = 0; i < (int)n && i < len - 1; i++) out[i] = w[i] < 128 ? (char)w[i] : '?';
+    out[i] = 0;
+    return i;
+}
+
 /* ---- azimuth_fm6.ini (mesma pasta), secao [FM6] ---- */
 static wchar_t g_ini6[MAX_PATH];
 

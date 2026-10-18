@@ -337,28 +337,28 @@ TEST(gpuguard_draw_skip_classes)
     int saved = gg_trace_on, saved_skip = gg_draw_skip;
     log_capture();
     gg_trace_on = 1; gg_draw_skip = 0;
-    CHECK(!gg_skip_draw(1, GG_OP_DRAW));
-    CHECK(!gg_skip_draw(0, GG_OP_DRAW));
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW, 0, 0));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW, 0, 0));
     gg_trace_on = 6;
-    CHECK(gg_skip_draw(1, GG_OP_DRAW));
-    CHECK(gg_skip_draw(0, GG_OP_DRAW));
+    CHECK(gg_skip_draw(1, GG_OP_DRAW, 0, 0));
+    CHECK(gg_skip_draw(0, GG_OP_DRAW, 0, 0));
     gg_draw_skip = 1;
-    CHECK(gg_skip_draw(1, GG_OP_DRAW));
-    CHECK(!gg_skip_draw(0, GG_OP_DRAW));
+    CHECK(gg_skip_draw(1, GG_OP_DRAW, 0, 0));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW, 0, 0));
     gg_draw_skip = 2;
-    CHECK(!gg_skip_draw(1, GG_OP_DRAW));
-    CHECK(gg_skip_draw(0, GG_OP_DRAW));
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW, 0, 0));
+    CHECK(gg_skip_draw(0, GG_OP_DRAW, 0, 0));
     gg_draw_skip = 4;                                          /* so DrawInstanced do replayer */
-    CHECK(gg_skip_draw(0, GG_OP_DRAW));
-    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED));
-    CHECK(!gg_skip_draw(0, GG_OP_EXECUTE_INDIRECT));
-    CHECK(!gg_skip_draw(1, GG_OP_DRAW));
+    CHECK(gg_skip_draw(0, GG_OP_DRAW, 0, 0));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0));
+    CHECK(!gg_skip_draw(0, GG_OP_EXECUTE_INDIRECT, 0, 0));
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW, 0, 0));
     gg_draw_skip = 5;
-    CHECK(gg_skip_draw(0, GG_OP_DRAW_INDEXED));
-    CHECK(!gg_skip_draw(0, GG_OP_DRAW));
+    CHECK(gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW, 0, 0));
     gg_draw_skip = 3;
-    CHECK(gg_skip_draw(0, GG_OP_EXECUTE_INDIRECT));
-    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED));
+    CHECK(gg_skip_draw(0, GG_OP_EXECUTE_INDIRECT, 0, 0));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0));
     CHECK(log_has("gpuguard: experimento: draw direto #"));
     gg_trace_on = saved; gg_draw_skip = saved_skip;
 }
@@ -387,4 +387,96 @@ TEST(gpuguard_draw_ring)
     log_capture();
     gg_ring_dump();
     CHECK(log_has("DrawIndexedInstanced replayer (132,1,2)"));
+}
+
+/* entrada do IA: slots do input layout (desc e stream), estado de VB/IB por lista e o que falta no draw */
+TEST(gpuguard_ia_missing_slots)
+{
+    static int cl, pso, pso2;
+    static D3D12_INPUT_ELEMENT_DESC el[3];
+    D3D12_INPUT_LAYOUT_DESC il = { el, 3 };
+    D3D12_VERTEX_BUFFER_VIEW vb[2] = { { 0x1000, 64, 16 }, { 0, 0, 0 } };
+    struct {
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t0; uint32_t pad0; void *rs;                  /* 0: ponteiro */
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t1; uint32_t pad1; D3D12_SHADER_BYTECODE vs;  /* 8 + 16 */
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t2; UINT mask;                                 /* SAMPLE_MASK: 4 + 4 */
+        D3D12_PIPELINE_STATE_SUBOBJECT_TYPE t3; uint32_t pad3; D3D12_INPUT_LAYOUT_DESC il;
+    } st;
+    el[0].InputSlot = 0; el[1].InputSlot = 0; el[2].InputSlot = 2;
+    CHECK_EQ(gg_layout_slots(&il), 5);
+    CHECK_EQ(gg_layout_slots(NULL), 0);
+    memset(&st, 0, sizeof st);
+    st.t0 = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE;
+    st.t1 = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS;
+    st.t2 = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK;
+    st.t3 = D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_INPUT_LAYOUT;
+    st.il = il;
+    CHECK_EQ(offsetof(__typeof__(st), il), 56);
+    CHECK(gg_stream_layout(&st, sizeof st) == &st.il);
+    CHECK(gg_stream_layout(&st, 48) == NULL);             /* stream acaba antes do input layout */
+    st.t2 = 23;                                            /* subobjeto desconhecido: para */
+    CHECK(gg_stream_layout(&st, sizeof st) == NULL);
+
+    gg_pso_add(&pso, &il, 0x1234);
+    gg_pso_add(&pso2, NULL, 0);
+    CHECK_EQ(gg_pso_slots(&pso), 5);
+    CHECK_EQ(gg_pso_slots(&pso2), 0);
+    CHECK_EQ(gg_pso_slots(&cl), -1);
+    CHECK_EQ(gg_ia_missing(&cl, &cl, 1), 0);               /* PSO desconhecido: sem opiniao */
+    CHECK_EQ(gg_ia_missing(&cl, &pso, 0), 5);              /* lista sem nada ligado */
+    gg_ia_state(&cl, 1, 0, 2, vb, 0);                      /* slot 0 com buffer, slot 1 vazio */
+    CHECK_EQ(gg_ia_missing(&cl, &pso, 0), 4);
+    CHECK_EQ(gg_ia_missing(&cl, &pso, 1), 0x80000004u);    /* indexado sem index buffer */
+    gg_ia_state(&cl, 1, 2, 1, vb, 0);
+    gg_ia_state(&cl, 2, 0, 0, NULL, 1);
+    CHECK_EQ(gg_ia_missing(&cl, &pso, 1), 0);
+    gg_ia_state(&cl, 1, 0, 1, NULL, 0);                    /* desliga o slot 0 */
+    CHECK_EQ(gg_ia_missing(&cl, &pso, 1), 1);
+    CHECK_EQ(gg_ia_missing(&cl, &pso2, 1), 0);             /* PSO sem input layout */
+    gg_ia_state(&cl, 3, 0, 0, NULL, 0);                    /* Reset */
+    CHECK_EQ(gg_ia_missing(&cl, &pso, 1), 0x80000005u);
+}
+
+TEST(gpuguard_debug8_skip_ia_incomplete)
+{
+    int saved = gg_trace_on, saved_skip = gg_draw_skip;
+    log_capture();
+    gg_trace_on = 6; gg_draw_skip = 6;
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0));
+    CHECK(gg_skip_draw(0, GG_OP_DRAW_INDEXED, 4, 0));
+    CHECK(gg_skip_draw(1, GG_OP_DRAW, 0x80000000u, 0));
+    CHECK(log_has("gpuguard: experimento: draw com IA incompleto #1 pulado"));
+    gg_trace_on = saved; gg_draw_skip = saved_skip;
+}
+
+/* hash dos shaders (checksum do container) e DrawSkip=7 pela lista de hashes */
+TEST(gpuguard_pso_hash_and_debug8_hash_list)
+{
+    static uint8_t vs[32], ps[32], ps2[32];
+    D3D12_SHADER_BYTECODE bvs = { vs, 32 }, bps = { ps, 32 }, bps2 = { ps2, 32 }, tiny = { ps, 8 };
+    const D3D12_SHADER_BYTECODE *a[5] = { &bvs, &bps, NULL, NULL, NULL }, *b[5] = { &bvs, &bps2, NULL, NULL, NULL };
+    const D3D12_SHADER_BYTECODE *c[5] = { &bvs, &tiny, NULL, NULL, NULL }, *d[5] = { &bvs, NULL, NULL, NULL, NULL };
+    int saved = gg_trace_on, saved_skip = gg_draw_skip;
+    vs[4] = 1; ps[4] = 2; ps2[4] = 3; ps2[0] = 9;
+    CHECK(gg_shader_hash(a) != gg_shader_hash(b));
+    ps2[4] = 2;
+    CHECK_EQ(gg_shader_hash(a), gg_shader_hash(b));       /* so o checksum (bytes 4..19) conta */
+    CHECK_EQ(gg_shader_hash(c), gg_shader_hash(d));       /* bytecode curto demais = ausente */
+    CHECK(gg_shader_hash(a) != gg_shader_hash(d));
+
+    gg_parse_hashes("1a2b3c4d, ff 0x10");
+    CHECK_EQ(gg_nskip_hash, 3);
+    CHECK_EQ(gg_skip_hash[0], 0x1a2b3c4d);
+    CHECK_EQ(gg_skip_hash[1], 0xff);
+    CHECK_EQ(gg_skip_hash[2], 0x10);
+    log_capture();
+    gg_trace_on = 6; gg_draw_skip = 7;
+    CHECK(gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0xff));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0xfe));
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW_INDEXED, 0, 0xff));  /* direto */
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW, 0, 0xff));          /* outro tipo */
+    CHECK(log_has("gpuguard: experimento: DrawIndexedInstanced do replayer da lista de hashes #1 pulado"));
+    gg_parse_hashes("");
+    CHECK_EQ(gg_nskip_hash, 0);
+    gg_trace_on = saved; gg_draw_skip = saved_skip;
 }
