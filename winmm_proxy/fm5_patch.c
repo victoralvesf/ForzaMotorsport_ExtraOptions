@@ -847,10 +847,43 @@ static void fm6_committed_placement_textures(void)
     wlog("FM6: D3D12Debug=5: placement textures como recurso committed (sem recurso reservado)");
 }
 
+/* EXPERIMENTO D3D12Debug=6 (17_fm6.txt PASSO 25): o destroy comum 0x1400da270 (chamado pela fila de Release
+   apos o ticket do worker e pelo present_release) aposenta storage/descritores na fence da GPU. Pulado para
+   recursos (5, 0xc, 0xd, 0x10), views (0xb) e 0x11 -> nada disso e destruido (vaza). Se o page fault sumir, a
+   causa e uso de objeto ja solto pelo jogo (no console soltar um placement resource nao libera a memoria). */
+#define RVA_GFX_DESTROY 0xda270
+static void (*orig_gfx_destroy)(uint8_t *obj);
+static volatile LONG leaked[0x12];
+
+static int leak_type(uint32_t t)
+{
+    return t == 5 || t == 0xb || t == 0xc || t == 0xd || t == 0x10 || t == 0x11;
+}
+
+static void fm6_leak_destroy(uint8_t *obj)
+{
+    uint32_t t = *(uint32_t *)(obj + 0x38);
+    LONG n;
+    if (!leak_type(t)) { orig_gfx_destroy(obj); return; }
+    n = InterlockedIncrement(&leaked[t]);
+    if (!(n & (n - 1))) wlog("FM6: D3D12Debug=6: destroy pulado tipo %#x (%ld)", t, n);
+}
+
+static void fm6_leak_gfx_objects(void)
+{
+    if (!hook_function(RVA_GFX_DESTROY, "48895c241855565741564157488bec", 15, (void *)fm6_leak_destroy,
+                       (void **)&orig_gfx_destroy)) {
+        wlog("FM6: D3D12Debug=6: site %#x nao confere, ignorado", RVA_GFX_DESTROY);
+        return;
+    }
+    wlog("FM6: D3D12Debug=6: recursos/views nunca destruidos (vazam)");
+}
+
 /* opcoes do azimuth_fm6.ini */
 static void fm6_patches(uint8_t *game)
 {
     if (cfg_int(L"D3D12Debug", 0) == 5) fm6_committed_placement_textures();
+    if (cfg_int(L"D3D12Debug", 0) == 6) fm6_leak_gfx_objects();
     if (cfg6_int(L"SkipIntro", 0)) {
         static const uint8_t nop2[2] = { 0x66, 0x90 }, jmp8 = 0xeb;
         size_t i, n = sizeof fm6_splash_intro_cmps / sizeof *fm6_splash_intro_cmps;

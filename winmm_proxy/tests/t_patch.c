@@ -371,6 +371,49 @@ TEST(fm6_debug5_committed_placement)
     dump_log_on_fail();
 }
 
+/* D3D12Debug=6: hook no destroy comum (azimuth 0xda270); recursos/views (tipo em +0x38) nao sao destruidos */
+static uint8_t *destroyed_obj;
+static void fake_gfx_destroy(uint8_t *obj) { destroyed_obj = obj; }
+
+TEST(fm6_debug6_leak_gfx_objects)
+{
+    static const uint32_t leak[] = { 5, 0xb, 0xc, 0xd, 0x10, 0x11 }, keep[] = { 1, 6, 7, 8, 9, 0xa, 0xf };
+    uint8_t *az = pe_map(AZIMUTH_EXE, NULL), *game = pe_map(FM6_EXE, NULL);
+    uint8_t obj[0x40];
+    size_t i;
+    if (!az || !game) { pe_unmap(az); pe_unmap(game); test_skip("azimuth.exe/exe do FM6 ausentes"); return; }
+    g_base = az;
+    log_capture();
+    ini6_set(NULL);
+    ini_set("[FM5]\nD3D12Debug=5\n");
+    fm6_patches(game);
+    CHECK_HEX(az + 0xda270, "48895c241855565741564157488bec");
+    ini_set("[FM5]\nD3D12Debug=6\n");
+    fm6_patches(game);
+    CHECK_HEX(az + 0xda270, "ff2500000000");
+    CHECK(log_has("FM6: D3D12Debug=6: recursos/views nunca destruidos"));
+    orig_gfx_destroy = fake_gfx_destroy;          /* nao roda o destroy real do Azimuth */
+    for (i = 0; i < sizeof leak / sizeof *leak; i++) {
+        destroyed_obj = NULL;
+        *(uint32_t *)(obj + 0x38) = leak[i];
+        fm6_leak_destroy(obj);
+        CHECK(destroyed_obj == NULL);
+    }
+    CHECK(log_has("destroy pulado tipo 0xc (1)"));
+    for (i = 0; i < sizeof keep / sizeof *keep; i++) {
+        destroyed_obj = NULL;
+        *(uint32_t *)(obj + 0x38) = keep[i];
+        fm6_leak_destroy(obj);
+        CHECK(destroyed_obj == obj);
+    }
+    fm6_patches(game);                            /* bytes ja trocados -> nada muda */
+    CHECK(log_has("FM6: D3D12Debug=6: site 0xda270 nao confere, ignorado"));
+    ini_set(NULL);
+    pe_unmap(game);
+    pe_unmap(az);
+    dump_log_on_fail();
+}
+
 /* ------------------------------------------------------------------------ */
 /* Registro do FM5 (PASSO 4)                                                  */
 /* ------------------------------------------------------------------------ */

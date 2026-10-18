@@ -4,7 +4,7 @@
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
  * D3D12Debug=3 (4 = + experimento do gpuguard_fm6.c: pula a compute interna k12 + [SRV, UAV]; 5 = + placement textures
- * do FM6 committed em vez de reservadas, fm5_patch.c): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
+ * do FM6 committed em vez de reservadas, fm5_patch.c; 6 = + recursos/views nunca destruidos, fm5_patch.c): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
  * UINT64_MAX) e grava no log as ultimas listas com a contagem de operacoes e, de cada uma, os pontos de chamada de
  * Dispatch/CopyTextureRegion guardados pela trava (gpuguard_fm6.c, gg_trace_*).
  * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c): o device nasce
