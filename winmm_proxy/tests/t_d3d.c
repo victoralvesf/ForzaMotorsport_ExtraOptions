@@ -1070,7 +1070,7 @@ static void fake_clear(void *ctx) { (void)ctx; clear_n++; }
 TEST(fm6_nested_command_lists)
 {
     static void *az_tab[0x10e], *src_tab[0x10e], *imm[0x10e], *def[0x10e];
-    static uint8_t dctx[0xd00], d2ctx[0xd00], ictx[0xd00];
+    static uint8_t dctx[0xa000], d2ctx[0xa000], ictx[0xa000];
     typedef void (*exec_fn)(void *, void *, BOOL);
     typedef HRESULT (*fin_fn)(void *, BOOL, void **);
     fake_cl *w1, *w2, *p1, *p2, *f, *g, *q;
@@ -1092,6 +1092,7 @@ TEST(fm6_nested_command_lists)
     dctx[0xc48] = d2ctx[0xc48] = 1;
     w1 = new_cl();
     w2 = new_cl();
+    *(void **)(dctx + AZ_CTX_D3D12_LIST) = *(void **)(d2ctx + AZ_CTX_D3D12_LIST) = dctx;   /* algo gravado */
     ((exec_fn)def[0x3b])(dctx, w1, FALSE);                   /* parte p1 + w1 */
     ((exec_fn)def[0x3b])(dctx, w2, TRUE);                    /* parte p2 + w2, estado mantido */
     CHECK_EQ(exec_n, 0);
@@ -1134,6 +1135,20 @@ TEST(fm6_nested_command_lists)
     d2ctx[0xc49] = 1;                                        /* bundle: Azimuth */
     ((exec_fn)def[0x3b])(d2ctx, w1, FALSE);
     CHECK(exec_n == 1 && exec_ctx[0] == d2ctx && w1->ref == 1);
+    d2ctx[0xc49] = 0;
+    {   /* nada gravado antes do aninhado (sem command list aberta): sem Finish, sem parte */
+        int fin = finish_n;
+        exec_n = 0;
+        *(void **)(d2ctx + AZ_CTX_D3D12_LIST) = NULL;
+        ((exec_fn)def[0x3b])(d2ctx, w1, FALSE);
+        ((exec_fn)def[0x3b])(d2ctx, w2, FALSE);
+        CHECK_EQ(finish_n, fin);
+        CHECK(w1->ref == 2 && w2->ref == 2);
+        CHECK(((fin_fn)def[0x73])(d2ctx, FALSE, &out) == 0);
+        ((exec_fn)imm[0x3b])(ictx, out, FALSE);
+        CHECK(exec_n == 3 && exec_cl[0] == w1 && exec_cl[1] == w2 && exec_cl[2] == out);
+        CHECK(log_has("sem nada gravado antes: sem parte"));
+    }
 }
 
 /* reexecucao de lista com a execucao anterior ainda na GPU: submete o lote se ela nao saiu e espera a fence */

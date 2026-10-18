@@ -1584,6 +1584,7 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
 #define AZ_SLOT_EXECUTE   0x3a
 #define AZ_SLOT_CLEAR     0x6e
 #define AZ_SLOT_FINISH    0x72
+#define AZ_CTX_D3D12_LIST 0x9d88   /* command list do D3D12 aberta (so ao gravar: 0x1400df480; Finish zera) */
 typedef void (*execute_fn)(void *ctx, void *cl, BOOL restore);
 typedef HRESULT (*finish_fn)(void *ctx, BOOL restore, void **out);
 typedef ULONG (*release_fn)(void *obj);
@@ -1702,19 +1703,29 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
     int i, n = 0;
     if (!cl || (c[AZ_CTX_DEFERRED] && c[AZ_CTX_BUNDLE])) { ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, cl, restore); return; }
     if (c[AZ_CTX_DEFERRED]) {
-        static volatile LONG logged;
+        static volatile LONG logged, empty;
         void *part = NULL;
         fm6_chain *p, *e;
-        HRESULT hr = ((finish_fn)az[AZ_SLOT_FINISH])(ctx, TRUE, &part);
-        if (hr < 0 || !part) {
-            wlog("d3d: ExecuteCommandList aninhado no diferido %p: FinishCommandList(TRUE) hr=%#lx", ctx, hr);
-            ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, cl, restore);
-            return;
+        int ok = 0;
+        /* nada gravado desde a ultima parte (sem command list aberta): o Finish abriria e fecharia uma lista vazia,
+           com allocator novo, a cada aninhado seguido (milhares em segundos -> "Kernel memory failure",
+           17_fm6.txt PASSO 37) -> so a lista entra nas pendencias */
+        if (!*(void **)(c + AZ_CTX_D3D12_LIST)) {
+            LONG k = InterlockedIncrement(&empty);
+            if ((k & (k - 1)) == 0) wlog("d3d: aninhado no diferido %p sem nada gravado antes: sem parte (#%ld)", ctx, k);
+        } else {
+            HRESULT hr = ((finish_fn)az[AZ_SLOT_FINISH])(ctx, TRUE, &part);
+            if (hr < 0 || !part) {
+                wlog("d3d: ExecuteCommandList aninhado no diferido %p: FinishCommandList(TRUE) hr=%#lx", ctx, hr);
+                ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, cl, restore);
+                return;
+            }
         }
         AcquireSRWLockExclusive(&fm6_cl_lock);
         p = fm6_chain_get(&fm6_pending, ctx);
-        if (p && fm6_chain_push(p, part)) {
-            int before = p->n - 1, inner = 0;
+        if (p && (!part || fm6_chain_push(p, part))) {
+            int before = p->n - (part != NULL), inner = 0;
+            ok = 1;
             if ((e = fm6_chain_find(&fm6_lists, cl)) != NULL)
                 for (i = 0; i < e->n; i++)
                     if (fm6_chain_push(p, e->items[i])) fm6_obj_addref(e->items[i]);
@@ -1729,10 +1740,9 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
                     wlog("d3d: aninhado no diferido %p: lista %p ja tem cadeia de %d -> pendentes %d", ctx, cl, inner, n);
                 }
             }
-        } else
-            part = NULL;
+        }
         ReleaseSRWLockExclusive(&fm6_cl_lock);
-        if (!part) wlog("d3d: ExecuteCommandList aninhado no diferido %p: sem memoria; lista %p perdida", ctx, cl);
+        if (!ok) wlog("d3d: ExecuteCommandList aninhado no diferido %p: sem memoria; lista %p perdida", ctx, cl);
         if (!restore) ((void (*)(void *))az[AZ_SLOT_CLEAR])(ctx);
         if (InterlockedIncrement(&logged) <= 8)
             wlog("d3d: ExecuteCommandList aninhado no diferido %p: lista %p (restore %d) -> parte %p, %d pendentes",
