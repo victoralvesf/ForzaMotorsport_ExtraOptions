@@ -194,8 +194,8 @@ int debug12_install(void)
     DWORD old;
 
     g_mode = cfg_int(L"D3D12Debug", 0);
-    gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm5_patch.c); 8/9: gpuguard_fm6.c */
-    gg_draw_skip = cfg_int(L"DrawSkip", 0);      /* com D3D12Debug=8: 0 todos, 1 diretos, 2 replayer, 3-5 tipo, 6 IA, 7 hashes */
+    gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm5_patch.c); 8/9/10: gpuguard_fm6.c */
+    gg_draw_skip = cfg_int(L"DrawSkip", 0);      /* com D3D12Debug=8: 0 todos, 1 diretos, 2 replayer, 3-5 tipo, 6 IA, 7 hashes, 8 DS/HS/GS/SO */
     {
         char hashes[1024];
         if (cfg_str(L"DrawSkipHashes", hashes, sizeof hashes)) gg_parse_hashes(hashes);

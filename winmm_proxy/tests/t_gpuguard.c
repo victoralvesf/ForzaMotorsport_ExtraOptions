@@ -417,11 +417,13 @@ TEST(gpuguard_ia_missing_slots)
     st.t2 = 23;                                            /* subobjeto desconhecido: para */
     CHECK(gg_stream_layout(&st, sizeof st) == NULL);
 
-    gg_pso_add(&pso, &il, 0x1234);
-    gg_pso_add(&pso2, NULL, 0);
+    gg_pso_add(&pso, &il, 0x1234, 0x303);
+    gg_pso_add(&pso2, NULL, 0, 0);
     CHECK_EQ(gg_pso_slots(&pso), 5);
     CHECK_EQ(gg_pso_slots(&pso2), 0);
     CHECK_EQ(gg_pso_slots(&cl), -1);
+    CHECK_EQ(gg_pso_info(&pso), 0x303);
+    CHECK_EQ(gg_pso_info(&cl), 0);
     CHECK_EQ(gg_ia_missing(&cl, &cl, 1), 0);               /* PSO desconhecido: sem opiniao */
     CHECK_EQ(gg_ia_missing(&cl, &pso, 0), 5);              /* lista sem nada ligado */
     gg_ia_state(&cl, 1, 0, 2, vb, 0);                      /* slot 0 com buffer, slot 1 vazio */
@@ -479,6 +481,92 @@ TEST(gpuguard_pso_hash_and_debug8_hash_list)
     gg_parse_hashes("");
     CHECK_EQ(gg_nskip_hash, 0);
     gg_trace_on = saved; gg_draw_skip = saved_skip;
+}
+
+/* estagios/stream output/topologia do PSO e DrawSkip=8 (so draws com DS/HS/GS/SO) */
+TEST(gpuguard_pso_info_and_debug8_extra_stages)
+{
+    static uint8_t code[32];
+    D3D12_SHADER_BYTECODE vs = { code, 32 }, ps = { code, 32 }, gs = { code, 32 }, none = { NULL, 0 };
+    D3D12_SO_DECLARATION_ENTRY ent = { 0 };
+    D3D12_STREAM_OUTPUT_DESC so = { &ent, 1, NULL, 0, 0 }, noso = { 0 };
+    const D3D12_SHADER_BYTECODE *a[5] = { &vs, &ps, &none, NULL, NULL }, *b[5] = { &vs, NULL, NULL, NULL, &gs };
+    char str[40];
+    int saved = gg_trace_on, saved_skip = gg_draw_skip;
+    CHECK_EQ(gg_pso_info_of(a, &noso, 3), 0x303);           /* VS + PS, triangulos; DS vazio nao conta */
+    CHECK_EQ(gg_pso_info_of(b, &so, 3), 0x331);             /* VS + GS + SO */
+    CHECK_EQ(gg_pso_info_of(a, NULL, 0), 0x3);
+    gg_pso_info_str(0x331, str);
+    CHECK_STR(str, "VS GS SO topo 3");
+    gg_pso_info_str(0, str);
+    CHECK_STR(str, "topo 0");
+
+    log_capture();
+    gg_trace_on = 6; gg_draw_skip = 8;
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0));       /* o filtro por tipo/origem nao vale no 8 */
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW, 0, 0));
+    CHECK(!gg_skip_stages(0x303));
+    CHECK(gg_skip_stages(0x331));
+    CHECK(gg_skip_stages(0x30b));                            /* DS */
+    CHECK(gg_skip_stages(0x413));                            /* HS, patch */
+    CHECK(log_has("gpuguard: experimento: draw com DS/HS/GS/SO #1 pulado"));
+    gg_draw_skip = 5;
+    CHECK(!gg_skip_stages(0x331));
+    gg_trace_on = 1; gg_draw_skip = 8;
+    CHECK(!gg_skip_stages(0x331));
+
+    gg_trace_on = 8;                                         /* D3D12Debug=10: PSO com GS fora da library */
+    CHECK(fresh_gs_pso(0x313));
+    CHECK(!fresh_gs_pso(0x303));
+    CHECK(!fresh_gs_pso(0x30b));                             /* DS sem GS */
+    CHECK(log_has("gpuguard: experimento: PSO com GS #1 criado fora da pipeline library"));
+    gg_trace_on = 6;
+    CHECK(!fresh_gs_pso(0x313));
+    gg_trace_on = saved; gg_draw_skip = saved_skip;
+}
+
+/* tabela de UAV nao definida no draw (GS do FM6 grava em u0 sem UAV ligado) -> UAVs nulos */
+TEST(gpuguard_missing_uav_tables)
+{
+    static int rs, rs2, cl, cl2;
+    uint32_t size[3] = { 4, 0, 8 };
+    D3D12_DESCRIPTOR_RANGE1 uav = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 8, 0, 0, 0, 0 };
+    D3D12_DESCRIPTOR_RANGE1 mix[2] = { { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0, 0 },
+                                       { D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, 0, 1 } };
+    D3D12_ROOT_DESCRIPTOR_TABLE1 t_uav = { 1, &uav }, t_mix = { 2, mix }, t_none = { 0, NULL };
+    D3D12_DESCRIPTOR_HEAP_DESC hd = { D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 0xf4000, D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE, 0 };
+
+    CHECK(gg_table_uav_only(&t_uav));
+    CHECK(!gg_table_uav_only(&t_mix));
+    CHECK(!gg_table_uav_only(&t_none));
+
+    CHECK(gg_null_uav_heap(&hd));
+    hd.NumDescriptors = 4096;
+    CHECK(!gg_null_uav_heap(&hd));                           /* outro heap */
+    hd.NumDescriptors = 0xf4000; hd.Flags = 0;
+    CHECK(!gg_null_uav_heap(&hd));                           /* nao visivel */
+    hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
+    CHECK(!gg_null_uav_heap(&hd));
+
+    gg_rs_add(&rs, size, 3);
+    gg_rs_set_uav(&rs, 1ull << 2);
+    gg_rs_add(&rs2, size, 3);
+    CHECK_EQ(gg_rs_uav(&rs), 4);
+    CHECK_EQ(gg_rs_uav(&rs2), 0);
+    CHECK_EQ(gg_rs_uav(NULL), 0);
+
+    gg_cl_rs(&cl, 0, &rs, 1);
+    gg_cl_gtab(&cl, 0, 0);
+    CHECK_EQ(gg_missing_uav_tables(&cl), 4);                 /* tabela 2 nunca definida */
+    gg_cl_gtab(&cl, 1, 1ull << 0);
+    CHECK_EQ(gg_missing_uav_tables(&cl), 4);
+    gg_cl_gtab(&cl, 1, 1ull << 2);
+    CHECK_EQ(gg_missing_uav_tables(&cl), 0);                 /* o jogo ligou */
+    gg_cl_gtab(&cl, 0, 0);                                   /* root signature nova / Reset */
+    CHECK_EQ(gg_missing_uav_tables(&cl), 4);
+    gg_cl_rs(&cl, 0, &rs2, 1);
+    CHECK_EQ(gg_missing_uav_tables(&cl), 0);                 /* root signature sem tabela so de UAV */
+    CHECK_EQ(gg_missing_uav_tables(&cl2), 0);                /* lista sem root signature */
 }
 
 /* espelho dos descritores: Create*View grava, CopyDescriptors propaga por ranges, slot fora de heap ignorado */
