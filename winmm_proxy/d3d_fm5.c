@@ -1501,6 +1501,193 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
     }
 }
 
+/* Listas aninhadas do FM6: game+0xf973d junta as listas dos workers num diferido (ExecuteCommandList(cl, FALSE),
+   FM6 0x3b = Azimuth 0x3a) e o Azimuth para em "ExecuteCommandList on a deferred context" (0x14011c100: o diferido
+   grava direto numa command list do D3D12, que nao executa outra). Aqui o diferido fecha o que gravou ate ali
+   (FinishCommandList(TRUE), o estado fica) e guarda [parte, pecas de cl, cl] como pendencias; o FinishCommandList
+   do jogo (FM6 0x73) pendura as pendencias na lista que devolve e o ExecuteCommandList do imediato executa as pecas
+   em ordem antes dela. As pecas tem uma referencia nossa, solta quando o Release da lista chega a 0 (slot 2 da
+   vtable da lista trocado na primeira lista com pecas). Bundles (ctx+0xc49) seguem no Azimuth. */
+#define AZ_CTX_BUNDLE     0xc49
+#define AZ_SLOT_EXECUTE   0x3a
+#define AZ_SLOT_CLEAR     0x6e
+#define AZ_SLOT_FINISH    0x72
+typedef void (*execute_fn)(void *ctx, void *cl, BOOL restore);
+typedef HRESULT (*finish_fn)(void *ctx, BOOL restore, void **out);
+typedef ULONG (*release_fn)(void *obj);
+typedef struct { void *key, **items; int n, cap; } fm6_chain;
+typedef struct { fm6_chain *v; int n, cap; } fm6_chains;
+static SRWLOCK fm6_cl_lock = SRWLOCK_INIT;
+static fm6_chains fm6_pending, fm6_lists;          /* chave: contexto diferido / lista devolvida ao jogo */
+static struct { void **vt; release_fn orig; } fm6_cl_vt[4];
+
+static fm6_chain *fm6_chain_find(fm6_chains *s, void *key)
+{
+    int i;
+    for (i = 0; i < s->n; i++)
+        if (s->v[i].key == key) return &s->v[i];
+    return NULL;
+}
+
+static fm6_chain *fm6_chain_get(fm6_chains *s, void *key)
+{
+    fm6_chain *c = fm6_chain_find(s, key);
+    if (c) return c;
+    if (s->n == s->cap) {
+        fm6_chain *v = realloc(s->v, (s->cap ? s->cap * 2 : 16) * sizeof *v);
+        if (!v) return NULL;
+        s->v = v;
+        s->cap = s->cap ? s->cap * 2 : 16;
+    }
+    c = &s->v[s->n++];
+    memset(c, 0, sizeof *c);
+    c->key = key;
+    return c;
+}
+
+/* tira a cadeia de key do conjunto (devolve as pecas para soltar fora do lock) */
+static fm6_chain fm6_chain_take(fm6_chains *s, void *key)
+{
+    fm6_chain *c = fm6_chain_find(s, key), r = { 0 };
+    if (!c) return r;
+    r = *c;
+    *c = s->v[--s->n];
+    return r;
+}
+
+static int fm6_chain_push(fm6_chain *c, void *item)
+{
+    if (c->n == c->cap) {
+        void **v = realloc(c->items, (c->cap ? c->cap * 2 : 8) * sizeof *v);
+        if (!v) return 0;
+        c->items = v;
+        c->cap = c->cap ? c->cap * 2 : 8;
+    }
+    c->items[c->n++] = item;
+    return 1;
+}
+
+static void fm6_obj_addref(void *obj) { ((release_fn)(*(void ***)obj)[1])(obj); }
+static void fm6_obj_release(void *obj) { ((release_fn)(*(void ***)obj)[2])(obj); }
+
+static void fm6_chain_free(fm6_chain *c)
+{
+    int i;
+    for (i = 0; i < c->n; i++) fm6_obj_release(c->items[i]);
+    free(c->items);
+}
+
+static ULONG fm6_cl_Release(void *cl)
+{
+    void **vt = *(void ***)cl;
+    release_fn orig = NULL;
+    ULONG r;
+    size_t i;
+    for (i = 0; i < sizeof fm6_cl_vt / sizeof *fm6_cl_vt; i++)
+        if (fm6_cl_vt[i].vt == vt) orig = fm6_cl_vt[i].orig;
+    if (!orig) return 0;                                   /* nao acontece: so vtables trocadas chegam aqui */
+    if ((r = orig(cl)) == 0) {
+        fm6_chain c;
+        AcquireSRWLockExclusive(&fm6_cl_lock);
+        c = fm6_chain_take(&fm6_lists, cl);
+        ReleaseSRWLockExclusive(&fm6_cl_lock);
+        fm6_chain_free(&c);
+    }
+    return r;
+}
+
+/* com o lock: troca o Release da vtable da lista (uma vez por vtable) */
+static int fm6_cl_hook(void *cl)
+{
+    void **vt = *(void ***)cl, *fn = (void *)fm6_cl_Release;
+    size_t i;
+    for (i = 0; i < sizeof fm6_cl_vt / sizeof *fm6_cl_vt; i++) {
+        if (fm6_cl_vt[i].vt == vt) return 1;
+        if (fm6_cl_vt[i].vt) continue;
+        fm6_cl_vt[i].orig = (release_fn)vt[2];
+        fm6_cl_vt[i].vt = vt;
+        write_mem(&vt[2], &fn, sizeof fn);
+        return 1;
+    }
+    return 0;
+}
+
+static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
+{
+    void **az = *(void ***)ctx, **items = NULL;
+    uint8_t *c = ctx;
+    int i, n = 0;
+    if (!cl || (c[AZ_CTX_DEFERRED] && c[AZ_CTX_BUNDLE])) { ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, cl, restore); return; }
+    if (c[AZ_CTX_DEFERRED]) {
+        static volatile LONG logged;
+        void *part = NULL;
+        fm6_chain *p, *e;
+        HRESULT hr = ((finish_fn)az[AZ_SLOT_FINISH])(ctx, TRUE, &part);
+        if (hr < 0 || !part) {
+            wlog("d3d: ExecuteCommandList aninhado no diferido %p: FinishCommandList(TRUE) hr=%#lx", ctx, hr);
+            ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, cl, restore);
+            return;
+        }
+        AcquireSRWLockExclusive(&fm6_cl_lock);
+        p = fm6_chain_get(&fm6_pending, ctx);
+        if (p && fm6_chain_push(p, part)) {
+            if ((e = fm6_chain_find(&fm6_lists, cl)) != NULL)
+                for (i = 0; i < e->n; i++)
+                    if (fm6_chain_push(p, e->items[i])) fm6_obj_addref(e->items[i]);
+            if (fm6_chain_push(p, cl)) fm6_obj_addref(cl);
+            n = p->n;
+        } else
+            part = NULL;
+        ReleaseSRWLockExclusive(&fm6_cl_lock);
+        if (!part) wlog("d3d: ExecuteCommandList aninhado no diferido %p: sem memoria; lista %p perdida", ctx, cl);
+        if (!restore) ((void (*)(void *))az[AZ_SLOT_CLEAR])(ctx);
+        if (InterlockedIncrement(&logged) <= 8)
+            wlog("d3d: ExecuteCommandList aninhado no diferido %p: lista %p (restore %d) -> parte %p, %d pendentes",
+                 ctx, cl, restore, part, n);
+        return;
+    }
+    AcquireSRWLockShared(&fm6_cl_lock);
+    {
+        fm6_chain *e = fm6_chain_find(&fm6_lists, cl);
+        if (e && (items = malloc(e->n * sizeof *items)) != NULL) {
+            n = e->n;
+            memcpy(items, e->items, n * sizeof *items);
+            for (i = 0; i < n; i++) fm6_obj_addref(items[i]);
+        }
+    }
+    ReleaseSRWLockShared(&fm6_cl_lock);
+    for (i = 0; i < n; i++) {
+        ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, items[i], restore);
+        fm6_obj_release(items[i]);
+    }
+    free(items);
+    ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, cl, restore);
+}
+
+static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
+{
+    HRESULT hr = ((finish_fn)(*(void ***)ctx)[AZ_SLOT_FINISH])(ctx, restore, out);
+    fm6_chain stale = { 0 }, p;
+    if (hr < 0 || !out || !*out) return hr;
+    AcquireSRWLockExclusive(&fm6_cl_lock);
+    p = fm6_chain_take(&fm6_pending, ctx);
+    stale = fm6_chain_take(&fm6_lists, *out);              /* endereco reaproveitado sem passar pelo Release */
+    if (p.n) {
+        fm6_chain *e = fm6_cl_hook(*out) ? fm6_chain_get(&fm6_lists, *out) : NULL;
+        if (e) {
+            *e = p;
+            e->key = *out;
+            p.n = 0;
+            p.items = NULL;
+        }
+    }
+    ReleaseSRWLockExclusive(&fm6_cl_lock);
+    if (p.n) wlog("d3d: FinishCommandList do diferido %p: %d pecas aninhadas perdidas", ctx, p.n);
+    fm6_chain_free(&p);
+    fm6_chain_free(&stale);
+    return hr;
+}
+
 int fm6_batch_install(uint8_t *game)
 {
     static const struct { uint32_t rva; const char *orig; void *fn; } site[2] = {
@@ -1544,6 +1731,10 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         if (src[a] == g_base + RVA_STUB_SLOT(a)) dst[s] = fm6_ctx_fast[i];
     }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
+    if (src[AZ_SLOT_EXECUTE] != g_base + RVA_STUB_SLOT(AZ_SLOT_EXECUTE))
+        dst[0x3b] = (void *)fm6_ExecuteCommandList;
+    if (deferred && src[AZ_SLOT_FINISH] != g_base + RVA_STUB_SLOT(AZ_SLOT_FINISH))
+        dst[0x73] = (void *)fm6_FinishCommandList;
     if (src[fm6_ctx_slot(0xd7)] == g_base + RVA_STUB_SLOT(fm6_ctx_slot(0xd7)))
         dst[0xd7] = (void *)fm6_SetFastResourcesFromBatch;
     for (s = 0; s < FM6_CTX_SLOTS; s++)

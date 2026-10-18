@@ -941,3 +941,105 @@ TEST(fm6_resource_batch_builders_patched)
     CHECK(!fm6_batch_install(game));                          /* ja trocado: bytes nao conferem */
     pe_unmap(game);
 }
+
+/* Listas aninhadas do FM6 (game+0xf973d): ExecuteCommandList num diferido fecha a parte gravada e guarda as pecas;
+   o FinishCommandList do jogo pendura as pecas na lista devolvida e o imediato executa tudo em ordem */
+typedef struct { void **vt; int ref, id; } fake_cl;
+static void *fake_cl_vt[3];
+static fake_cl cl_pool[16];
+static int cl_used, exec_n, finish_restore[8], finish_n, clear_n;
+static void *exec_ctx[16], *exec_cl[16];
+static BOOL exec_restore[16];
+static ULONG fake_cl_addref(fake_cl *o) { return ++o->ref; }
+static ULONG fake_cl_release(fake_cl *o) { return --o->ref; }
+static fake_cl *new_cl(void)
+{
+    fake_cl *o = &cl_pool[cl_used];
+    o->vt = fake_cl_vt;
+    o->ref = 1;
+    o->id = cl_used++;
+    return o;
+}
+static void fake_exec(void *ctx, void *cl, BOOL restore)
+{
+    if (exec_n < 16) { exec_ctx[exec_n] = ctx; exec_cl[exec_n] = cl; exec_restore[exec_n] = restore; }
+    exec_n++;
+}
+static HRESULT fake_finish(void *ctx, BOOL restore, void **out)
+{
+    (void)ctx;
+    if (finish_n < 8) finish_restore[finish_n] = restore;
+    finish_n++;
+    *out = new_cl();
+    return 0;
+}
+static void fake_clear(void *ctx) { (void)ctx; clear_n++; }
+
+TEST(fm6_nested_command_lists)
+{
+    static void *az_tab[0x10e], *src_tab[0x10e], *imm[0x10e], *def[0x10e];
+    static uint8_t dctx[0xd00], d2ctx[0xd00], ictx[0xd00];
+    typedef void (*exec_fn)(void *, void *, BOOL);
+    typedef HRESULT (*fin_fn)(void *, BOOL, void **);
+    fake_cl *w1, *w2, *p1, *p2, *f, *g, *q;
+    void *out = NULL;
+    int i;
+    fake_azimuth(0);
+    for (i = 0; i < 0x10e; i++) src_tab[i] = (void *)(uintptr_t)(0x1000 + i);
+    fm6_ctx_table(imm, src_tab, 0);
+    fm6_ctx_table(def, src_tab, 1);
+    CHECK(imm[0x3b] == (void *)fm6_ExecuteCommandList && def[0x3b] == (void *)fm6_ExecuteCommandList);
+    CHECK(def[0x73] == (void *)fm6_FinishCommandList && imm[0x73] == (void *)0x1072);
+    CHECK(imm[0x3a] == (void *)0x1039 && def[0x74] == (void *)0x1073);
+    fake_cl_vt[1] = (void *)fake_cl_addref;
+    fake_cl_vt[2] = (void *)fake_cl_release;
+    az_tab[0x3a] = (void *)fake_exec;
+    az_tab[0x6e] = (void *)fake_clear;
+    az_tab[0x72] = (void *)fake_finish;
+    *(void ***)dctx = *(void ***)d2ctx = *(void ***)ictx = az_tab;
+    dctx[0xc48] = d2ctx[0xc48] = 1;
+    w1 = new_cl();
+    w2 = new_cl();
+    ((exec_fn)def[0x3b])(dctx, w1, FALSE);                   /* parte p1 + w1 */
+    ((exec_fn)def[0x3b])(dctx, w2, TRUE);                    /* parte p2 + w2, estado mantido */
+    CHECK_EQ(exec_n, 0);
+    CHECK(finish_n == 2 && finish_restore[0] == TRUE && finish_restore[1] == TRUE);
+    CHECK_EQ(clear_n, 1);
+    CHECK(w1->ref == 2 && w2->ref == 2);
+    p1 = &cl_pool[2];
+    p2 = &cl_pool[3];
+    CHECK(((fin_fn)def[0x73])(dctx, FALSE, &out) == 0);
+    f = out;
+    CHECK(f == &cl_pool[4] && finish_restore[2] == FALSE);
+    CHECK(fake_cl_vt[2] == (void *)fm6_cl_Release);          /* Release da lista trocado */
+    ((exec_fn)imm[0x3b])(ictx, f, FALSE);
+    CHECK_EQ(exec_n, 5);
+    CHECK(exec_cl[0] == p1 && exec_cl[1] == w1 && exec_cl[2] == p2 && exec_cl[3] == w2 && exec_cl[4] == f);
+    CHECK(exec_ctx[0] == ictx && exec_ctx[4] == ictx && !exec_restore[0] && !exec_restore[4]);
+    CHECK(p1->ref == 1 && w1->ref == 2);                     /* referencias do imediato ja soltas */
+    exec_n = 0;
+    {   /* f dentro de outro diferido: as pecas de f entram achatadas */
+        ((exec_fn)def[0x3b])(d2ctx, f, FALSE);
+        CHECK(((fin_fn)def[0x73])(d2ctx, FALSE, &out) == 0);
+        q = &cl_pool[5];
+        g = out;
+        CHECK(g == &cl_pool[6]);
+        ((exec_fn)imm[0x3b])(ictx, g, TRUE);
+        CHECK_EQ(exec_n, 7);
+        CHECK(exec_cl[0] == q && exec_cl[1] == p1 && exec_cl[4] == w2 && exec_cl[5] == f && exec_cl[6] == g);
+        CHECK(exec_restore[6] == TRUE);
+        CHECK(f->ref == 2 && p1->ref == 2);
+    }
+    /* Release ate 0 solta as pecas */
+    CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 1);      /* jogo solta f; g ainda o segura */
+    CHECK(p1->ref == 2 && w1->ref == 3);
+    CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(g), 0);      /* g solta as suas pecas, f chega a 0 e solta as dele */
+    CHECK(f->ref == 0 && p1->ref == 0 && p2->ref == 0 && q->ref == 0 && w1->ref == 1 && w2->ref == 1);
+    exec_n = 0;
+    ((exec_fn)imm[0x3b])(ictx, w1, FALSE);                   /* lista comum: so ela */
+    CHECK(exec_n == 1 && exec_cl[0] == w1);
+    exec_n = 0;
+    d2ctx[0xc49] = 1;                                        /* bundle: Azimuth */
+    ((exec_fn)def[0x3b])(d2ctx, w1, FALSE);
+    CHECK(exec_n == 1 && exec_ctx[0] == d2ctx && w1->ref == 1);
+}
