@@ -897,8 +897,41 @@ static void xg_wrap_computer(void **obj)
     if (*(void *const **)obj == xg_fm5_vtbl) *obj = xg_vtbl;
 }
 
+/* XG do FM6 (OS "era", tools\xg_vt.py): 12 metodos contra os 8 do FH2 - 3 e 4 novos (getters de +0x54b8/+0x54c0),
+   7 novo (397 bytes) e 11 novo no fim. FH2 s -> FM6: 0..2 = s, 3 GetMipLevelOffsetBytes = 5, 4 GetTexel... = 6,
+   5 CopyIntoSubresource = 8, 6 CopyFromSubresource = 9, 7 = 10 (mesmos tamanhos/prologos). Sem isso o slot 6 do
+   Azimuth (refresh_title_texture, 0x1400a1db0) caia no GetTexelElementOffsetBytes do FM6 e voltava -1
+   ("XG untile subresource=0 HRESULT=0xffffffff"). XG_RESOURCE_LAYOUT igual (GetResourceLayout 0x1400 = mesma copia). */
+#define XG_FH2_SLOTS 8
+static const uint8_t xg_fm6_slot[XG_FH2_SLOTS] = { 0, 1, 2, 5, 6, 8, 9, 10 };
+static void *xg_fm6_new[XG_FH2_SLOTS];
+static void *const *xg_fm6_vtbl;
+
+static void xg_wrap_computer_fm6(void **obj)
+{
+    void *const *vt = *(void *const **)obj;
+    if (!xg_fm6_vtbl) {
+        static const char get54b8[] = "488b81b8540000c3", get54c0[] = "488b81c0540000c3";
+        int i;
+        if (!bytes_match(vt[3], get54b8, 8) || !bytes_match(vt[4], get54c0, 8)) {
+            static int logged;
+            if (!logged++) wlog("XG: computer %p do FM6 com vtable %p inesperada, sem conversao", (void *)obj, (void *)vt);
+            return;
+        }
+        for (i = 0; i < XG_FH2_SLOTS; i++) xg_fm6_new[i] = vt[xg_fm6_slot[i]];
+        xg_fm6_vtbl = vt;
+        wlog("XG: vtable do computer do FM6 %p -> layout do FH2 (12 -> 8 slots)", (void *)vt);
+    }
+    if (vt == xg_fm6_vtbl) *obj = xg_fm6_new;
+}
+
 static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
 {
+    if (is_fm6()) {
+        orig_xg_computer(out, name, desc);
+        if (*(void ***)out) xg_wrap_computer_fm6(*(void ***)out);
+        return;
+    }
     if (is_fm5()) {
         uint32_t n = !strcmp(name, "XGCreateTexture2DComputer") ? 11 :
                      !strcmp(name, "XGCreateTexture3DComputer") ? 9 : 0;

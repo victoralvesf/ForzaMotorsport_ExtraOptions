@@ -457,6 +457,44 @@ TEST(xg_desc_layout_converted)
     CHECK_EQ(xg_seen_desc[12], 112);
 }
 
+/* FM6: vtable de 12 slots (3/4 = getters novos) -> 8 slots do FH2; desc sem conversao */
+static uint8_t xg_get54b8[] = { 0x48, 0x8b, 0x81, 0xb8, 0x54, 0x00, 0x00, 0xc3 };
+static uint8_t xg_get54c0[] = { 0x48, 0x8b, 0x81, 0xc0, 0x54, 0x00, 0x00, 0xc3 };
+static void *xg_fm6_fake_vtbl[12], *xg_fm6_fake_obj[1] = { xg_fm6_fake_vtbl };
+static void xg_fm6_fake_orig(void *out, const char *name, uint32_t *desc)
+{
+    (void)name;
+    memcpy(xg_seen_desc, desc, sizeof xg_seen_desc);
+    *(void **)out = xg_fm6_fake_obj;
+}
+
+TEST(xg_fm6_computer_remapped)
+{
+    static const int fh2_to_fm6[8] = { 0, 1, 2, 5, 6, 8, 9, 10 };
+    uint32_t d2[16];
+    void *out = NULL;
+    int i;
+    fake_azimuth(2);
+    orig_xg_computer = xg_fm6_fake_orig;
+    for (i = 0; i < 12; i++) xg_fm6_fake_vtbl[i] = (void *)(uintptr_t)(0x2000 + i);
+    /* vtable inesperada (slot 3 nao e o getter): nada muda */
+    xg_fm6_fake_vtbl[3] = xg_get54c0;
+    xg_fm6_fake_vtbl[4] = xg_get54c0;
+    hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
+    CHECK(*(void **)xg_fm6_fake_obj == (void *)xg_fm6_fake_vtbl);
+    xg_fm6_fake_vtbl[3] = xg_get54b8;
+    for (i = 0; i < 16; i++) d2[i] = 100 + i;
+    hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
+    CHECK_EQ(xg_seen_desc[12], 112);             /* desc do Azimuth repassado como esta */
+    CHECK(*(void **)xg_fm6_fake_obj == (void *)xg_fm6_new);
+    for (i = 0; i < 8; i++) CHECK(xg_fm6_new[i] == xg_fm6_fake_vtbl[fh2_to_fm6[i]]);
+    CHECK(xg_fm6_new[6] == (void *)(uintptr_t)0x2009);   /* CopyFromSubresource */
+    /* 2o computer: mesma vtable nova */
+    *(void **)xg_fm6_fake_obj = xg_fm6_fake_vtbl;
+    hook_xg_computer(&out, "XGCreateTexture3DComputer", d2);
+    CHECK(*(void **)xg_fm6_fake_obj == (void *)xg_fm6_new);
+}
+
 TEST(xg_copy_from_subresource_detiles)
 {
     uint8_t *self = xg_fake_self ? xg_fake_self : (xg_fake_self = calloc(1, 0x6200));
