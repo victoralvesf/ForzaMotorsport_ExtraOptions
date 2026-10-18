@@ -1036,7 +1036,7 @@ TEST(fm6_resource_batch_builders_patched)
 
 /* Listas aninhadas do FM6 (game+0xf973d): ExecuteCommandList num diferido fecha a parte gravada e guarda as pecas;
    o FinishCommandList do jogo pendura as pecas na lista devolvida e o imediato executa tudo em ordem */
-typedef struct { void **vt; int ref, id; } fake_cl;
+typedef struct { void **vt; int ref, id; uint8_t pad[0x38]; void *state; } fake_cl;   /* state em +0x48 */
 static void *fake_cl_vt[3];
 static fake_cl cl_pool[16];
 static int cl_used, exec_n, finish_restore[8], finish_n, clear_n;
@@ -1050,6 +1050,7 @@ static fake_cl *new_cl(void)
     o->vt = fake_cl_vt;
     o->ref = 1;
     o->id = cl_used++;
+    o->state = o;                                            /* lista comum: com estado do D3D12 */
     return o;
 }
 static void fake_exec(void *ctx, void *cl, BOOL restore)
@@ -1151,27 +1152,50 @@ TEST(fm6_nested_command_lists)
     }
 }
 
-/* diagnostico da heranca (17_fm6.txt PASSO 40): flags/chamador dos diferidos criados, OMSetRenderTargets* por
-   diferido e quem gravou cada lista aninhada */
-static uint8_t inh_ctx[2][0xa000];
-static int inh_made, inh_om_calls, inh_om_uav_calls;
-static long inh_defctx(void *dev, UINT flags, void **out) { (void)dev; (void)flags; *out = inh_ctx[inh_made++ & 1]; return 0; }
-static void inh_om(void *c, UINT n, void *const *r, void *d) { (void)c; (void)n; (void)r; (void)d; inh_om_calls++; }
+/* heranca do OM no aninhado (17_fm6.txt PASSO 40/41): o bundle do worker aninhado no juntador executa no imediato
+   com o RT/DS, viewports e scissors que o juntador tinha ligado; flags/chamador dos diferidos no log */
+static uint8_t inh_ctx[3][0xa000];
+static int inh_made, inh_om_n, inh_clear_n, inh_vp_n, inh_sc_n;
+static UINT inh_om_rts;
+static void *inh_om_ctx, *inh_om_rtv0, *inh_om_dsv;
+typedef struct { void **vt; int ref; } inh_view;
+static ULONG inh_view_addref(inh_view *v) { return ++v->ref; }
+static ULONG inh_view_release(inh_view *v) { return --v->ref; }
+static void *inh_view_vt[3] = { NULL, (void *)inh_view_addref, (void *)inh_view_release };
+static long inh_defctx(void *dev, UINT flags, void **out) { (void)dev; (void)flags; *out = inh_ctx[inh_made++ % 2]; return 0; }
+static void inh_om(void *c, UINT n, void *const *r, void *d)
+{
+    inh_om_n++;
+    inh_om_ctx = c;
+    inh_om_rts = n;
+    inh_om_rtv0 = n && r ? r[0] : NULL;
+    inh_om_dsv = d;
+}
+static void inh_vp(void *c, UINT n, const float *v) { (void)c; (void)v; inh_vp_n += (int)n; }
+static void inh_sc(void *c, UINT n, const RECT *r) { (void)c; (void)r; inh_sc_n += (int)n; }
+static void inh_clear(void *c) { (void)c; inh_clear_n++; }
+static int inh_om_uav_n;
 static void inh_om_uav(void *c, UINT n, void *const *r, void *d, UINT s, UINT nu, void *const *u, const UINT *k)
 {
     (void)c; (void)n; (void)r; (void)d; (void)s; (void)nu; (void)u; (void)k;
-    inh_om_uav_calls++;
+    inh_om_uav_n++;
 }
 
-TEST(fm6_inheritance_diagnostics)
+TEST(fm6_nested_bundle_inherits_om)
 {
     static void *dev_vt[0x100], *src_tab[0x10e], *imm[0x10e], *def[0x10e], *az_tab[0x10e];
     typedef long (*mk_fn)(void *, UINT, void **);
     typedef void (*om_fn)(void *, UINT, void *const *, void *);
     typedef void (*omu_fn)(void *, UINT, void *const *, void *, UINT, UINT, void *const *, const UINT *);
+    typedef void (*vp_fn)(void *, UINT, const float *);
+    typedef void (*sc_fn)(void *, UINT, const RECT *);
     typedef void (*exec_fn)(void *, void *, BOOL);
     typedef HRESULT (*fin_fn)(void *, BOOL, void **);
-    void *j = NULL, *w = NULL, *wl = NULL, *rtv = &rtv;
+    static inh_view rtv = { inh_view_vt, 1 }, dsv = { inh_view_vt, 1 };
+    void *j = NULL, *w = NULL, *out = NULL, *rtvs[1] = { &rtv };
+    float vp[6] = { 0, 0, 1920, 1080, 0, 1 };
+    RECT sc = { 0, 0, 1920, 1080 };
+    fake_cl *b, *b2, *part, *f;
     int i;
     fake_azimuth(0);
     for (i = 0; i < 0x100; i++) dev_vt[i] = (void *)(uintptr_t)(0x2000 + i);
@@ -1179,38 +1203,74 @@ TEST(fm6_inheritance_diagnostics)
     fm6_device_fixups(dev_vt);
     CHECK(dev_vt[0x1b] == (void *)fm6_defctx0 && dev_vt[0x2d] == (void *)fm6_defctx1 && dev_vt[0x44] == (void *)fm6_defctxx);
     for (i = 0; i < 0x10e; i++) src_tab[i] = (void *)(uintptr_t)(0x1000 + i);
-    src_tab[0x21] = (void *)inh_om;
-    src_tab[0x22] = (void *)inh_om_uav;
     fm6_ctx_table(imm, src_tab, 0);
     fm6_ctx_table(def, src_tab, 1);
     CHECK(def[0x22] == (void *)fm6_def_OMSetRenderTargets && def[0x23] == (void *)fm6_def_OMSetRenderTargetsUAV);
-    CHECK(imm[0x22] == (void *)inh_om && imm[0x23] == (void *)inh_om_uav);   /* imediato sem diagnostico */
+    CHECK(def[0x2d] == (void *)fm6_def_RSSetViewports && def[0x2e] == (void *)fm6_def_RSSetScissorRects);
+    CHECK(def[0x6f] == (void *)fm6_def_ClearState);
+    CHECK(imm[0x22] == (void *)0x1021 && imm[0x2d] == (void *)0x102c && imm[0x6f] == (void *)0x106e);   /* imediato: Azimuth */
+    /* o Azimuth em [ctx] (sem registro da copia embutida nos testes) */
+    az_tab[0x21] = (void *)inh_om;
+    az_tab[0x22] = (void *)inh_om_uav;
+    az_tab[0x2c] = (void *)inh_vp;
+    az_tab[0x2d] = (void *)inh_sc;
+    az_tab[0x6e] = (void *)inh_clear;
+    az_tab[0x3a] = (void *)fake_exec;
+    az_tab[0x72] = (void *)fake_finish;
+    fake_cl_vt[1] = (void *)fake_cl_addref;
+    if (fake_cl_vt[2] != (void *)fm6_cl_Release) fake_cl_vt[2] = (void *)fake_cl_release;
+    for (i = 0; i < 3; i++) *(void ***)inh_ctx[i] = az_tab;
+    inh_ctx[0][0xc48] = inh_ctx[1][0xc48] = 1;
     log_capture();
     CHECK(((mk_fn)dev_vt[0x1b])(NULL, 0, &j) == 0 && j == inh_ctx[0]);
     CHECK(((mk_fn)dev_vt[0x44])(NULL, 0x60000, &w) == 0 && w == inh_ctx[1]);
     CHECK(log_has("FM6 CreateDeferredContext flags=0 -> diferido d"));
     CHECK(log_has("FM6 CreateDeferredContextX flags=0x60000 -> diferido d"));
-    ((om_fn)def[0x22])(j, 1, &rtv, rtv);
-    ((om_fn)def[0x22])(w, 0, NULL, NULL);
-    ((omu_fn)def[0x23])(w, 0xffffffff, NULL, NULL, 0, 0, NULL, NULL);       /* KEEP: nao conta */
-    CHECK(inh_om_calls == 2 && inh_om_uav_calls == 1);
-    CHECK(fm6_dctx_find(j)->om == 1 && fm6_dctx_find(j)->om_empty == 0);
-    CHECK(fm6_dctx_find(w)->om == 1 && fm6_dctx_find(w)->om_empty == 1);
-    /* lista do worker w aninhada no juntador j */
-    fake_cl_vt[1] = (void *)fake_cl_addref;
-    fake_cl_vt[2] = (void *)fake_cl_release;
-    az_tab[0x3a] = (void *)fake_exec;
-    az_tab[0x6e] = (void *)fake_clear;
-    az_tab[0x72] = (void *)fake_finish;
-    *(void ***)inh_ctx[0] = *(void ***)inh_ctx[1] = az_tab;
-    inh_ctx[0][0xc48] = inh_ctx[1][0xc48] = 1;
-    CHECK(((fin_fn)def[0x73])(w, FALSE, &wl) == 0 && wl);
-    CHECK(fm6_cl_owner_find(wl) == w);
-    ((exec_fn)def[0x3b])(j, wl, FALSE);
-    CHECK(log_has("heranca: aninhado no diferido d"));
-    CHECK(log_has("1 OMSet, 0 vazios) <- lista"));
-    CHECK(log_has("(flags 0x60000, game+0, 1 OMSet, 1 vazios)"));
-    ((fin_fn)def[0x73])(j, FALSE, &wl);                         /* solta as pecas */
+    /* juntador liga RT/DS, viewport e scissor (repassados ao Azimuth) */
+    ((om_fn)def[0x22])(j, 1, rtvs, &dsv);
+    ((vp_fn)def[0x2d])(j, 1, vp);
+    ((sc_fn)def[0x2e])(j, 1, &sc);
+    ((omu_fn)def[0x23])(j, FM6_KEEP_RTS, NULL, NULL, 0, 0, NULL, NULL);   /* KEEP: mantem */
+    CHECK(inh_om_n == 1 && inh_om_ctx == j && inh_vp_n == 1 && inh_sc_n == 1 && inh_om_uav_n == 1);
+    CHECK(fm6_dctx_find(j)->om == 1 && fm6_dctx_find(j)->st.nrtv == 1 && fm6_dctx_find(j)->st.dsv == &dsv);
+    /* bundle do worker (sem estado do D3D12) aninhado: parte + copia do estado + bundle */
+    b = new_cl();
+    b->state = NULL;
+    *(void **)(inh_ctx[0] + AZ_CTX_D3D12_LIST) = inh_ctx[0];             /* algo gravado */
+    exec_n = 0;
+    ((exec_fn)def[0x3b])(j, b, FALSE);
+    part = &cl_pool[cl_used - 1];
+    CHECK(rtv.ref == 2 && dsv.ref == 2);                                 /* views seguras pela copia */
+    CHECK(log_has("<- bundle"));
+    CHECK(fm6_dctx_find(j)->st.nrtv == 0);                               /* restore FALSE: estado do juntador zerado */
+    /* depois do ClearState do aninhado, outro bundle nao herda nada */
+    b2 = new_cl();
+    b2->state = NULL;
+    *(void **)(inh_ctx[0] + AZ_CTX_D3D12_LIST) = NULL;
+    ((exec_fn)def[0x3b])(j, b2, FALSE);
+    CHECK(((fin_fn)def[0x73])(j, FALSE, &out) == 0);
+    f = out;
+    inh_om_n = inh_vp_n = inh_sc_n = 0;
+    ((exec_fn)imm[0x3b])(inh_ctx[2], f, FALSE);
+    CHECK_EQ(exec_n, 4);
+    CHECK(exec_cl[0] == part && exec_cl[1] == b && exec_cl[2] == b2 && exec_cl[3] == f);
+    CHECK(inh_om_n == 1 && inh_om_ctx == inh_ctx[2] && inh_om_rts == 1 && inh_om_rtv0 == &rtv && inh_om_dsv == &dsv);
+    CHECK(inh_vp_n == 1 && inh_sc_n == 1);
+    CHECK(log_has("bundle aninhado executa com o OM do juntador (1 RTs"));
+    CHECK(rtv.ref == 2);                                                 /* f ainda segura a copia */
+    CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);
+    CHECK(rtv.ref == 1 && dsv.ref == 1);
+    /* ClearState do jogo no juntador zera o acompanhado */
+    ((om_fn)def[0x22])(j, 1, rtvs, NULL);
+    ((void (*)(void *))def[0x6f])(j);
+    CHECK(inh_clear_n >= 1 && fm6_dctx_find(j)->st.nrtv == 0);
+    /* lista comum (com estado do D3D12) aninhada: sem copia */
+    ((om_fn)def[0x22])(j, 1, rtvs, NULL);
+    b = new_cl();
+    exec_n = 0;
+    ((exec_fn)def[0x3b])(j, b, TRUE);
+    CHECK(rtv.ref == 1);
+    ((fin_fn)def[0x73])(j, FALSE, &out);
 }
 
 /* reexecucao de lista com a execucao anterior ainda na GPU: submete o lote se ela nao saiu e espera a fence */

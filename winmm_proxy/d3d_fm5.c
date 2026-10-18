@@ -1328,14 +1328,33 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
     return orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
 }
 
-/* Diagnostico da heranca (17_fm6.txt PASSO 40): no RenderDoc os draws das listas dos workers aninhadas no diferido
-   juntador nao tem RT/DS (OMSetRenderTargets(0) no inicio da command list do D3D12). Registra flags e chamador de
-   cada diferido criado, quantos OMSetRenderTargets* cada um faz e quem gravou cada lista aninhada. So log. */
-typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; } fm6_dctx_info;
+/* Heranca do OM no aninhado (17_fm6.txt PASSO 40/41): as listas dos workers sao DRAW BUNDLES do Azimuth (lista sem
+   estado do D3D12, [cl+0x48] nulo) aninhados no diferido juntador (game+0xf9510). No console o aninhado e um salto
+   de command buffer e o bundle desenha no RT/viewport que o juntador ligou; o Azimuth reproduz o bundle com o
+   estado do IMEDIATO (operacao 0x26 em 0x140111820), que nao tem o RT do juntador (ele esta na command list do
+   D3D12 do juntador) -> 3384 draws sem RT/DS = cena cinza. O proxy acompanha, por diferido, RT/DS, viewports e
+   scissors; no aninhado de um bundle guarda uma copia (views com AddRef) na cadeia, antes do bundle, e o imediato
+   aplica a copia (OMSetRenderTargets/RSSetViewports/RSSetScissorRects do Azimuth) antes de executar o bundle.
+   Tambem registra flags/chamador dos diferidos e o dono das listas aninhadas (log). */
+#define AZ_SLOT_OM        0x21
+#define AZ_SLOT_OM_UAV    0x22
+#define AZ_SLOT_VIEWPORTS 0x2c
+#define AZ_SLOT_SCISSORS  0x2d
+#define AZ_SLOT_CLEARST   0x6e
+#define AZ_LIST_STATE     0x48          /* estado do D3D12 da lista; nulo = draw bundle */
+#define FM6_KEEP_RTS      0xffffffffu   /* D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL */
+typedef struct {
+    UINT nrtv, nvp, nsc;
+    void *rtv[8], *dsv;
+    float vp[16][6];
+    RECT sc[16];
+} fm6_om;
+typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; fm6_om st; } fm6_dctx_info;
 static fm6_dctx_info fm6_dctx[128];
 static volatile LONG fm6_dctx_n;
 static defctx_fn orig_fm6_defctx[3];
-static void *orig_fm6_om, *orig_fm6_om_uav;
+static struct { void *ctx; void *const *src; } fm6_ctx_src[256];   /* diferido -> tabela do Azimuth de onde veio */
+static volatile LONG fm6_ctx_src_n;
 
 static fm6_dctx_info *fm6_dctx_find(const void *ctx)
 {
@@ -1343,6 +1362,23 @@ static fm6_dctx_info *fm6_dctx_find(const void *ctx)
     for (i = n - 1; i >= 0; i--)
         if (fm6_dctx[i].ctx == ctx) return &fm6_dctx[i];
     return NULL;
+}
+
+static void fm6_ctx_src_note(void *ctx, void *const *src)
+{
+    LONG i = InterlockedIncrement(&fm6_ctx_src_n) - 1;
+    fm6_ctx_src[i & 255].src = src;
+    fm6_ctx_src[i & 255].ctx = ctx;
+}
+
+/* metodo a do Azimuth para o diferido ctx: a tabela da qual a copia embutida foi montada (diferido comum e draw
+   bundle tem tabelas diferentes); sem registro, a tabela em [ctx] */
+static void *fm6_az_fn(void *ctx, int a)
+{
+    LONG i, n = fm6_ctx_src_n < 256 ? fm6_ctx_src_n : 256;
+    for (i = 0; i < n; i++)
+        if (fm6_ctx_src[(fm6_ctx_src_n - 1 - i) & 255].ctx == ctx) return fm6_ctx_src[(fm6_ctx_src_n - 1 - i) & 255].src[a];
+    return (*(void ***)ctx)[a];
 }
 
 static long fm6_defctx(int which, void *dev, UINT flags, void **out)
@@ -1353,6 +1389,7 @@ static long fm6_defctx(int which, void *dev, UINT flags, void **out)
     if (hr >= 0 && out && *out) {
         LONG i = InterlockedIncrement(&fm6_dctx_n) - 1;
         if (i < 128) {
+            memset(&fm6_dctx[i].st, 0, sizeof fm6_dctx[i].st);
             fm6_dctx[i].flags = flags;
             fm6_dctx[i].caller = caller;
             fm6_dctx[i].idx = (int)i;
@@ -1366,26 +1403,111 @@ static long fm6_defctx0(void *dev, UINT flags, void **out) { return fm6_defctx(0
 static long fm6_defctx1(void *dev, UINT flags, void **out) { return fm6_defctx(1, dev, flags, out); }
 static long fm6_defctxx(void *dev, UINT flags, void **out) { return fm6_defctx(2, dev, flags, out); }
 
-static void fm6_om_note(void *ctx, UINT n, void *dsv)
+static void fm6_om_set_rts(void *ctx, UINT n, void *const *rtvs, void *dsv)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
+    UINT i;
     if (!d) return;
     InterlockedIncrement(&d->om);
     if (!n && !dsv) InterlockedIncrement(&d->om_empty);
+    d->st.nrtv = n > 8 ? 8 : n;
+    for (i = 0; i < 8; i++) d->st.rtv[i] = i < d->st.nrtv && rtvs ? rtvs[i] : NULL;
+    d->st.dsv = dsv;
 }
 
-/* FM6 0x22 OMSetRenderTargets / 0x23 OMSetRenderTargetsAndUnorderedAccessViews do diferido (Azimuth 0x21/0x22) */
+static void fm6_om_reset(void *ctx)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (d) memset(&d->st, 0, sizeof d->st);
+}
+
+/* FM6 0x22/0x23/0x2d/0x2e/0x6f do diferido (Azimuth 0x21/0x22/0x2c/0x2d/0x6e): acompanha e repassa */
 static void fm6_def_OMSetRenderTargets(void *ctx, UINT n, void *const *rtvs, void *dsv)
 {
-    fm6_om_note(ctx, n, dsv);
-    ((void (*)(void *, UINT, void *const *, void *))orig_fm6_om)(ctx, n, rtvs, dsv);
+    fm6_om_set_rts(ctx, n, rtvs, dsv);
+    ((void (*)(void *, UINT, void *const *, void *))fm6_az_fn(ctx, AZ_SLOT_OM))(ctx, n, rtvs, dsv);
 }
 static void fm6_def_OMSetRenderTargetsUAV(void *ctx, UINT n, void *const *rtvs, void *dsv, UINT s, UINT nu,
                                           void *const *uavs, const UINT *counts)
 {
-    if (n != 0xffffffff) fm6_om_note(ctx, n, dsv);   /* D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL nao conta */
-    ((void (*)(void *, UINT, void *const *, void *, UINT, UINT, void *const *, const UINT *))orig_fm6_om_uav)(
+    if (n != FM6_KEEP_RTS) fm6_om_set_rts(ctx, n, rtvs, dsv);
+    ((void (*)(void *, UINT, void *const *, void *, UINT, UINT, void *const *, const UINT *))fm6_az_fn(ctx, AZ_SLOT_OM_UAV))(
         ctx, n, rtvs, dsv, s, nu, uavs, counts);
+}
+static void fm6_def_RSSetViewports(void *ctx, UINT n, const float *vp)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (d) {
+        d->st.nvp = n > 16 ? 16 : n;
+        if (vp) memcpy(d->st.vp, vp, d->st.nvp * sizeof d->st.vp[0]);
+    }
+    ((void (*)(void *, UINT, const float *))fm6_az_fn(ctx, AZ_SLOT_VIEWPORTS))(ctx, n, vp);
+}
+static void fm6_def_RSSetScissorRects(void *ctx, UINT n, const RECT *r)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (d) {
+        d->st.nsc = n > 16 ? 16 : n;
+        if (r) memcpy(d->st.sc, r, d->st.nsc * sizeof *r);
+    }
+    ((void (*)(void *, UINT, const RECT *))fm6_az_fn(ctx, AZ_SLOT_SCISSORS))(ctx, n, r);
+}
+static void fm6_def_ClearState(void *ctx)
+{
+    fm6_om_reset(ctx);
+    ((void (*)(void *))fm6_az_fn(ctx, AZ_SLOT_CLEARST))(ctx);
+}
+
+/* copia do estado do juntador na cadeia: objeto com AddRef/Release (slots 1/2) como as pecas */
+typedef struct { void **vt; volatile LONG ref; fm6_om st; } fm6_om_item;
+static ULONG fm6_om_item_addref(fm6_om_item *o) { return (ULONG)InterlockedIncrement(&o->ref); }
+static ULONG fm6_om_item_release(fm6_om_item *o);
+static void *fm6_om_item_vt[3] = { NULL, (void *)fm6_om_item_addref, (void *)fm6_om_item_release };
+static void fm6_om_views(fm6_om *st, int add)
+{
+    UINT i;
+    for (i = 0; i < st->nrtv; i++)
+        if (st->rtv[i]) ((ULONG (*)(void *))(*(void ***)st->rtv[i])[add ? 1 : 2])(st->rtv[i]);
+    if (st->dsv) ((ULONG (*)(void *))(*(void ***)st->dsv)[add ? 1 : 2])(st->dsv);
+}
+static ULONG fm6_om_item_release(fm6_om_item *o)
+{
+    LONG r = InterlockedDecrement(&o->ref);
+    if (r == 0) {
+        fm6_om_views(&o->st, 0);
+        free(o);
+    }
+    return (ULONG)r;
+}
+
+/* lista sem estado do D3D12 = draw bundle do Azimuth */
+static int fm6_is_bundle(const void *cl) { return !*(void *const *)((const uint8_t *)cl + AZ_LIST_STATE); }
+
+/* estado do juntador ctx para herdar (NULL se ele nunca ligou nada) */
+static fm6_om_item *fm6_om_snapshot(void *ctx)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    fm6_om_item *o;
+    if (!d || (!d->st.nrtv && !d->st.dsv && !d->st.nvp)) return NULL;
+    if (!(o = malloc(sizeof *o))) return NULL;
+    o->vt = fm6_om_item_vt;
+    o->ref = 1;
+    o->st = d->st;
+    fm6_om_views(&o->st, 1);
+    return o;
+}
+
+/* no imediato: aplica o estado herdado antes do bundle seguinte */
+static void fm6_om_apply(void *ctx, const fm6_om_item *o)
+{
+    void **az = *(void ***)ctx;
+    static volatile LONG logged;
+    ((void (*)(void *, UINT, void *const *, void *))az[AZ_SLOT_OM])(ctx, o->st.nrtv, o->st.rtv, o->st.dsv);
+    if (o->st.nvp) ((void (*)(void *, UINT, const float *))az[AZ_SLOT_VIEWPORTS])(ctx, o->st.nvp, &o->st.vp[0][0]);
+    if (o->st.nsc) ((void (*)(void *, UINT, const RECT *))az[AZ_SLOT_SCISSORS])(ctx, o->st.nsc, o->st.sc);
+    if (InterlockedIncrement(&logged) <= 4)
+        wlog("d3d: heranca: bundle aninhado executa com o OM do juntador (%u RTs, DS %p, %u viewports, %u scissors)",
+             o->st.nrtv, o->st.dsv, o->st.nvp, o->st.nsc);
 }
 
 /* lista devolvida pelo FinishCommandList -> diferido que a gravou (anel) */
@@ -1407,7 +1529,7 @@ static void *fm6_cl_owner_find(const void *cl)
     return NULL;
 }
 
-/* 1a vez de cada par (juntador, worker): flags/chamador dos dois e os OMSetRenderTargets do worker ate agora */
+/* 1a vez de cada par (juntador, dono da lista): flags/chamador e OMSetRenderTargets de cada um */
 static void fm6_nest_note(void *ctx, void *cl)
 {
     static struct { void *j, *w; } seen[64];
@@ -1421,10 +1543,11 @@ static void fm6_nest_note(void *ctx, void *cl)
     if (i >= 64) return;
     seen[i].j = ctx;
     seen[i].w = w;
-    wlog("d3d: heranca: aninhado no diferido d%d (flags %#x, game+%#zx, %ld OMSet, %ld vazios) <- lista %p do "
+    wlog("d3d: heranca: aninhado no diferido d%d (flags %#x, game+%#zx, %ld OMSet, %ld vazios) <- %s %p do "
          "diferido d%d %p (flags %#x, game+%#zx, %ld OMSet, %ld vazios)",
-         dj ? dj->idx : -1, dj ? dj->flags : 0, dj ? dj->caller : 0, dj ? dj->om : 0, dj ? dj->om_empty : 0, cl,
-         dw ? dw->idx : -1, w, dw ? dw->flags : 0, dw ? dw->caller : 0, dw ? dw->om : 0, dw ? dw->om_empty : 0);
+         dj ? dj->idx : -1, dj ? dj->flags : 0, dj ? dj->caller : 0, dj ? dj->om : 0, dj ? dj->om_empty : 0,
+         fm6_is_bundle(cl) ? "bundle" : "lista", cl, dw ? dw->idx : -1, w, dw ? dw->flags : 0, dw ? dw->caller : 0,
+         dw ? dw->om : 0, dw ? dw->om_empty : 0);
 }
 
 static int fm6_device_fixups(void **vt)
@@ -1836,6 +1959,10 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
             if ((e = fm6_chain_find(&fm6_lists, cl)) != NULL)
                 for (i = 0; i < e->n; i++)
                     if (fm6_chain_push(p, e->items[i])) fm6_obj_addref(e->items[i]);
+            if (fm6_is_bundle(cl)) {   /* heranca: o bundle desenha com o OM do juntador */
+                fm6_om_item *st = fm6_om_snapshot(ctx);
+                if (st && !fm6_chain_push(p, st)) fm6_om_item_release(st);
+            }
             if (fm6_chain_push(p, cl)) fm6_obj_addref(cl);
             n = p->n;
             inner = e ? e->n : 0;
@@ -1850,7 +1977,10 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
         }
         ReleaseSRWLockExclusive(&fm6_cl_lock);
         if (!ok) wlog("d3d: ExecuteCommandList aninhado no diferido %p: sem memoria; lista %p perdida", ctx, cl);
-        if (!restore) ((void (*)(void *))az[AZ_SLOT_CLEAR])(ctx);
+        if (!restore) {
+            ((void (*)(void *))az[AZ_SLOT_CLEAR])(ctx);
+            fm6_om_reset(ctx);
+        }
         fm6_nest_note(ctx, cl);
         if (InterlockedIncrement(&logged) <= 8)
             wlog("d3d: ExecuteCommandList aninhado no diferido %p: lista %p (restore %d) -> parte %p, %d pendentes",
@@ -1880,7 +2010,8 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
         }
     }
     for (i = 0; i < n; i++) {
-        ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, items[i], restore);
+        if (*(void ***)items[i] == fm6_om_item_vt) fm6_om_apply(ctx, items[i]);
+        else ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, items[i], restore);
         fm6_obj_release(items[i]);
     }
     free(items);
@@ -1893,6 +2024,7 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
     fm6_chain stale = { 0 }, p;
     if (hr < 0 || !out || !*out) return hr;
     fm6_cl_owner_note(*out, ctx);
+    if (!restore) fm6_om_reset(ctx);
     AcquireSRWLockExclusive(&fm6_cl_lock);
     p = fm6_chain_take(&fm6_pending, ctx);
     stale = fm6_chain_take(&fm6_lists, *out);              /* endereco reaproveitado sem passar pelo Release */
@@ -1928,7 +2060,6 @@ extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void
 #define RVA_SUBMIT          0xdf730
 #define RVA_FENCE_WAIT      0xf2c10
 #define AZ_CTX_DEVICE       0xc40
-#define AZ_LIST_STATE       0x48
 #define AZ_STATE_LAST_FENCE 0x298
 #define AZ_DEV_FENCE        0xcc0
 #define AZ_FENCE_SUBMITTED  0x160
@@ -2016,11 +2147,12 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         if (src[a] == g_base + RVA_STUB_SLOT(a)) dst[s] = fm6_ctx_fast[i];
     }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
-    if (deferred) {   /* diagnostico da heranca: conta os OMSetRenderTargets* de cada diferido */
-        orig_fm6_om = src[0x21];
-        orig_fm6_om_uav = src[0x22];
+    if (deferred) {   /* heranca do OM no aninhado: acompanha RT/DS, viewports e scissors de cada diferido */
         dst[0x22] = (void *)fm6_def_OMSetRenderTargets;
         dst[0x23] = (void *)fm6_def_OMSetRenderTargetsUAV;
+        dst[0x2d] = (void *)fm6_def_RSSetViewports;
+        dst[0x2e] = (void *)fm6_def_RSSetScissorRects;
+        dst[0x6f] = (void *)fm6_def_ClearState;
     }
     if (src[fm6_ctx_slot(FM6_SLOT_SO_SET)] == g_base + RVA_STUB_SLOT(fm6_ctx_slot(FM6_SLOT_SO_SET)))
         dst[FM6_SLOT_SO_SET] = (void *)fm6_SOSetTargets;
@@ -2042,6 +2174,7 @@ static void *fm6_ctx_copy(void *dst, const void *src, size_t n, int deferred)
     memcpy(dst, src, n);
     if (n != SLOTS * 8) return dst;
     t = fm6_ctx_table(dst, src, deferred);
+    if (deferred) fm6_ctx_src_note((uint8_t *)dst - 0x3d0, src);
     if (InterlockedIncrement(&logged[deferred]) == 1)
         wlog("d3d: contexto %s do FM6 %p: tabela embutida no layout do FM6 (0x%x slots, %d triviais do driver)",
              deferred ? "diferido" : "imediato", (uint8_t *)dst - 0x3d0, FM6_CTX_SLOTS, t);
