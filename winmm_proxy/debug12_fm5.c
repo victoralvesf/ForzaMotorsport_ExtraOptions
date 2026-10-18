@@ -3,6 +3,8 @@
  * O azimuth.exe importa d3d12.dll!D3D12CreateDevice por ordinal (101) no slot da IAT 0x26f868. O hook liga a
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
  * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
+ * D3D12Debug=3: sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
+ * UINT64_MAX) e grava no log as listas que nao terminaram, com as operacoes em volta da ultima executada.
  */
 #define INITGUID
 #include <windows.h>
@@ -35,6 +37,83 @@ static void __stdcall on_message(D3D12_MESSAGE_CATEGORY cat, D3D12_MESSAGE_SEVER
 
 static int g_mode;
 
+static const char *dred_op_name(D3D12_AUTO_BREADCRUMB_OP op)
+{
+    static const char *const names[] = {
+        "SetMarker", "BeginEvent", "EndEvent", "DrawInstanced", "DrawIndexedInstanced", "ExecuteIndirect",
+        "Dispatch", "CopyBufferRegion", "CopyTextureRegion", "CopyResource", "CopyTiles", "ResolveSubresource",
+        "ClearRenderTargetView", "ClearUnorderedAccessView", "ClearDepthStencilView", "ResourceBarrier",
+        "ExecuteBundle", "Present", "ResolveQueryData", "BeginSubmission", "EndSubmission", "DecodeFrame",
+        "ProcessFrames", "AtomicCopyBufferUint", "AtomicCopyBufferUint64", "ResolveSubresourceRegion",
+        "WriteBufferImmediate", "DecodeFrame1", "SetProtectedResourceSession", "DecodeFrame2", "ProcessFrames1",
+        "BuildRaytracingAccelerationStructure", "EmitRaytracingAccelerationStructurePostbuildInfo",
+        "CopyRaytracingAccelerationStructure", "DispatchRays", "InitializeMetaCommand", "ExecuteMetaCommand",
+        "EstimateMotion", "ResolveMotionVectorHeap", "SetPipelineState1", "InitializeExtensionCommand",
+        "ExecuteExtensionCommand", "DispatchMesh", "EncodeFrame", "ResolveEncoderOutputMetadata", "Barrier",
+        "BeginCommandList", "DispatchGraph", "SetProgram",
+    };
+    return (unsigned)op < sizeof names / sizeof *names ? names[op] : "?";
+}
+
+/* espera a remocao do device e grava os breadcrumbs */
+static DWORD WINAPI dred_watch(void *param)
+{
+    ID3D12Device *dev = param;
+    ID3D12Fence *fence = NULL;
+    ID3D12DeviceRemovedExtendedData1 *dred = NULL;
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 out;
+    const D3D12_AUTO_BREADCRUMB_NODE1 *node;
+    HANDLE ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    int shown = 0, total = 0, idx = 0;
+    if (!ev || FAILED(dev->lpVtbl->CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&fence)) ||
+        FAILED(fence->lpVtbl->SetEventOnCompletion(fence, UINT64_MAX, ev))) {
+        wlog("debug12: DRED: sem fence de espera");
+        return 0;
+    }
+    WaitForSingleObject(ev, INFINITE);
+    wlog("debug12: DRED: device removido hr=%#lx", (unsigned long)dev->lpVtbl->GetDeviceRemovedReason(dev));
+    if (FAILED(dev->lpVtbl->QueryInterface(dev, &IID_ID3D12DeviceRemovedExtendedData1, (void **)&dred)) ||
+        FAILED(dred->lpVtbl->GetAutoBreadcrumbsOutput1(dred, &out))) {
+        wlog("debug12: DRED: sem breadcrumbs");
+        return 0;
+    }
+    for (node = out.pHeadAutoBreadcrumbNode; node; node = node->pNext) total++;
+    for (node = out.pHeadAutoBreadcrumbNode; node; node = node->pNext, idx++) {
+        UINT32 last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0, i;
+        unsigned counts[64] = { 0 };
+        char buf[512];
+        int len = 0;
+        if (!node->pCommandHistory) continue;
+        if (last >= node->BreadcrumbCount && idx + 6 < total) continue;   /* terminou: so as ultimas listas */
+        shown++;
+        for (i = 0; i < node->BreadcrumbCount; i++)
+            if ((unsigned)node->pCommandHistory[i] < 64) counts[node->pCommandHistory[i]]++;
+        for (i = 0; i < 64 && len < 400; i++)
+            if (counts[i]) len += wsprintfA(buf + len, " %s=%u", dred_op_name(i), counts[i]);
+        buf[len] = 0;
+        wlog("debug12: DRED: no %d/%d lista %p fila %p: %u de %u operacoes;%s", idx, total, (void *)node->pCommandList,
+             (void *)node->pCommandQueue, last, node->BreadcrumbCount, buf);
+    }
+    wlog("debug12: DRED: %d listas mostradas", shown);
+    return 0;
+}
+
+static void enable_dred(void)
+{
+    PFN_D3D12_GET_DEBUG_INTERFACE get_debug =
+        (PFN_D3D12_GET_DEBUG_INTERFACE)GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12GetDebugInterface");
+    ID3D12DeviceRemovedExtendedDataSettings1 *s = NULL;
+    if (!get_debug || FAILED(get_debug(&IID_ID3D12DeviceRemovedExtendedDataSettings1, (void **)&s))) {
+        wlog("debug12: DRED: sem ID3D12DeviceRemovedExtendedDataSettings1");
+        return;
+    }
+    s->lpVtbl->SetAutoBreadcrumbsEnablement(s, D3D12_DRED_ENABLEMENT_FORCED_ON);
+    s->lpVtbl->SetPageFaultEnablement(s, D3D12_DRED_ENABLEMENT_FORCED_ON);
+    s->lpVtbl->SetBreadcrumbContextEnablement(s, D3D12_DRED_ENABLEMENT_FORCED_ON);
+    s->lpVtbl->Release(s);
+    wlog("debug12: DRED: breadcrumbs ligados");
+}
+
 /* chamado na primeira criacao de device (fora do DllMain/loader lock) */
 static void enable_debug_layer(void)
 {
@@ -43,6 +122,7 @@ static void enable_debug_layer(void)
     ID3D12Debug *dbg = NULL;
     if (done) return;
     done = 1;
+    if (g_mode == 3) { enable_dred(); return; }
     get_debug = (PFN_D3D12_GET_DEBUG_INTERFACE)GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12GetDebugInterface");
     if (!get_debug || FAILED(get_debug(&IID_ID3D12Debug, (void **)&dbg))) {
         wlog("debug12: D3D12GetDebugInterface falhou (Graphics Tools instalado?)");
@@ -65,7 +145,14 @@ static HRESULT WINAPI hook_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL le
     HRESULT hr;
     enable_debug_layer();
     hr = real_create_device(adapter, level, riid, out);
-    if (SUCCEEDED(hr) && out && *out) {
+    if (g_mode == 3 && SUCCEEDED(hr) && out && *out) {
+        static int watching;
+        ID3D12Device *dev = NULL;
+        if (!watching && SUCCEEDED(((IUnknown *)*out)->lpVtbl->QueryInterface(*out, &IID_ID3D12Device, (void **)&dev))) {
+            watching = 1;
+            CloseHandle(CreateThread(NULL, 0, dred_watch, dev, 0, NULL));
+        }
+    } else if (SUCCEEDED(hr) && out && *out) {
         ID3D12InfoQueue1 *q1 = NULL;
         ID3D12InfoQueue *q = NULL;
         IUnknown *dev = (IUnknown *)*out;
