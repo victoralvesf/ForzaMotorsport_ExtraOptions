@@ -11,6 +11,8 @@
  *    slot nunca gravado dentro da tabela no heap visivel pela GPU -> relatorio + SRV nulo nele antes do draw;
  *  - endereco de GPU envenenado (0xdeadbeef / 0xbeefdead.. / fora de 48 bits) em CBV, root views, vertex/index
  *    buffer e stream out: loga a pilha; CBV vira nulo; root view/buffer vira 0 (nulo) no lugar do endereco.
+ * Com o rastreio (D3D12Debug>=3): CopyTextureRegion conferido (subrecurso/footprint/regiao, gg_copy_check) e chamadas
+ * de residencia (MakeResident/Evict/...) contadas; ambos so registram.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -281,6 +283,74 @@ uint32_t gg_trace_get(void *cl, gg_site *out, uint32_t max, uint32_t *dropped)
     return n;
 }
 
+/* ---- validacao de CopyTextureRegion (17_fm6.txt PASSO 26) ----
+ * O +0x10000 do endereco do page fault (0xbeefdeadb000 -> 0xbeefdeaeb000) parece o "subrecurso seguinte" de um
+ * objeto sem memoria; a ultima lista do DRED sempre tem dezenas de CopyTextureRegion. Confere subrecurso,
+ * footprint dentro do buffer e regiao dentro dos dois lados. Limites por baixo (sem tamanho de texel por formato):
+ * so acusa o que esta certamente fora. */
+static int gg_is_bc(DXGI_FORMAT f) { return (f >= 70 && f <= 84) || (f >= 94 && f <= 99); }
+static int gg_planes(DXGI_FORMAT f)
+{
+    return f == 19 || f == 20 || f == 21 || f == 22 || f == 44 || f == 45 || f == 46 || f == 47 ||
+           (f >= 103 && f <= 108) || f == 110 ? 2 : 1;
+}
+
+/* extensao (w, h, d) de um lado da copia; 0 = ok, senao grava o motivo em why */
+static int gg_copy_extent(const char *side, const D3D12_RESOURCE_DESC *r, const D3D12_TEXTURE_COPY_LOCATION *loc,
+                          uint64_t *w, uint64_t *h, uint64_t *d, char *why)
+{
+    if (loc->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
+        const D3D12_SUBRESOURCE_FOOTPRINT *f = &loc->PlacedFootprint.Footprint;
+        uint64_t rows = gg_is_bc(f->Format) ? (f->Height + 3) / 4 : f->Height, need;
+        if (r->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+            return wsprintfA(why, "%s: footprint num recurso que nao e buffer (dim %d)", side, r->Dimension), 1;
+        need = loc->PlacedFootprint.Offset + (uint64_t)f->RowPitch * (rows * (f->Depth ? f->Depth : 1) - 1) + 1;
+        if (!f->Width || !f->Height || !f->Depth || need > r->Width)
+            return wsprintfA(why, "%s: footprint fora do buffer (offset %lu pitch %u %ux%ux%u fmt %d, buffer %lu)", side,
+                             (unsigned long)loc->PlacedFootprint.Offset, f->RowPitch, f->Width, f->Height, f->Depth,
+                             f->Format, (unsigned long)r->Width), 1;
+        *w = f->Width; *h = f->Height; *d = f->Depth;
+        return 0;
+    } else {
+        uint32_t mips = r->MipLevels ? r->MipLevels : 1, mip;
+        uint32_t arr = r->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : r->DepthOrArraySize;
+        uint32_t n = mips * (arr ? arr : 1) * gg_planes(r->Format), i = loc->SubresourceIndex;
+        if (r->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER || r->Dimension == D3D12_RESOURCE_DIMENSION_UNKNOWN)
+            return wsprintfA(why, "%s: subrecurso %u num recurso de dim %d", side, i, r->Dimension), 1;
+        if (i >= n)
+            return wsprintfA(why, "%s: subrecurso %u >= %u (%lux%u x%u mips %u fmt %d dim %d)", side, i, n,
+                             (unsigned long)r->Width, r->Height, r->DepthOrArraySize, r->MipLevels, r->Format,
+                             r->Dimension), 1;
+        mip = i % mips;
+        *w = r->Width >> mip ? r->Width >> mip : 1;
+        *h = r->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D ? 1 : (r->Height >> mip ? r->Height >> mip : 1);
+        *d = r->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? (r->DepthOrArraySize >> mip ? r->DepthOrArraySize >> mip : 1) : 1;
+        if (gg_is_bc(r->Format)) { *w = (*w + 3) & ~3ull; *h = (*h + 3) & ~3ull; }   /* blocos 4x4 inteiros */
+        return 0;
+    }
+}
+
+int gg_copy_check(const D3D12_RESOURCE_DESC *dr, const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y, UINT z,
+                  const D3D12_RESOURCE_DESC *sr, const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *box, char *why)
+{
+    uint64_t dw, dh, dd, sw, sh, sd, cw, ch, cd;
+    if (gg_copy_extent("destino", dr, dst, &dw, &dh, &dd, why) || gg_copy_extent("origem", sr, src, &sw, &sh, &sd, why))
+        return 1;
+    if (box) {
+        if (box->left >= box->right || box->top >= box->bottom || box->front >= box->back) return 0;   /* vazio: no-op */
+        if (box->right > sw || box->bottom > sh || box->back > sd)
+            return wsprintfA(why, "origem: box (%u,%u,%u)-(%u,%u,%u) fora de %ux%ux%u", box->left, box->top, box->front,
+                             box->right, box->bottom, box->back, (unsigned)sw, (unsigned)sh, (unsigned)sd), 1;
+        cw = box->right - box->left; ch = box->bottom - box->top; cd = box->back - box->front;
+    } else {
+        cw = sw; ch = sh; cd = sd;
+    }
+    if (x + cw > dw || y + ch > dh || z + cd > dd)
+        return wsprintfA(why, "destino: regiao (%u,%u,%u) + %ux%ux%u fora de %ux%ux%u", x, y, z, (unsigned)cw,
+                         (unsigned)ch, (unsigned)cd, (unsigned)dw, (unsigned)dh, (unsigned)dd), 1;
+    return 0;
+}
+
 /* ---- hooks ---- */
 
 static void (STDMETHODCALLTYPE *real_cbv)(ID3D12Device *, const D3D12_CONSTANT_BUFFER_VIEW_DESC *, D3D12_CPU_DESCRIPTOR_HANDLE);
@@ -324,13 +394,13 @@ static void label(char *out, void *p)
 }
 
 /* um relatorio por evento (limite GG_MAX_REPORTS): o que foi achado + a pilha nos modulos conhecidos */
-static void report(const char *what, uint64_t v)
+static void report_to(volatile LONG *ctr, LONG max, const char *what, uint64_t v)
 {
     void *frames[24];
     char buf[640], one[40];
     int len, n, i;
-    LONG k = InterlockedIncrement(&reports);
-    if (k > GG_MAX_REPORTS) return;
+    LONG k = InterlockedIncrement(ctr);
+    if (k > max) return;
     /* wsprintfA nao tem %llx */
     len = v >> 32 ? wsprintfA(buf, "gpuguard #%ld tid=%lu: %s 0x%lx%08lx; pilha:", k, GetCurrentThreadId(), what,
                               (unsigned long)(v >> 32), (unsigned long)v)
@@ -342,6 +412,8 @@ static void report(const char *what, uint64_t v)
     }
     wlog("%s", buf);
 }
+
+static void report(const char *what, uint64_t v) { report_to(&reports, GG_MAX_REPORTS, what, v); }
 
 /* pilha so com os quadros do jogo e do azimuth.exe */
 static uint32_t known_frames(void **out, uint32_t max)
@@ -636,6 +708,49 @@ static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x
     real_dispatch(l, x, y, z);
 }
 
+/* CopyTextureRegion: argumentos fora do recurso -> relatorio proprio (com pilha); formatos de copia novos -> log */
+static volatile LONG copy_reports;
+
+static void log_copy_shape(const D3D12_RESOURCE_DESC *d, const D3D12_TEXTURE_COPY_LOCATION *dst,
+                           const D3D12_TEXTURE_COPY_LOCATION *src)
+{
+    static uint32_t seen[64];
+    static volatile LONG nseen;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    uint32_t h = 2166136261u, v[8], i;
+    v[0] = d->Dimension; v[1] = (uint32_t)d->Width; v[2] = d->Height; v[3] = d->DepthOrArraySize;
+    v[4] = d->MipLevels; v[5] = d->Format; v[6] = dst->Type; v[7] = src->Type;
+    for (i = 0; i < 8; i++) h = (h ^ v[i]) * 16777619u;
+    AcquireSRWLockExclusive(&lock);
+    for (i = 0; i < (uint32_t)nseen && seen[i] != h; i++) {}
+    if (i < (uint32_t)nseen || nseen >= 64) { ReleaseSRWLockExclusive(&lock); return; }
+    seen[nseen++] = h;
+    ReleaseSRWLockExclusive(&lock);
+    wlog("gpuguard: copia nova: destino dim %u %ux%u x%u mips %u fmt %u (%s), origem %s, flags %#x", v[0], v[1], v[2],
+         v[3], v[4], v[5], v[6] ? "footprint" : "subrecurso", v[7] ? "footprint" : "subrecurso", (unsigned)d->Flags);
+}
+
+static void check_copytex(const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y, UINT z,
+                          const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *box)
+{
+    D3D12_RESOURCE_DESC dd, sd;
+    char why[200];
+    if (!dst || !src || !dst->pResource || !src->pResource) {
+        report_to(&copy_reports, GG_MAX_REPORTS, "CopyTextureRegion com recurso nulo, destino", (uintptr_t)(dst ? dst->pResource : NULL));
+        return;
+    }
+    dst->pResource->lpVtbl->GetDesc(dst->pResource, &dd);
+    src->pResource->lpVtbl->GetDesc(src->pResource, &sd);
+    log_copy_shape(&dd, dst, src);
+    if (gg_copy_check(&dd, dst, x, y, z, &sd, src, box, why)) {
+        uint64_t va = dd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? dst->pResource->lpVtbl->GetGPUVirtualAddress(dst->pResource)
+                    : sd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? src->pResource->lpVtbl->GetGPUVirtualAddress(src->pResource) : 0;
+        char what[260];
+        wsprintfA(what, "CopyTextureRegion %s; VA do buffer", why);
+        report_to(&copy_reports, GG_MAX_REPORTS, what, va);
+    }
+}
+
 static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y,
                                            UINT z, const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *box)
 {
@@ -643,6 +758,7 @@ static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D
     uint32_t arg[3] = { x, y, z }, n = known_frames(f, GG_SITE_FRAMES);
     gg_trace_add(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
     log_new_site(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
+    check_copytex(dst, x, y, z, src, box);
     real_copytex(l, dst, x, y, z, src, box);
 }
 
@@ -708,6 +824,60 @@ static HRESULT STDMETHODCALLTYPE hook_list1(ID3D12Device4 *dev, UINT mask, D3D12
     return hr;
 }
 
+/* residencia (17_fm6.txt PASSO 26): o placeholder 0xdeadbeef do UMD da AMD pode ser o de alocacao nao residente.
+   So conta e registra (1as 8 chamadas de cada com pilha, depois potencias de 2); nada muda. */
+static HRESULT (STDMETHODCALLTYPE *real_resident)(ID3D12Device *, UINT, ID3D12Pageable *const *);
+static HRESULT (STDMETHODCALLTYPE *real_evict)(ID3D12Device *, UINT, ID3D12Pageable *const *);
+static HRESULT (STDMETHODCALLTYPE *real_priority)(ID3D12Device1 *, UINT, ID3D12Pageable *const *, const D3D12_RESIDENCY_PRIORITY *);
+static HRESULT (STDMETHODCALLTYPE *real_enqueue)(ID3D12Device3 *, D3D12_RESIDENCY_FLAGS, UINT, ID3D12Pageable *const *,
+                                                 ID3D12Fence *, UINT64);
+static volatile LONG residency_calls[4], residency_reports;
+
+static void log_residency(int which, UINT n, ID3D12Pageable *const *objs)
+{
+    static const char *const names[] = { "MakeResident", "Evict", "SetResidencyPriority", "EnqueueMakeResident" };
+    LONG k = InterlockedIncrement(&residency_calls[which]);
+    char what[96];
+    if (k > 8 && (k & (k - 1))) return;
+    wsprintfA(what, "residencia: %s chamada #%ld com %u objetos, 1o", names[which], k, n);
+    report_to(&residency_reports, 64, what, (uintptr_t)(n && objs ? objs[0] : NULL));
+}
+
+static HRESULT STDMETHODCALLTYPE hook_resident(ID3D12Device *d, UINT n, ID3D12Pageable *const *o) { log_residency(0, n, o); return real_resident(d, n, o); }
+static HRESULT STDMETHODCALLTYPE hook_evict(ID3D12Device *d, UINT n, ID3D12Pageable *const *o) { log_residency(1, n, o); return real_evict(d, n, o); }
+static HRESULT STDMETHODCALLTYPE hook_priority(ID3D12Device1 *d, UINT n, ID3D12Pageable *const *o, const D3D12_RESIDENCY_PRIORITY *p)
+{
+    log_residency(2, n, o);
+    return real_priority(d, n, o, p);
+}
+static HRESULT STDMETHODCALLTYPE hook_enqueue(ID3D12Device3 *d, D3D12_RESIDENCY_FLAGS fl, UINT n, ID3D12Pageable *const *o,
+                                              ID3D12Fence *f, UINT64 v)
+{
+    log_residency(3, n, o);
+    return real_enqueue(d, fl, n, o, f, v);
+}
+
+static void hook_residency(IUnknown *obj)
+{
+    ID3D12Device *dev = NULL;
+    ID3D12Device1 *dev1 = NULL;
+    ID3D12Device3 *dev3 = NULL;
+    if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device, (void **)&dev))) {
+        swap((void **)&dev->lpVtbl->MakeResident, hook_resident, (void **)&real_resident);
+        swap((void **)&dev->lpVtbl->Evict, hook_evict, (void **)&real_evict);
+        dev->lpVtbl->Release(dev);
+    }
+    if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device1, (void **)&dev1))) {
+        swap((void **)&dev1->lpVtbl->SetResidencyPriority, hook_priority, (void **)&real_priority);
+        dev1->lpVtbl->Release(dev1);
+    }
+    if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device3, (void **)&dev3))) {
+        swap((void **)&dev3->lpVtbl->EnqueueMakeResident, hook_enqueue, (void **)&real_enqueue);
+        dev3->lpVtbl->Release(dev3);
+    }
+    wlog("gpuguard: residencia rastreada (MakeResident/Evict/SetResidencyPriority/EnqueueMakeResident)");
+}
+
 /* chamado pelo hook do D3D12CreateDevice (debug12_fm5.c) no FM6 */
 void gpuguard_install(IUnknown *obj)
 {
@@ -731,5 +901,6 @@ void gpuguard_install(IUnknown *obj)
         swap((void **)&dev4->lpVtbl->CreateCommandList1, hook_list1, (void **)&real_list1);
         dev4->lpVtbl->Release(dev4);
     }
+    if (gg_trace_on) hook_residency(obj);
     wlog("gpuguard: ligada no device D3D12 (descritor CBV/SRV/UAV de %u bytes)", res_inc);
 }

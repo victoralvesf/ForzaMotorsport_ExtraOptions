@@ -144,3 +144,81 @@ TEST(gpuguard_internal_rs_shape)
     d.NumParameters = 1;
     CHECK(!gg_is_internal_rs(&d));
 }
+
+/* CopyTextureRegion: subrecurso, footprint dentro do buffer, box e regiao de destino (gg_copy_check) */
+static D3D12_RESOURCE_DESC tex_desc(D3D12_RESOURCE_DIMENSION dim, UINT64 w, UINT h, UINT16 da, UINT16 mips, DXGI_FORMAT f)
+{
+    D3D12_RESOURCE_DESC d;
+    memset(&d, 0, sizeof d);
+    d.Dimension = dim; d.Width = w; d.Height = h; d.DepthOrArraySize = da; d.MipLevels = mips; d.Format = f;
+    d.SampleDesc.Count = 1;
+    return d;
+}
+
+TEST(gpuguard_copy_check)
+{
+    D3D12_RESOURCE_DESC cube = tex_desc(D3D12_RESOURCE_DIMENSION_TEXTURE2D, 256, 256, 6, 9, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    D3D12_RESOURCE_DESC buf = tex_desc(D3D12_RESOURCE_DIMENSION_BUFFER, 65536, 1, 1, 1, DXGI_FORMAT_UNKNOWN);
+    D3D12_RESOURCE_DESC bc = tex_desc(D3D12_RESOURCE_DIMENSION_TEXTURE2D, 32, 32, 1, 6, DXGI_FORMAT_BC1_UNORM);
+    D3D12_RESOURCE_DESC vol = tex_desc(D3D12_RESOURCE_DIMENSION_TEXTURE3D, 32, 32, 32, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
+    D3D12_TEXTURE_COPY_LOCATION dst, src;
+    D3D12_BOX box = { 0, 0, 0, 16, 16, 1 };
+    char why[200];
+    memset(&dst, 0, sizeof dst); memset(&src, 0, sizeof src);
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    src.PlacedFootprint.Footprint.Width = 64; src.PlacedFootprint.Footprint.Height = 64;
+    src.PlacedFootprint.Footprint.Depth = 1; src.PlacedFootprint.Footprint.RowPitch = 512;
+    /* face 5, mip 2 (64x64) = subrecurso 47 de 54: ok */
+    dst.SubresourceIndex = 5 * 9 + 2;
+    CHECK(!gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    /* subrecurso 54 nao existe */
+    dst.SubresourceIndex = 54;
+    CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    CHECK(strstr(why, "destino: subrecurso 54 >= 54") != NULL);
+    /* mip 3 (32x32) nao cabe 64x64 */
+    dst.SubresourceIndex = 3;
+    CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    CHECK(strstr(why, "fora de 32x32x1") != NULL);
+    /* com box 16x16 cabe em (16,16) do mip 3, nao em (17,0) */
+    CHECK(!gg_copy_check(&cube, &dst, 16, 16, 0, &buf, &src, &box, why));
+    CHECK(gg_copy_check(&cube, &dst, 17, 0, 0, &buf, &src, &box, why));
+    /* footprint passando do fim do buffer: 512 * 64 = 32768 a partir de 40960 */
+    dst.SubresourceIndex = 2;
+    src.PlacedFootprint.Offset = 40960;
+    CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    CHECK(strstr(why, "origem: footprint fora do buffer") != NULL);
+    src.PlacedFootprint.Offset = 32768;                 /* termina exatamente no fim */
+    CHECK(!gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    /* footprint num recurso que nao e buffer */
+    CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &cube, &src, NULL, why));
+    CHECK(strstr(why, "nao e buffer") != NULL);
+    /* BC: mip 5 de 32x32 = 1x1, copia de bloco 4x4 inteiro e valida */
+    src.PlacedFootprint.Offset = 0;
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_BC1_UNORM;
+    src.PlacedFootprint.Footprint.Width = 4; src.PlacedFootprint.Footprint.Height = 4;
+    src.PlacedFootprint.Footprint.RowPitch = 256;
+    dst.SubresourceIndex = 5;
+    CHECK(!gg_copy_check(&bc, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    dst.SubresourceIndex = 6;
+    CHECK(gg_copy_check(&bc, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    /* 3D: profundidade conta para a regiao, nao para o numero de subrecursos */
+    src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    src.PlacedFootprint.Footprint.Width = 32; src.PlacedFootprint.Footprint.Height = 32;
+    src.PlacedFootprint.Footprint.Depth = 32; src.PlacedFootprint.Footprint.RowPitch = 256;
+    dst.SubresourceIndex = 0;
+    CHECK(gg_copy_check(&vol, &dst, 0, 0, 0, &buf, &src, NULL, why));   /* 256*32*32 = 262144 > 65536 */
+    buf.Width = 262144;
+    CHECK(!gg_copy_check(&vol, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    CHECK(gg_copy_check(&vol, &dst, 0, 0, 1, &buf, &src, NULL, why));
+    dst.SubresourceIndex = 1;
+    CHECK(gg_copy_check(&vol, &dst, 0, 0, 0, &buf, &src, NULL, why));
+    /* textura -> textura (subrecurso nos dois lados), box vazio = no-op */
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = 0;
+    dst.SubresourceIndex = 0;
+    CHECK(!gg_copy_check(&cube, &dst, 0, 0, 0, &cube, &src, NULL, why));
+    box.right = 0;
+    CHECK(!gg_copy_check(&cube, &dst, 0, 0, 0, &cube, &src, &box, why));
+}
