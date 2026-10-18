@@ -362,3 +362,29 @@ TEST(gpuguard_draw_skip_classes)
     CHECK(log_has("gpuguard: experimento: draw direto #"));
     gg_trace_on = saved; gg_draw_skip = saved_skip;
 }
+
+/* anel dos ultimos draws: ordem, sobrescrita e o que cada entrada guarda */
+TEST(gpuguard_draw_ring)
+{
+    static int cl, rs, pso;
+    static gg_ring_ent e[GG_RING];
+    uint32_t arg[3] = { 0, 1, 2 }, i, n, base = (uint32_t)ring_seq;
+    for (i = 0; i < GG_RING + 5; i++) {
+        arg[0] = i;
+        gg_ring_add(&cl, GG_OP_DRAW_INDEXED, i & 1, &rs, &pso, arg);
+    }
+    n = gg_ring_get(e, GG_RING);
+    CHECK_EQ(n, GG_RING);
+    CHECK_EQ(e[0].arg[0], 5);                     /* as 5 mais antigas foram sobrescritas */
+    CHECK_EQ(e[n - 1].arg[0], GG_RING + 4);
+    CHECK_EQ(e[n - 1].seq, base + GG_RING + 5);
+    CHECK_EQ(e[n - 1].direct, 0);
+    CHECK_EQ(e[n - 2].direct, 1);
+    CHECK(e[0].pso == &pso && e[0].rs == &rs && e[0].cl == &cl);
+    CHECK_EQ(gg_ring_get(e, 3), 3);               /* so as 3 ultimas */
+    CHECK_EQ(e[2].arg[0], GG_RING + 4);
+    CHECK_EQ(e[0].arg[0], GG_RING + 2);
+    log_capture();
+    gg_ring_dump();
+    CHECK(log_has("DrawIndexedInstanced replayer (132,1,2)"));
+}

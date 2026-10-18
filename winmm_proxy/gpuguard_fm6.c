@@ -705,6 +705,43 @@ static void log_new_site(void *cl, uint32_t op, void *rs, void *pso, const uint3
     wlog("%s", buf);
 }
 
+/* ---- anel dos ultimos draws/ClearRTV do processo (a lista do page fault ja foi solta quando o DRED a mostra) ---- */
+#define GG_RING 128
+typedef struct { void *cl, *rs, *pso; uint32_t seq, op, direct, arg[3]; } gg_ring_ent;
+static gg_ring_ent ring[GG_RING];
+static volatile LONG ring_seq;
+
+void gg_ring_add(void *cl, uint32_t op, int direct, void *rs, void *pso, const uint32_t *arg)
+{
+    LONG k = InterlockedIncrement(&ring_seq);
+    gg_ring_ent *e = &ring[(uint32_t)k % GG_RING];
+    e->cl = cl; e->rs = rs; e->pso = pso; e->op = op; e->direct = direct;
+    memcpy(e->arg, arg, sizeof e->arg);
+    e->seq = (uint32_t)k;
+}
+
+/* copia em ordem (mais antigo primeiro); devolve quantos */
+uint32_t gg_ring_get(gg_ring_ent *out, uint32_t max)
+{
+    uint32_t last = (uint32_t)ring_seq, n = 0, k;
+    uint32_t first = last >= GG_RING ? last - GG_RING + 1 : 1;
+    if (max < GG_RING && last >= max) first = last - max + 1 > first ? last - max + 1 : first;
+    for (k = first; k && k <= last && n < max; k++)
+        if (ring[k % GG_RING].seq == k) out[n++] = ring[k % GG_RING];
+    return n;
+}
+
+/* grava no log os ultimos draws (dred_watch, depois das listas) */
+void gg_ring_dump(void)
+{
+    static gg_ring_ent e[GG_RING];
+    uint32_t n = gg_ring_get(e, GG_RING), i;
+    wlog("gpuguard: ultimos %u draws/ClearRTV (mais antigo primeiro):", n);
+    for (i = 0; i < n; i++)
+        wlog("gpuguard:  #%u lista %p %s %s (%u,%u,%u) rs %p pso %p", e[i].seq, e[i].cl, gg_op_name[e[i].op],
+             e[i].direct ? "direto" : "replayer", e[i].arg[0], e[i].arg[1], e[i].arg[2], e[i].rs, e[i].pso);
+}
+
 /* registra a operacao na lista (rastreio + 1o uso do ponto); devolve a root signature usada e, em `direct`, se a
    pilha passa pelo jogo (draw gravado na thread do jogo; os do replayer do Azimuth vem da thread da fila) */
 static void *trace_op(ID3D12GraphicsCommandList *l, uint32_t op, int compute, const uint32_t *arg, int *direct)
@@ -717,6 +754,7 @@ static void *trace_op(ID3D12GraphicsCommandList *l, uint32_t op, int compute, co
     if (direct)
         for (*direct = 0, i = 0; i < n; i++)
             if (g_fm6_game && (uint8_t *)f[i] >= g_fm6_game && (uint8_t *)f[i] < g_fm6_game + 0x8000000) *direct = 1;
+    if (op >= GG_OP_DRAW) gg_ring_add(l, op, direct ? *direct : 0, rs, pso, arg);
     return rs;
 }
 

@@ -23,6 +23,7 @@ extern int cfg_int(const wchar_t *key, int def);
 extern void wlog(const char *fmt, ...);
 extern void gpuguard_install(IUnknown *dev);
 extern void gg_trace_dump(void *cl);
+extern void gg_ring_dump(void);
 extern int gg_trace_on, gg_draw_skip;
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
@@ -103,6 +104,7 @@ static DWORD WINAPI dred_watch(void *param)
         gg_trace_dump(node->pCommandList);
     }
     wlog("debug12: DRED: %d listas mostradas", shown);
+    if (gg_trace_on) gg_ring_dump();
     return 0;
 }
 
