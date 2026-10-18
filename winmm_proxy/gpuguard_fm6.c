@@ -1686,6 +1686,30 @@ static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12
     return real_reset(l, a, ps);
 }
 
+/* sem rastreio (D3D12Debug < 3, o caso normal): so a correcao dos UAVs nulos (PASSO 29) nos draws; o Reset zera a
+   mascara das tabelas definidas */
+static HRESULT STDMETHODCALLTYPE hook_reset_uav(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
+{
+    gg_cl_gtab(l, 0, 0);
+    return real_reset(l, a, ps);
+}
+static void STDMETHODCALLTYPE hook_draw_uav(ID3D12GraphicsCommandList *l, UINT vc, UINT ic, UINT sv, UINT si)
+{
+    bind_null_uavs(l);
+    real_draw(l, vc, ic, sv, si);
+}
+static void STDMETHODCALLTYPE hook_draw_indexed_uav(ID3D12GraphicsCommandList *l, UINT idx, UINT ic, UINT si, INT bv, UINT sinst)
+{
+    bind_null_uavs(l);
+    real_draw_indexed(l, idx, ic, si, bv, sinst);
+}
+static void STDMETHODCALLTYPE hook_exec_indirect_uav(ID3D12GraphicsCommandList *l, ID3D12CommandSignature *sig, UINT max,
+                                                     ID3D12Resource *args, UINT64 off, ID3D12Resource *cnt, UINT64 cnt_off)
+{
+    bind_null_uavs(l);
+    real_exec_indirect(l, sig, max, args, off, cnt, cnt_off);
+}
+
 /* troca um slot de vtable (memoria somente leitura da dll) e guarda o original */
 static void swap(void **slot, void *hook, void **orig)
 {
@@ -1725,9 +1749,14 @@ static void hook_list_vtable(void *obj)
         swap((void **)&l->lpVtbl->ExecuteIndirect, hook_exec_indirect, (void **)&real_exec_indirect);
         swap((void **)&l->lpVtbl->ClearRenderTargetView, hook_clear_rtv, (void **)&real_clear_rtv);
         swap((void **)&l->lpVtbl->SetPipelineState, hook_set_pso, (void **)&real_set_pso);
+    } else {
+        swap((void **)&l->lpVtbl->Reset, hook_reset_uav, (void **)&real_reset);
+        swap((void **)&l->lpVtbl->DrawInstanced, hook_draw_uav, (void **)&real_draw);
+        swap((void **)&l->lpVtbl->DrawIndexedInstanced, hook_draw_indexed_uav, (void **)&real_draw_indexed);
+        swap((void **)&l->lpVtbl->ExecuteIndirect, hook_exec_indirect_uav, (void **)&real_exec_indirect);
     }
     l->lpVtbl->Release(l);
-    wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO%s)",
+    wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO, UAVs nulos nos draws%s)",
          gg_trace_on ? ", rastreio de Dispatch/CopyTextureRegion/draws/ClearRTV/PSO" : "");
 }
 

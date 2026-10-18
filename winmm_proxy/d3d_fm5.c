@@ -1273,6 +1273,61 @@ static void *const fm6_shader_hooks[7] = {
     (void *)fm6_create_shader_0x12,
 };
 
+/* CreatePlacementTexture2D (slot 0x40) do FM6: o Azimuth (0x140121c40) so aceita (a) alvo aliasado: Usage 0, CPU 0,
+   misc 0/0x20000/0x40000, 1 mip, 1 fatia, bind SRV|RT, SRV|DS ou SRV|RT|UAV; (b) textura pelo layout do XG: bind SRV,
+   CPU 0, 1 amostra, Usage <= 1, 1..15 mips, 1..0x800 fatias. O resto para ("GPU-write/CPU-map/unknown placement
+   semantics", game+0x214d79) -> registra a descricao das recusadas antes.
+   O FM6 (game+0x21d6f0) cria texturas SO UAV (bind 0x80): cadeia 64x64 de 7 mips R32G32B32A32_UINT e duas 1x1 na
+   memoria dos ultimos mips dela (aliasing). O Azimuth nao faz aliasing de memoria (os alvos do caso (a) tambem
+   viram recursos committed proprios) e a CPU nao le textura so de UAV -> CreateTexture2D committed comum
+   (o endereco fica so no log). PROVISORIO: as 1x1 nao enxergam os mips da cadeia. */
+static int az_placement_tex2d_ok(const UINT *d)
+{
+    if (d[7] == 0 && d[9] == 0 && (d[10] == 0 || d[10] == 0x20000 || d[10] == 0x40000) && d[2] == 1 && d[3] == 1 &&
+        (d[8] == 0x28 || d[8] == 0x48 || d[8] == 0xa8))
+        return 1;
+    return d[8] == 8 && d[9] == 0 && d[5] == 1 && d[2] && d[2] <= 0xf && d[3] && d[3] <= 0x800 && d[7] <= 1;
+}
+
+/* so UAV, sem CPU, Usage DEFAULT, 1 amostra, sem misc */
+static int fm6_placement_uav_only(const UINT *d)
+{
+    return d[8] == 0x80 && d[9] == 0 && d[7] == 0 && d[5] == 1 && d[10] == 0;
+}
+
+/* chamador de fora do wrapper do jogo (game+0x214cf0): o jogo nao tem unwind registrado -> 2o valor da pilha que cai
+   na imagem do jogo (o 1o e o retorno game+0x214d79 do proprio wrapper), como offset */
+extern uint8_t *g_fm6_game;
+static __attribute__((noinline)) uintptr_t fm6_game_caller(void)
+{
+    uint8_t **sp = __builtin_frame_address(0), **top = ((NT_TIB *)NtCurrentTeb())->StackBase;
+    int k = 0;
+    for (; g_fm6_game && sp < top && sp < (uint8_t **)__builtin_frame_address(0) + 0x200; sp++)
+        if (*sp > g_fm6_game && *sp < g_fm6_game + 0x1800000 && ++k == 2) return (uintptr_t)(*sp - g_fm6_game);
+    return 0;
+}
+
+static ptex2d_fn orig_fm6_placement_tex2d;
+static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
+{
+    if (desc && !az_placement_tex2d_ok(desc) && fm6_placement_uav_only(desc)) {
+        static volatile LONG n;
+        LONG k = InterlockedIncrement(&n);
+        long hr = orig_fm6_create_tex2d(dev, desc, NULL, out);
+        if (k <= 16 || (k & (k - 1)) == 0)
+            wlog("d3d: CreatePlacementTexture2D(FM6) so UAV #%ld %ux%u mips=%u fmt=%u addr=%p -> textura committed "
+                 "hr=%#lx tex=%p, chamador game+%#zx", k, desc[0], desc[1], desc[2], desc[4], addr, hr, out ? *out : NULL,
+                 fm6_game_caller());
+        return hr;
+    }
+    if (desc && !az_placement_tex2d_ok(desc))
+        wlog("d3d: CreatePlacementTexture2D(FM6) recusada pelo Azimuth: %ux%u mips=%u arr=%u fmt=%u samples=%u/%#x "
+             "usage=%u bind=%#x cpu=%#x misc=%#x tile=%u pitch=%u addr=%p, chamador game+%#zx", desc[0], desc[1], desc[2],
+             desc[3], desc[4], desc[5], desc[6], desc[7], desc[8], desc[9], desc[10], tile, pitch, addr,
+             fm6_game_caller());
+    return orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
+}
+
 static int fm6_device_fixups(void **vt)
 {
     size_t i;
@@ -1282,6 +1337,8 @@ static int fm6_device_fixups(void **vt)
         vt[5] = (void *)fm6_CreateTexture2D;
         orig_fm6_create_srv = (srv_fn)vt[7];
         vt[7] = (void *)fm6_CreateShaderResourceView;
+        orig_fm6_placement_tex2d = (ptex2d_fn)vt[0x40];
+        vt[0x40] = (void *)fm6_CreatePlacementTexture2D;
         orig_fm6_input_layout = vt[0xb];
         vt[0xb] = (void *)fm6_CreateInputLayout;
         for (i = 0; i < 7; i++) {

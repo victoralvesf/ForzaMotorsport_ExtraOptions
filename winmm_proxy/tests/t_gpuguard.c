@@ -526,6 +526,56 @@ TEST(gpuguard_pso_info_and_debug8_extra_stages)
 }
 
 /* tabela de UAV nao definida no draw (GS do FM6 grava em u0 sem UAV ligado) -> UAVs nulos */
+/* sem rastreio (D3D12Debug 0/1): a vtable da lista ainda recebe os draws que ligam os UAVs nulos (antes so com >= 3) */
+static ID3D12GraphicsCommandListVtbl lite_vt;
+static struct { ID3D12GraphicsCommandListVtbl *lpVtbl; } lite_cl = { &lite_vt };
+static int lite_draws, lite_tabs;
+static UINT lite_tab_i;
+static UINT64 lite_tab_g;
+static HRESULT STDMETHODCALLTYPE lite_qi(ID3D12GraphicsCommandList *l, REFIID iid, void **out) { (void)iid; *out = l; return S_OK; }
+static ULONG STDMETHODCALLTYPE lite_release(ID3D12GraphicsCommandList *l) { (void)l; return 1; }
+static void STDMETHODCALLTYPE lite_grs(ID3D12GraphicsCommandList *l, ID3D12RootSignature *rs) { (void)l; (void)rs; }
+static void STDMETHODCALLTYPE lite_draw_indexed(ID3D12GraphicsCommandList *l, UINT a, UINT b, UINT c, INT d, UINT e)
+{
+    (void)l; (void)a; (void)b; (void)c; (void)d; (void)e;
+    lite_draws++;
+}
+static void STDMETHODCALLTYPE lite_gtab(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE g)
+{
+    (void)l;
+    lite_tabs++;
+    lite_tab_i = i;
+    lite_tab_g = g.ptr;
+}
+
+TEST(gpuguard_null_uavs_without_trace)
+{
+    static int rs;
+    uint32_t size[3] = { 4, 0, 8 };
+    int saved = gg_trace_on;
+    ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)&lite_cl;
+    lite_vt.QueryInterface = lite_qi;
+    lite_vt.Release = lite_release;
+    lite_vt.DrawIndexedInstanced = lite_draw_indexed;
+    lite_vt.SetGraphicsRootDescriptorTable = lite_gtab;
+    lite_vt.SetGraphicsRootSignature = lite_grs;
+    gg_trace_on = 0;
+    hook_list_vtable(l);
+    CHECK(lite_vt.DrawInstanced == hook_draw_uav && lite_vt.DrawIndexedInstanced == hook_draw_indexed_uav);
+    CHECK(lite_vt.ExecuteIndirect == hook_exec_indirect_uav && lite_vt.Reset == hook_reset_uav);
+    CHECK(lite_vt.CopyTextureRegion == NULL);                  /* rastreio continua desligado */
+    gg_rs_add(&rs, size, 3);
+    gg_rs_set_uav(&rs, 1ull << 2);
+    null_uav_gpu = 0x1023e0000ull;
+    lite_vt.SetGraphicsRootSignature(l, (ID3D12RootSignature *)&rs);
+    lite_vt.DrawIndexedInstanced(l, 126, 1, 71904, -14155, 0);
+    CHECK(lite_draws == 1 && lite_tabs == 1 && lite_tab_i == 2 && lite_tab_g == 0x1023e0000ull);
+    lite_vt.DrawIndexedInstanced(l, 126, 1, 71904, -14155, 0);
+    CHECK(lite_draws == 2 && lite_tabs == 1);                  /* ja ligada */
+    null_uav_gpu = 0;
+    gg_trace_on = saved;
+}
+
 TEST(gpuguard_missing_uav_tables)
 {
     static int rs, rs2, cl, cl2;

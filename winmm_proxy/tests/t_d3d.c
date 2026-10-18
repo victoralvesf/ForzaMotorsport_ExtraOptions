@@ -854,6 +854,63 @@ TEST(fm6_deferred_update_placement_buffer)
     }
 }
 
+/* criterio do CreatePlacementTexture2D do Azimuth (0x140121c40), espelhado p/ registrar as recusadas do FM6 */
+TEST(fm6_placement_tex2d_azimuth_criteria)
+{
+    /*             W     H    mip arr fmt smp q  usage bind  cpu misc */
+    UINT rt[11] = { 1920, 1080, 1, 1, 10, 1, 0, 0, 0x28, 0, 0 };
+    UINT xg[11] = { 256, 256, 9, 6, 71, 1, 0, 0, 0x8, 0, 0 };
+    CHECK(az_placement_tex2d_ok(rt));
+    rt[8] = 0xa8; rt[10] = 0x40000;
+    CHECK(az_placement_tex2d_ok(rt));
+    rt[2] = 2;                                                 /* alvo com mips: recusado */
+    CHECK(!az_placement_tex2d_ok(rt));
+    CHECK(az_placement_tex2d_ok(xg));
+    xg[9] = 0x10000;                                           /* CPU read */
+    CHECK(!az_placement_tex2d_ok(xg));
+    xg[9] = 0; xg[8] = 0x88;                                   /* SRV|UAV */
+    CHECK(!az_placement_tex2d_ok(xg));
+    xg[8] = 8; xg[2] = 16;
+    CHECK(!az_placement_tex2d_ok(xg));
+}
+
+/* placement texture so UAV do FM6 (game+0x21d6f0) -> CreateTexture2D committed; o resto -> Azimuth 0x40 */
+static int pt_tex2d_calls, pt_place_calls;
+static long fake_pt_tex2d(void *dev, const UINT *desc, const void *init, void **out)
+{
+    (void)dev; (void)desc;
+    pt_tex2d_calls++;
+    CHECK(init == NULL);
+    *out = (void *)0x7e7;
+    return 0;
+}
+static long fake_pt_place(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
+{
+    (void)dev; (void)desc; (void)tile; (void)pitch; (void)addr;
+    pt_place_calls++;
+    *out = (void *)0x91a;
+    return 0;
+}
+
+TEST(fm6_placement_uav_only_committed)
+{
+    UINT uav[11] = { 64, 64, 7, 1, 3, 1, 0, 0, 0x80, 0, 0 };
+    UINT srv[11] = { 256, 256, 9, 1, 71, 1, 0, 0, 0x8, 0, 0 };
+    void *out = NULL;
+    orig_fm6_create_tex2d = fake_pt_tex2d;
+    orig_fm6_placement_tex2d = fake_pt_place;
+    pt_tex2d_calls = pt_place_calls = 0;
+    CHECK(fm6_CreatePlacementTexture2D(NULL, uav, 14, 0, (void *)0x1024d0000, &out) == 0 && out == (void *)0x7e7);
+    CHECK(pt_tex2d_calls == 1 && pt_place_calls == 0);
+    CHECK(fm6_CreatePlacementTexture2D(NULL, srv, 14, 0, (void *)0x1024d0000, &out) == 0 && out == (void *)0x91a);
+    CHECK(pt_tex2d_calls == 1 && pt_place_calls == 1);
+    uav[9] = 0x20000;                                          /* CPU read: segue p/ o Azimuth (que para) */
+    fm6_CreatePlacementTexture2D(NULL, uav, 14, 0, (void *)0x1024d0000, &out);
+    CHECK(pt_tex2d_calls == 1 && pt_place_calls == 2);
+    orig_fm6_create_tex2d = NULL;
+    orig_fm6_placement_tex2d = NULL;
+}
+
 /* SOSetTargets do FM6 (0x26 = Azimuth 0x25, stub fatal): desligar (0, NULL, NULL) = no-op; buffer -> Azimuth */
 static int so_calls;
 static UINT so_n;
