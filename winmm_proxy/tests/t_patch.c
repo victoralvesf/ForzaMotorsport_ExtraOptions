@@ -43,6 +43,15 @@ void ini_set(const char *body)
     MultiByteToWideChar(CP_ACP, 0, path, -1, g_ini, MAX_PATH);
 }
 
+void ini6_set(const char *body)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\winmm_proxy\\build\\test_fm6.ini", t_root());
+    DeleteFileA(path);
+    if (body) { FILE *f = fopen(path, "w"); fputs(body, f); fclose(f); }
+    MultiByteToWideChar(CP_ACP, 0, path, -1, g_ini6, MAX_PATH);
+}
+
 uint8_t *fake_azimuth(int game)
 {
     static uint8_t *img;
@@ -129,6 +138,7 @@ TEST(apply_patches_skips_fm6)
     uint8_t *az = fake_azimuth(0);
     ((IMAGE_DOS_HEADER *)game)->e_lfanew = 0x80;
     log_capture();
+    ini6_set("[FM6]\nSkipIntro=1\n");
     orig_apply_patches = fake_orig_apply;
     orig_apply_calls = 0;
     *(void **)(az + RVA_GAME_RECORD) = fm6_rec;
@@ -145,6 +155,8 @@ TEST(apply_patches_skips_fm6)
     VirtualFree(*(void **)(az + RVA_APU_HEAPS), 0, MEM_RELEASE);
     CHECK(slot0_game == game && slot0_n == 329 && game_tls_pending);   /* sites do slot 0 para o 1o import */
     CHECK(log_has("montador de batch do FM6 em game+0xda9b94 nao confere"));   /* zerado: nada muda */
+    CHECK(log_has("FM6: SkipIntro: site 0xa06b33 nao confere, ignorado"));     /* opcoes do azimuth_fm6.ini */
+    ini6_set(NULL);
     slot0_n = 0; game_tls_pending = 0;
     *(void **)(az + RVA_GAME_RECORD) = NULL;
     hook_apply_patches(img, opt);
@@ -293,6 +305,46 @@ TEST(cfg_int_reads_ini)
     CHECK_EQ(cfg_int(L"UnlockDLC", 5), 5);       /* ausente -> padrao */
     ini_set(NULL);
     CHECK_EQ(cfg_int(L"SkipIntro", 0), 0);
+}
+
+/* azimuth_fm6.ini e separado: so a secao [FM6] dele vale para o FM6 */
+TEST(cfg6_int_reads_fm6_ini)
+{
+    ini_set("[FM5]\nSkipIntro=1\n");
+    ini6_set("[FM6]\nSkipIntro=1\n");
+    CHECK_EQ(cfg6_int(L"SkipIntro", 0), 1);
+    ini6_set("[FM5]\nSkipIntro=1\n");
+    CHECK_EQ(cfg6_int(L"SkipIntro", 0), 0);
+    ini6_set(NULL);
+    CHECK_EQ(cfg6_int(L"SkipIntro", 0), 0);
+    CHECK_EQ(cfg_int(L"SkipIntro", 0), 1);
+    ini_set(NULL);
+}
+
+/* exe real do FM6: SkipIntro troca os je do init por nop e o jne do logo parade por jmp */
+TEST(fm6_skip_intro_patches_exe)
+{
+    static const uint32_t sites[] = { 0xa06b33, 0xa06c4d, 0xa07e0c };
+    uint8_t *game = pe_map(FM6_EXE, NULL);
+    size_t i;
+    if (!game) { test_skip("exe do FM6 ausente"); return; }
+    log_capture();
+    ini6_set(NULL);
+    fm6_patches(game);
+    for (i = 0; i < 3; i++) CHECK_HEX(game + sites[i], "4138b424d730000074");
+    CHECK_HEX(game + 0xa08eb6, "4438b8d730000075");
+    ini6_set("[FM6]\nSkipIntro=1\n");
+    fm6_patches(game);
+    for (i = 0; i < 3; i++) CHECK_HEX(game + sites[i], "4138b424d73000006690");
+    CHECK_HEX(game + 0xa08eb6, "4438b8d7300000eb2f");
+    CHECK(log_has("FM6: SkipIntro=1"));
+    CHECK(!log_has("nao confere"));
+    /* 2a vez: bytes ja trocados -> nada muda */
+    fm6_patches(game);
+    CHECK(log_has("FM6: SkipIntro: site 0xa06b33 nao confere, ignorado"));
+    ini6_set(NULL);
+    pe_unmap(game);
+    dump_log_on_fail();
 }
 
 /* ------------------------------------------------------------------------ */

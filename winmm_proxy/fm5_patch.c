@@ -3,7 +3,8 @@
  *  - repassa todos os exports para o winmm.dll do System32 (winmm_stubs.S)
  *  - adiciona os registros do Forza Motorsport 5 (7b35d917) e do Forza Motorsport 6 (64f9397e) a allow list
  *  - relaxa as travas do azimuth.exe que o FM5/FM6 nao passam (template, TLS, layout do XG, xg.dll, n. de secoes)
- *  - para o FM5, substitui loader::apply_patches pelos patches proprios do FM5; para o FM6 (por enquanto) nao aplica nada
+ *  - para o FM5, substitui loader::apply_patches pelos patches proprios do FM5; para o FM6 aplica so os do FM6
+ *    (TLS, heap da APU, batches e as opcoes do azimuth_fm6.ini)
  * Enderecos: ver docs\contexto\ (PASSOS 2-7; indice no CLAUDE.md). Todos os bytes originais sao
  * conferidos antes de escrever; se algo nao bater, nada e alterado.
  */
@@ -54,6 +55,13 @@ static const uint32_t fm5_splash_intro_cmps[] = { 0x13a33e, 0x13a825, 0x13b9ce }
 #define FM5_RES_WIDTH      0x13bfc1  /* vmulss ; vmulss ; vcvttss2si rbp,xmm2 (+0x10) */
 #define FM5_RES_UI_SIZE    0x8e4da5  /* tamanho da UI = float([r15+8]), float([r15+0xc]) -> [rbp+0x6f/0x73] (36 bytes) */
 
+/* ---- RVAs no exe do FM6 (Monument 1.0.0.44) ---- */
+/* SkipIntro: opcao "disablesplashintro" = byte [opcoes+0x30d7] (registrada em 0xa3ae3b). Sem imediato para trocar:
+   no init 0xa06964 e "cmp [r12+0x30d7],sil ; je" (esi = 0 desde 0xa06a46) -> je vira nop (= opcao ligada);
+   no logo parade 0xa08e78 (Health_Disclaimer/forzatech) e "cmp [rax+0x30d7],r15b ; jne" (r15 = 0) -> jmp */
+static const uint32_t fm6_splash_intro_cmps[] = { 0xa06b33, 0xa06c4d, 0xa07e0c };
+#define FM6_LOGO_PARADE_CMP 0xa08eb6
+
 uint8_t *g_base;
 static FILE *g_log;
 
@@ -63,6 +71,14 @@ static wchar_t g_ini[MAX_PATH];
 int cfg_int(const wchar_t *key, int def)
 {
     return (int)GetPrivateProfileIntW(L"FM5", key, def, g_ini);
+}
+
+/* ---- azimuth_fm6.ini (mesma pasta), secao [FM6] ---- */
+static wchar_t g_ini6[MAX_PATH];
+
+int cfg6_int(const wchar_t *key, int def)
+{
+    return (int)GetPrivateProfileIntW(L"FM6", key, def, g_ini6);
 }
 
 void wlog(const char *fmt, ...)
@@ -813,6 +829,25 @@ extern int shape_install(void);
 extern int debug12_install(void);
 extern int fm6_batch_install(uint8_t *game);
 
+/* opcoes do azimuth_fm6.ini */
+static void fm6_patches(uint8_t *game)
+{
+    if (cfg6_int(L"SkipIntro", 0)) {
+        static const uint8_t nop2[2] = { 0x66, 0x90 }, jmp8 = 0xeb;
+        size_t i, n = sizeof fm6_splash_intro_cmps / sizeof *fm6_splash_intro_cmps;
+        for (i = 0; i < n; i++)
+            if (!bytes_match(game + fm6_splash_intro_cmps[i], "4138b424d730000074", 9)) break;
+        if (i < n) wlog("FM6: SkipIntro: site %#x nao confere, ignorado", fm6_splash_intro_cmps[i]);
+        else if (!bytes_match(game + FM6_LOGO_PARADE_CMP, "4438b8d730000075", 8))
+            wlog("FM6: SkipIntro: site %#x nao confere, ignorado", FM6_LOGO_PARADE_CMP);
+        else {
+            for (i = 0; i < n; i++) write_mem(game + fm6_splash_intro_cmps[i] + 8, nop2, 2);
+            write_mem(game + FM6_LOGO_PARADE_CMP + 7, &jmp8, 1);
+            wlog("FM6: SkipIntro=1 (disablesplashintro forcado: T10_MS_Combined.bk2 e logo parade pulados)");
+        }
+    }
+}
+
 static void hook_apply_patches(void *image, const void *options)
 {
     if (is_fm5()) {
@@ -827,6 +862,7 @@ static void hook_apply_patches(void *image, const void *options)
         take_tls_template(game);
         implicit_apu_heap("FM6");
         fm6_batch_install(game);
+        fm6_patches(game);
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;
         return;
@@ -1058,6 +1094,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         wlog("config: %ls (SkipIntro=%d SkipPresentationVideo=%d UnlockDLC=%d EnableMarketplace=%d)", g_ini, cfg_int(L"SkipIntro", 0),
              cfg_int(L"SkipPresentationVideo", 0), cfg_int(L"UnlockDLC", 0),
              cfg_int(L"EnableMarketplace", 0));
+        wcscpy(slash ? slash + 1 : path, L"azimuth_fm6.ini");
+        wcscpy(g_ini6, path);
+        wlog("config: %ls (SkipIntro=%d)", g_ini6, cfg6_int(L"SkipIntro", 0));
         load_real_winmm();
         g_base = (uint8_t *)GetModuleHandleW(NULL);
         GetModuleFileNameW(NULL, path, MAX_PATH);
