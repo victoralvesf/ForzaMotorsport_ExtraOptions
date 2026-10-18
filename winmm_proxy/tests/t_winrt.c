@@ -32,6 +32,14 @@ static void fake_wstr_free(MsvcWstr *s)
     s->size = 0; s->cap = 7; s->buf[0] = 0;
 }
 static void *fake_op(void *space) { op_calls++; op_space = space; return (void *)0x1234; }
+static void *user_self, *user_arg, **user_out;
+static int user_calls;
+static long fake_user_async(void *self, void *user, void **out)
+{
+    user_calls++; user_self = self; user_arg = user; user_out = out;
+    if (out) *out = (void *)0x5678;
+    return S_OK;
+}
 
 static void jmp_to(uint8_t *at, const void *fn) { memcpy(at, "\xff\x25\0\0\0\0", 6); memcpy(at + 6, &fn, 8); }
 
@@ -45,12 +53,13 @@ static uint8_t *fake_storage_azimuth(void)
     jmp_to(az + RVA_MALLOC, (void *)malloc);
     jmp_to(az + RVA_LOCAL_SPACE_OP, (void *)fake_op);
     p = az + 0x189bd0; memcpy(az + 0x2b6628, &p, 8);            /* slot 8 = stub fatal */
+    p = az + 0x189b90; memcpy(az + 0x2b6620, &p, 8);            /* slot 7 = stub fatal */
     p = az + 0x1899a0; memcpy(az + 0x2b6618, &p, 8);            /* slot 6 = GetForUserAsync */
     memcpy(az + 0x2b62c0, L"Windows.Xbox.Storage.ConnectedStorageSpace", 86);
     return az;
 }
 
-/* slot 8: so instala se slot 6/8 e o nome da classe conferem */
+/* slots 7/8: so instala se slots 6/7/8 e o nome da classe conferem */
 TEST(machine_storage_install_checks_slots)
 {
     uint8_t *az = fake_azimuth(0);
@@ -63,8 +72,29 @@ TEST(machine_storage_install_checks_slots)
     CHECK(!install_machine_storage());
     CHECK(*(void **)(az + 0x2b6628) == az + 0x189bd0);
     az[0x2b62c0] = 'W';
+    *(void **)(az + 0x2b6620) = az + 0x189b91;                   /* slot 7 nao e o stub */
+    CHECK(!install_machine_storage());
+    CHECK(*(void **)(az + 0x2b6628) == az + 0x189bd0);
+    *(void **)(az + 0x2b6620) = az + 0x189b90;
     CHECK(install_machine_storage());
     CHECK(*(void **)(az + 0x2b6628) == (void *)local_machine_async);
+    CHECK(*(void **)(az + 0x2b6620) == (void *)local_user_scid_async);
+    CHECK(*(void **)(az + 0x2b6618) == az + 0x1899a0);           /* slot 6 intacto */
+}
+
+/* GetForUserAsync(user, serviceConfigId): slot 6 do Azimuth com o mesmo self/user/out, sem o service ID */
+TEST(user_storage_scid_forwards_to_slot6)
+{
+    uint8_t *az = fake_storage_azimuth();
+    void *out = NULL;
+    jmp_to(az + 0x1899a0, (void *)fake_user_async);
+    user_calls = 0;
+    log_capture();
+    CHECK_EQ(local_user_scid_async((void *)0x10, (void *)0x20, (void *)0x30, &out), S_OK);
+    CHECK_EQ(user_calls, 1);
+    CHECK(user_self == (void *)0x10 && user_arg == (void *)0x20 && user_out == &out);
+    CHECK(out == (void *)0x5678);
+    CHECK(log_has("service ID ignorado"));
 }
 
 /* GetForMachineAsync: LocalSpace do Azimuth em saves\machine (irma de player-1), criado uma vez */

@@ -287,8 +287,13 @@ static int install_template_hook(void)
 /* unico em saves\player-1; slots 7-9 = stubs fatais (o FH2 nao usa); slot 8 (so o out) = "local     */
 /* machine storage" -> STOPPED. Aqui: o mesmo LocalSpace do Azimuth (vtable/layout que o slot 6       */
 /* monta), unico, em saves\machine, e a operacao assincrona do proprio Azimuth.                        */
+/* Slot 7 = GetForUserAsync(user, serviceConfigId) (FM6: game+0x54e0fc) -> o slot 6 com o mesmo user  */
+/* (o service ID e ignorado: o mesmo LocalSpace de saves\player-1).                                   */
 /* ------------------------------------------------------------------------ */
 #define RVA_STATICS_SLOT6   0x2b6618   /* GetForUserAsync = 0x1899a0 (conferido) */
+#define RVA_USER_ASYNC      0x1899a0
+#define RVA_STATICS_SCID    0x2b6620   /* slot 7 */
+#define RVA_SCID_STUB       0x189b90
 #define RVA_STATICS_MACHINE 0x2b6628   /* slot 8 */
 #define RVA_MACHINE_STUB    0x189bd0
 #define RVA_PLAYER_DIR      0x187040   /* (wstring *out) -> ...\saves\player-1, cria as pastas */
@@ -351,17 +356,29 @@ static long STDMETHODCALLTYPE local_machine_async(void *self, void **out)
     return hr;
 }
 
+static long STDMETHODCALLTYPE local_user_scid_async(void *self, void *user, void *scid, void **out)
+{
+    static LONG logged;
+    (void)scid;
+    if (!InterlockedExchange(&logged, 1))
+        wlog("storage: GetForUserAsync(user, serviceConfigId) -> GetForUserAsync(user), service ID ignorado");
+    return ((long (*)(void *, void *, void **))(g_base + RVA_USER_ASYNC))(self, user, out);
+}
+
 static int install_machine_storage(void)
 {
-    void *fn = (void *)local_machine_async;
+    void *fn = (void *)local_machine_async, *scid_fn = (void *)local_user_scid_async;
     if (*(void **)(g_base + RVA_STATICS_MACHINE) != g_base + RVA_MACHINE_STUB ||
-        *(void **)(g_base + RVA_STATICS_SLOT6) != g_base + 0x1899a0 ||
+        *(void **)(g_base + RVA_STATICS_SCID) != g_base + RVA_SCID_STUB ||
+        *(void **)(g_base + RVA_STATICS_SLOT6) != g_base + RVA_USER_ASYNC ||
         !bytes_match(g_base + RVA_LOCAL_SPACE_CLS, "570069006e0064006f0077007300", 14)) {
         wlog("LocalSpaceStatics %#x: nao confere", RVA_STATICS_MACHINE);
         return 0;
     }
     write_mem(g_base + RVA_STATICS_MACHINE, &fn, sizeof fn);
+    write_mem(g_base + RVA_STATICS_SCID, &scid_fn, sizeof scid_fn);
     wlog("patch %#x: LocalSpaceStatics::GetForMachineAsync -> saves\\machine", RVA_STATICS_MACHINE);
+    wlog("patch %#x: LocalSpaceStatics::GetForUserAsync(user, scid) -> slot 6", RVA_STATICS_SCID);
     return 1;
 }
 
