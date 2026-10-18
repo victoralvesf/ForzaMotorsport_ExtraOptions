@@ -222,3 +222,33 @@ TEST(gpuguard_copy_check)
     box.right = 0;
     CHECK(!gg_copy_check(&cube, &dst, 0, 0, 0, &cube, &src, &box, why));
 }
+
+/* D3D12Debug=7 (gg_trace_on 5): o CopyTextureRegion e registrado mas nao chega ao D3D12 */
+static int real_copies;
+static void STDMETHODCALLTYPE fake_copytex(ID3D12GraphicsCommandList *l, const D3D12_TEXTURE_COPY_LOCATION *d, UINT x, UINT y,
+                                           UINT z, const D3D12_TEXTURE_COPY_LOCATION *s, const D3D12_BOX *b)
+{
+    (void)l; (void)d; (void)x; (void)y; (void)z; (void)s; (void)b;
+    real_copies++;
+}
+
+TEST(gpuguard_debug7_skips_copies)
+{
+    static int cl;
+    D3D12_TEXTURE_COPY_LOCATION dst, src;
+    int saved = gg_trace_on;
+    memset(&dst, 0, sizeof dst); memset(&src, 0, sizeof src);   /* recursos nulos: so relatorio, sem GetDesc */
+    real_copytex = fake_copytex;
+    log_capture();
+    gg_trace_on = 1;
+    hook_copytex((ID3D12GraphicsCommandList *)&cl, &dst, 0, 0, 0, &src, NULL);
+    CHECK_EQ(real_copies, 1);
+    gg_trace_on = 5;
+    hook_copytex((ID3D12GraphicsCommandList *)&cl, &dst, 0, 0, 0, &src, NULL);
+    hook_copytex((ID3D12GraphicsCommandList *)&cl, &dst, 0, 0, 0, &src, NULL);
+    CHECK_EQ(real_copies, 1);
+    CHECK(log_has("gpuguard: experimento: CopyTextureRegion #1 pulado"));
+    CHECK(log_has("gpuguard: experimento: CopyTextureRegion #2 pulado"));
+    gg_trace_reset(&cl);
+    gg_trace_on = saved;
+}

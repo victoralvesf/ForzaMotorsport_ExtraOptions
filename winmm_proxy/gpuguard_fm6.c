@@ -206,7 +206,7 @@ typedef struct {
 } gg_site;
 typedef struct { void *cl; uint32_t n, dropped; gg_site s[GG_SITES]; } gg_trace;
 
-int gg_trace_on;                  /* 1 = D3D12Debug 3; 2 = D3D12Debug 4 (tambem pula a compute interna) */
+int gg_trace_on;                  /* D3D12Debug - 2: 1 = rastreio; 2 = + pula a compute interna; 5 = + pula CopyTextureRegion */
 static void *volatile internal_rs; /* root signature "k12 + tab[SRV 1, UAV 1]" (compute interna do Azimuth) */
 
 /* forma da root signature da compute interna do Azimuth (resolve/conversao 1920x1080 + copia, suspeita do page fault) */
@@ -759,6 +759,12 @@ static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D
     gg_trace_add(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
     log_new_site(l, GG_OP_COPY_TEXTURE, NULL, arg, f, n);
     check_copytex(dst, x, y, z, src, box);
+    if (gg_trace_on == 5) {         /* EXPERIMENTO D3D12Debug=7 (17_fm6.txt PASSO 27): nenhuma copia chega a GPU */
+        static volatile LONG skipped;
+        LONG k = InterlockedIncrement(&skipped);
+        if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: CopyTextureRegion #%ld pulado", k);
+        return;
+    }
     real_copytex(l, dst, x, y, z, src, box);
 }
 
