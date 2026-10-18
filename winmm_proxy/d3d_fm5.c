@@ -1501,18 +1501,21 @@ static void fm6_om_views(fm6_om *st, int add)
     }
 }
 
-/* FromBatch num diferido: guarda o recurso estacionado (o bundle aninhado le os estagios 5/1/2/3 pelos remaps) */
-static void fm6_res_note(void *ctx, int srv, UINT stage, UINT slot, void *obj)
+/* CB/SRV ligados num diferido (Set* padrao, SetFast*, FromBatch): o bundle aninhado le pelos remaps os do
+   juntador (estagios 5/1/2/3 estacionados e o proprio PS, 17_fm6.txt PASSO 42/43) */
+static void fm6_res_note(void *ctx, int srv, UINT stage, UINT start, UINT n, void *const *objs)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
-    if (!d || stage >= 6 || slot >= (srv ? 128u : 14u)) return;
-    if (srv) {
-        d->st.srv[stage][slot] = obj;
-        if (slot >= d->st.nsrv[stage]) d->st.nsrv[stage] = (uint8_t)(slot + 1);
-    } else {
-        d->st.cb[stage][slot] = obj;
-        if (slot >= d->st.ncb[stage]) d->st.ncb[stage] = (uint8_t)(slot + 1);
+    UINT i, max = srv ? 128u : 14u;
+    if (!d || stage >= 6 || start >= max) return;
+    if (n > max - start) n = max - start;
+    for (i = 0; i < n; i++) {
+        void *o = objs ? objs[i] : NULL;
+        if (srv) d->st.srv[stage][start + i] = o;
+        else d->st.cb[stage][start + i] = o;
     }
+    if (srv && start + n > d->st.nsrv[stage]) d->st.nsrv[stage] = (uint8_t)(start + n);
+    if (!srv && start + n > d->st.ncb[stage]) d->st.ncb[stage] = (uint8_t)(start + n);
 }
 
 static int fm6_om_has_res(const fm6_om *st)
@@ -1718,8 +1721,14 @@ static const struct { uint8_t slot; long (*imm)(void), (*def)(void); } fm6_ctx_t
    (ctx, start, (packed >> 19) + 1, ppViews) -> aqui o mesmo, no metodo do Azimuth da tabela em [ctx] (imediata ou
    diferida). */
 typedef void (*set_srvs_fn)(void *ctx, UINT start, UINT n, void *const *views);
-#define FM6_SET_SRVS(s)                                                                                 static void fm6_set_srvs_##s(void *ctx, void *const *views, UINT start, UINT packed)                {                                                                                                       ((set_srvs_fn)(*(void ***)ctx)[fm6_ctx_slot(s)])(ctx, start, (packed >> 19) + 1, views);        }
-FM6_SET_SRVS(0x0a) FM6_SET_SRVS(0x1a) FM6_SET_SRVS(0x20) FM6_SET_SRVS(0x3c) FM6_SET_SRVS(0x40) FM6_SET_SRVS(0x44)
+#define FM6_SET_SRVS(s, stage) \
+    static void fm6_set_srvs_##s(void *ctx, void *const *views, UINT start, UINT packed) \
+    { \
+        fm6_res_note(ctx, 1, stage, start, (packed >> 19) + 1, views); \
+        ((set_srvs_fn)(*(void ***)ctx)[fm6_ctx_slot(s)])(ctx, start, (packed >> 19) + 1, views); \
+    }
+FM6_SET_SRVS(0x0a, 4) FM6_SET_SRVS(0x1a, 0) FM6_SET_SRVS(0x20, 3) FM6_SET_SRVS(0x3c, 1) FM6_SET_SRVS(0x40, 2)
+FM6_SET_SRVS(0x44, 5)
 static const struct { uint8_t slot; void *fn; } fm6_ctx_srvs[] = {
     { 0x0a, (void *)fm6_set_srvs_0x0a }, { 0x1a, (void *)fm6_set_srvs_0x1a }, { 0x20, (void *)fm6_set_srvs_0x20 },
     { 0x3c, (void *)fm6_set_srvs_0x3c }, { 0x40, (void *)fm6_set_srvs_0x40 }, { 0x44, (void *)fm6_set_srvs_0x44 },
@@ -1737,6 +1746,40 @@ static void *const fm6_ctx_fast[] = {
     (void *)ctx_HSSetFastConstantBuffer, (void *)ctx_HSSetFastShaderResource, (void *)ctx_HSSetFastSampler,
     (void *)ctx_DSSetFastConstantBuffer, (void *)ctx_DSSetFastShaderResource, (void *)ctx_DSSetFastSampler,
     (void *)ctx_IASetFastVertexBuffer, (void *)ctx_IASetFastIndexBuffer,
+};
+
+/* CB padrao (Azimuth fm6_stage_cb, FM6 = +1) e SetFast* de CB/SRV no diferido: anotam para a heranca e repassam */
+#define FM6_DEF_CB(stage) \
+    static void fm6_def_set_cbs_##stage(void *ctx, UINT start, UINT n, void *const *cbs) \
+    { \
+        fm6_res_note(ctx, 0, stage, start, n, cbs); \
+        ((set_fn)fm6_az_fn(ctx, fm6_stage_cb[stage]))(ctx, start, n, cbs); \
+    }
+FM6_DEF_CB(0) FM6_DEF_CB(1) FM6_DEF_CB(2) FM6_DEF_CB(3) FM6_DEF_CB(4) FM6_DEF_CB(5)
+static void *const fm6_def_cbs[6] = {
+    (void *)fm6_def_set_cbs_0, (void *)fm6_def_set_cbs_1, (void *)fm6_def_set_cbs_2,
+    (void *)fm6_def_set_cbs_3, (void *)fm6_def_set_cbs_4, (void *)fm6_def_set_cbs_5,
+};
+#define FM6_DEF_FAST(name, srv, stage) \
+    static void fm6_def_##name(void *ctx, UINT slot, void *obj) \
+    { \
+        fm6_res_note(ctx, srv, stage, slot, 1, &obj); \
+        ctx_##name(ctx, slot, obj); \
+    }
+FM6_DEF_FAST(PSSetFastConstantBuffer, 0, 4) FM6_DEF_FAST(PSSetFastShaderResource, 1, 4)
+FM6_DEF_FAST(VSSetFastConstantBuffer, 0, 0) FM6_DEF_FAST(VSSetFastShaderResource, 1, 0)
+FM6_DEF_FAST(GSSetFastConstantBuffer, 0, 3) FM6_DEF_FAST(GSSetFastShaderResource, 1, 3)
+FM6_DEF_FAST(CSSetFastConstantBuffer, 0, 5) FM6_DEF_FAST(CSSetFastShaderResource, 1, 5)
+FM6_DEF_FAST(HSSetFastConstantBuffer, 0, 1) FM6_DEF_FAST(HSSetFastShaderResource, 1, 1)
+FM6_DEF_FAST(DSSetFastConstantBuffer, 0, 2) FM6_DEF_FAST(DSSetFastShaderResource, 1, 2)
+/* na ordem do fm6_ctx_fast (CB, SRV, sampler por estagio); NULL = sem anotacao */
+static void *const fm6_def_fast[18] = {
+    (void *)fm6_def_PSSetFastConstantBuffer, (void *)fm6_def_PSSetFastShaderResource, NULL,
+    (void *)fm6_def_VSSetFastConstantBuffer, (void *)fm6_def_VSSetFastShaderResource, NULL,
+    (void *)fm6_def_GSSetFastConstantBuffer, (void *)fm6_def_GSSetFastShaderResource, NULL,
+    (void *)fm6_def_CSSetFastConstantBuffer, (void *)fm6_def_CSSetFastShaderResource, NULL,
+    (void *)fm6_def_HSSetFastConstantBuffer, (void *)fm6_def_HSSetFastShaderResource, NULL,
+    (void *)fm6_def_DSSetFastConstantBuffer, (void *)fm6_def_DSSetFastShaderResource, NULL,
 };
 
 /* UpdateSubresource (FM6 0x31 = Azimuth 0x30) de um placement buffer num contexto diferido (game+0x207247): o
@@ -1857,7 +1900,7 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
         }
         ((set_fn)(*(void ***)ctx)[hdr & FM6_BATCH_SRV_FLAG ? fm6_stage_srv[stage] : fm6_stage_cb[stage]])
             (ctx, slot, 1, &obj);
-        fm6_res_note(ctx, !!(hdr & FM6_BATCH_SRV_FLAG), stage, slot, obj);
+        fm6_res_note(ctx, !!(hdr & FM6_BATCH_SRV_FLAG), stage, slot, 1, &obj);
         p += n;
     }
 }
@@ -2036,10 +2079,8 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
         }
         ReleaseSRWLockExclusive(&fm6_cl_lock);
         if (!ok) wlog("d3d: ExecuteCommandList aninhado no diferido %p: sem memoria; lista %p perdida", ctx, cl);
-        if (!restore) {
-            ((void (*)(void *))az[AZ_SLOT_CLEAR])(ctx);
-            fm6_om_reset(ctx);
-        }
+        /* restore FALSE no aninhado NAO limpa o juntador: no console o aninhado e um salto de command buffer e os
+           registros continuam; o FM6 liga OM/PS uma vez e aninha varios bundles em seguida (17_fm6.txt PASSO 43) */
         fm6_nest_note(ctx, cl);
         if (InterlockedIncrement(&logged) <= 8)
             wlog("d3d: ExecuteCommandList aninhado no diferido %p: lista %p (restore %d) -> parte %p, %d pendentes",
@@ -2203,8 +2244,11 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
     for (i = 0; i < sizeof fm6_ctx_srvs / sizeof *fm6_ctx_srvs; i++) dst[fm6_ctx_srvs[i].slot] = fm6_ctx_srvs[i].fn;
     for (i = 0; i < sizeof fm6_ctx_fast / sizeof *fm6_ctx_fast; i++) {
         int s = FM6_FAST_FIRST + (int)i, a = fm6_ctx_slot(s);
-        if (src[a] == g_base + RVA_STUB_SLOT(a)) dst[s] = fm6_ctx_fast[i];
+        if (src[a] == g_base + RVA_STUB_SLOT(a))
+            dst[s] = deferred && i < 18 && fm6_def_fast[i] ? fm6_def_fast[i] : fm6_ctx_fast[i];
     }
+    if (deferred)
+        for (i = 0; i < 6; i++) dst[fm6_stage_cb[i] + 1] = fm6_def_cbs[i];   /* Azimuth 8..0x8c = FM6 - 1 */
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
     if (deferred) {   /* heranca do OM no aninhado: acompanha RT/DS, viewports e scissors de cada diferido */
         dst[0x22] = (void *)fm6_def_OMSetRenderTargets;

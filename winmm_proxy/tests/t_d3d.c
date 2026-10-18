@@ -1098,7 +1098,7 @@ TEST(fm6_nested_command_lists)
     ((exec_fn)def[0x3b])(dctx, w2, TRUE);                    /* parte p2 + w2, estado mantido */
     CHECK_EQ(exec_n, 0);
     CHECK(finish_n == 2 && finish_restore[0] == TRUE && finish_restore[1] == TRUE);
-    CHECK_EQ(clear_n, 1);
+    CHECK_EQ(clear_n, 0);                                    /* restore FALSE no aninhado nao limpa (PASSO 43) */
     CHECK(w1->ref == 2 && w2->ref == 2);
     p1 = &cl_pool[2];
     p2 = &cl_pool[3];
@@ -1184,6 +1184,7 @@ static void inh_res(void *c, UINT s, UINT n, void *const *v, UINT slot)
 }
 static void inh_res_47(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x47); }
 static void inh_res_43(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x43); }
+static void inh_res_09(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x09); }
 static void inh_remap(void *c, UINT ds, UINT dslot, UINT ss, UINT sslot)
 {
     (void)c;
@@ -1273,26 +1274,34 @@ TEST(fm6_nested_bundle_inherits_om)
     part = &cl_pool[cl_used - 1];
     CHECK(rtv.ref == 2 && dsv.ref == 2 && cbv.ref == 2 && srvv.ref == 2);   /* views seguras pela copia */
     CHECK(log_has("<- bundle"));
-    CHECK(fm6_dctx_find(j)->st.nrtv == 0 && fm6_dctx_find(j)->st.nsrv[5] == 0);   /* restore FALSE: juntador zerado */
-    /* depois do ClearState do aninhado, outro bundle nao herda nada */
+    CHECK(fm6_dctx_find(j)->st.nrtv == 1 && fm6_dctx_find(j)->st.nsrv[5] == 4);   /* restore FALSE: juntador mantem */
+    /* PS SRV pelo Set* padrao (forma empacotada do FM6: slot 2, 1 view) tambem entra */
+    {
+        void *ps[1] = { &srvv };
+        az_tab[0x09] = (void *)inh_res_09;
+        ((void (*)(void *, void *const *, UINT, UINT))def[0x0a])(j, ps, 2, 0);
+        CHECK(fm6_dctx_find(j)->st.nsrv[4] == 3 && fm6_dctx_find(j)->st.srv[4][2] == &srvv);
+    }
+    /* outro bundle aninhado em seguida herda o mesmo estado (o FM6 nao religa o OM entre os aninhados) */
     b2 = new_cl();
     b2->state = NULL;
     *(void **)(inh_ctx[0] + AZ_CTX_D3D12_LIST) = NULL;
     ((exec_fn)def[0x3b])(j, b2, FALSE);
+    CHECK(rtv.ref == 3 && srvv.ref == 4);
     CHECK(((fin_fn)def[0x73])(j, FALSE, &out) == 0);
     f = out;
     inh_om_n = inh_vp_n = inh_sc_n = inh_res_n = 0;
     ((exec_fn)imm[0x3b])(inh_ctx[2], f, FALSE);
-    /* no imediato: CB e SRV do CS de 0 ate o ultimo slot estacionado, antes do bundle */
-    CHECK(inh_res_n == 2 && inh_res_ctx == inh_ctx[2] && inh_res_slot == 0x43 && inh_res_start == 0);
+    /* no imediato: CB e SRV de 0 ate o ultimo slot ligado, antes de cada bundle (o 2o tambem com o PS) */
+    CHECK(inh_res_n == 2 + 3 && inh_res_ctx == inh_ctx[2] && inh_res_slot == 0x43 && inh_res_start == 0);
     CHECK(inh_res_cnt == 4 && inh_res_last == &srvv);
     CHECK(log_has("1 viewports, 1 scissors, 3 slots de CB e 4 de SRV estacionados"));
     CHECK_EQ(exec_n, 4);
     CHECK(exec_cl[0] == part && exec_cl[1] == b && exec_cl[2] == b2 && exec_cl[3] == f);
-    CHECK(inh_om_n == 1 && inh_om_ctx == inh_ctx[2] && inh_om_rts == 1 && inh_om_rtv0 == &rtv && inh_om_dsv == &dsv);
-    CHECK(inh_vp_n == 1 && inh_sc_n == 1);
+    CHECK(inh_om_n == 2 && inh_om_ctx == inh_ctx[2] && inh_om_rts == 1 && inh_om_rtv0 == &rtv && inh_om_dsv == &dsv);
+    CHECK(inh_vp_n == 2 && inh_sc_n == 2);
     CHECK(log_has("bundle aninhado executa com o OM do juntador (1 RTs"));
-    CHECK(rtv.ref == 2);                                                 /* f ainda segura a copia */
+    CHECK(rtv.ref == 3);                                                 /* f ainda segura as copias */
     CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);
     CHECK(rtv.ref == 1 && dsv.ref == 1 && cbv.ref == 1 && srvv.ref == 1);
     /* ClearState do jogo no juntador zera o acompanhado */
