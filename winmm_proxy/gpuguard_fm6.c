@@ -705,14 +705,18 @@ static void log_new_site(void *cl, uint32_t op, void *rs, void *pso, const uint3
     wlog("%s", buf);
 }
 
-/* registra a operacao na lista (rastreio + 1o uso do ponto); devolve a root signature usada */
-static void *trace_op(ID3D12GraphicsCommandList *l, uint32_t op, int compute, const uint32_t *arg)
+/* registra a operacao na lista (rastreio + 1o uso do ponto); devolve a root signature usada e, em `direct`, se a
+   pilha passa pelo jogo (draw gravado na thread do jogo; os do replayer do Azimuth vem da thread da fila) */
+static void *trace_op(ID3D12GraphicsCommandList *l, uint32_t op, int compute, const uint32_t *arg, int *direct)
 {
     void *f[GG_SITE_FRAMES], *rs = op == GG_OP_COPY_TEXTURE ? NULL : gg_cl_rs(l, compute, NULL, 0);
     void *pso = op == GG_OP_COPY_TEXTURE ? NULL : gg_cl_rs(l, GG_CL_PSO, NULL, 0);
-    uint32_t n = known_frames(f, GG_SITE_FRAMES);
+    uint32_t n = known_frames(f, GG_SITE_FRAMES), i;
     gg_trace_add(l, op, rs, pso, arg, f, n);
     log_new_site(l, op, rs, pso, arg, f, n);
+    if (direct)
+        for (*direct = 0, i = 0; i < n; i++)
+            if (g_fm6_game && (uint8_t *)f[i] >= g_fm6_game && (uint8_t *)f[i] < g_fm6_game + 0x8000000) *direct = 1;
     return rs;
 }
 
@@ -726,7 +730,7 @@ static void skip_note(volatile LONG *ctr, const char *what)
 static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x, UINT y, UINT z)
 {
     uint32_t arg[3] = { x, y, z };
-    void *rs = trace_op(l, GG_OP_DISPATCH, 1, arg);
+    void *rs = trace_op(l, GG_OP_DISPATCH, 1, arg, NULL);
     if (gg_trace_on == 2 && rs && rs == internal_rs) {
         static volatile LONG skipped;
         LONG k = InterlockedIncrement(&skipped);
@@ -741,22 +745,36 @@ static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x
     real_dispatch(l, x, y, z);
 }
 
-/* draws: EXPERIMENTO D3D12Debug=8 (17_fm6.txt PASSO 28) = nenhum chega a GPU */
-static volatile LONG draws_skipped;
+/* draws: EXPERIMENTO D3D12Debug=8 (17_fm6.txt PASSO 28) = nao chegam a GPU; DrawSkip no .ini escolhe quais:
+   0 = todos, 1 = so os diretos (pilha no jogo), 2 = so os do replayer; 3/4/5 = so ExecuteIndirect/DrawInstanced/
+   DrawIndexedInstanced do replayer */
+static volatile LONG draws_skipped[2];   /* replayer, direto */
+int gg_draw_skip;
+
+int gg_skip_draw(int direct, uint32_t op)
+{
+    static const uint32_t only[3] = { GG_OP_EXECUTE_INDIRECT, GG_OP_DRAW, GG_OP_DRAW_INDEXED };
+    if (gg_trace_on != 6 || (gg_draw_skip == 1 && !direct) || (gg_draw_skip >= 2 && direct)) return 0;
+    if (gg_draw_skip >= 3 && gg_draw_skip <= 5 && op != only[gg_draw_skip - 3]) return 0;
+    skip_note(&draws_skipped[direct != 0], direct ? "draw direto" : "draw do replayer");
+    return 1;
+}
 
 static void STDMETHODCALLTYPE hook_draw(ID3D12GraphicsCommandList *l, UINT vc, UINT ic, UINT sv, UINT si)
 {
     uint32_t arg[3] = { vc, ic, sv };
-    trace_op(l, GG_OP_DRAW, 0, arg);
-    if (gg_trace_on == 6) { skip_note(&draws_skipped, "draw"); return; }
+    int direct;
+    trace_op(l, GG_OP_DRAW, 0, arg, &direct);
+    if (gg_skip_draw(direct, GG_OP_DRAW)) return;
     real_draw(l, vc, ic, sv, si);
 }
 
 static void STDMETHODCALLTYPE hook_draw_indexed(ID3D12GraphicsCommandList *l, UINT idx, UINT ic, UINT si, INT bv, UINT sinst)
 {
     uint32_t arg[3] = { idx, ic, si };
-    trace_op(l, GG_OP_DRAW_INDEXED, 0, arg);
-    if (gg_trace_on == 6) { skip_note(&draws_skipped, "draw"); return; }
+    int direct;
+    trace_op(l, GG_OP_DRAW_INDEXED, 0, arg, &direct);
+    if (gg_skip_draw(direct, GG_OP_DRAW_INDEXED)) return;
     real_draw_indexed(l, idx, ic, si, bv, sinst);
 }
 
@@ -764,8 +782,9 @@ static void STDMETHODCALLTYPE hook_exec_indirect(ID3D12GraphicsCommandList *l, I
                                                  ID3D12Resource *args, UINT64 off, ID3D12Resource *cnt, UINT64 cnt_off)
 {
     uint32_t arg[3] = { max, (uint32_t)off, cnt != NULL };
-    trace_op(l, GG_OP_EXECUTE_INDIRECT, 0, arg);
-    if (gg_trace_on == 6) { skip_note(&draws_skipped, "draw"); return; }
+    int direct;
+    trace_op(l, GG_OP_EXECUTE_INDIRECT, 0, arg, &direct);
+    if (gg_skip_draw(direct, GG_OP_EXECUTE_INDIRECT)) return;
     real_exec_indirect(l, sig, max, args, off, cnt, cnt_off);
 }
 
@@ -773,7 +792,7 @@ static void STDMETHODCALLTYPE hook_clear_rtv(ID3D12GraphicsCommandList *l, D3D12
                                              UINT n, const D3D12_RECT *rects)
 {
     uint32_t arg[3] = { n, 0, 0 };
-    trace_op(l, GG_OP_CLEAR_RTV, 0, arg);
+    trace_op(l, GG_OP_CLEAR_RTV, 0, arg, NULL);
     real_clear_rtv(l, rtv, color, n, rects);
 }
 
@@ -830,7 +849,7 @@ static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D
                                            UINT z, const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *box)
 {
     uint32_t arg[3] = { x, y, z };
-    trace_op(l, GG_OP_COPY_TEXTURE, 0, arg);
+    trace_op(l, GG_OP_COPY_TEXTURE, 0, arg, NULL);
     check_copytex(dst, x, y, z, src, box);
     if (gg_trace_on == 5) {         /* EXPERIMENTO D3D12Debug=7 (17_fm6.txt PASSO 27): nenhuma copia chega a GPU */
         static volatile LONG skipped;

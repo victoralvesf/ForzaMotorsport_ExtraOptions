@@ -303,8 +303,8 @@ TEST(gpuguard_draw_trace_and_debug8)
     hook_draw(l, 3, 1, 0, 0);
     hook_draw_indexed(l, 36, 2, 6, 0, 0);
     CHECK_EQ(real_draws, 2);
-    CHECK(log_has("gpuguard: experimento: draw #1 pulado"));
-    CHECK(log_has("gpuguard: experimento: draw #2 pulado"));
+    CHECK(log_has("gpuguard: experimento: draw do replayer #1 pulado"));   /* pilha fora do jogo */
+    CHECK(log_has("gpuguard: experimento: draw do replayer #2 pulado"));
     gg_trace_reset(&cl);
     gg_trace_on = saved;
 }
@@ -329,4 +329,36 @@ TEST(gpuguard_debug9_skips_game_dispatch)
     gg_trace_reset(&cl);
     internal_rs = saved_internal;
     gg_trace_on = saved;
+}
+
+/* DrawSkip (com D3D12Debug=8): 0 todos, 1 so os diretos (pilha no jogo), 2 so os do replayer */
+TEST(gpuguard_draw_skip_classes)
+{
+    int saved = gg_trace_on, saved_skip = gg_draw_skip;
+    log_capture();
+    gg_trace_on = 1; gg_draw_skip = 0;
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW));
+    gg_trace_on = 6;
+    CHECK(gg_skip_draw(1, GG_OP_DRAW));
+    CHECK(gg_skip_draw(0, GG_OP_DRAW));
+    gg_draw_skip = 1;
+    CHECK(gg_skip_draw(1, GG_OP_DRAW));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW));
+    gg_draw_skip = 2;
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW));
+    CHECK(gg_skip_draw(0, GG_OP_DRAW));
+    gg_draw_skip = 4;                                          /* so DrawInstanced do replayer */
+    CHECK(gg_skip_draw(0, GG_OP_DRAW));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED));
+    CHECK(!gg_skip_draw(0, GG_OP_EXECUTE_INDIRECT));
+    CHECK(!gg_skip_draw(1, GG_OP_DRAW));
+    gg_draw_skip = 5;
+    CHECK(gg_skip_draw(0, GG_OP_DRAW_INDEXED));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW));
+    gg_draw_skip = 3;
+    CHECK(gg_skip_draw(0, GG_OP_EXECUTE_INDIRECT));
+    CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED));
+    CHECK(log_has("gpuguard: experimento: draw direto #"));
+    gg_trace_on = saved; gg_draw_skip = saved_skip;
 }
