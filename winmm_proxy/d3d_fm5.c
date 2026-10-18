@@ -1328,10 +1328,117 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
     return orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
 }
 
+/* Diagnostico da heranca (17_fm6.txt PASSO 40): no RenderDoc os draws das listas dos workers aninhadas no diferido
+   juntador nao tem RT/DS (OMSetRenderTargets(0) no inicio da command list do D3D12). Registra flags e chamador de
+   cada diferido criado, quantos OMSetRenderTargets* cada um faz e quem gravou cada lista aninhada. So log. */
+typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; } fm6_dctx_info;
+static fm6_dctx_info fm6_dctx[128];
+static volatile LONG fm6_dctx_n;
+static defctx_fn orig_fm6_defctx[3];
+static void *orig_fm6_om, *orig_fm6_om_uav;
+
+static fm6_dctx_info *fm6_dctx_find(const void *ctx)
+{
+    LONG i, n = fm6_dctx_n < 128 ? fm6_dctx_n : 128;
+    for (i = n - 1; i >= 0; i--)
+        if (fm6_dctx[i].ctx == ctx) return &fm6_dctx[i];
+    return NULL;
+}
+
+static long fm6_defctx(int which, void *dev, UINT flags, void **out)
+{
+    static const char *const names[3] = { "CreateDeferredContext", "CreateDeferredContext1", "CreateDeferredContextX" };
+    uintptr_t caller = fm6_game_caller();
+    long hr = orig_fm6_defctx[which](dev, flags, out);
+    if (hr >= 0 && out && *out) {
+        LONG i = InterlockedIncrement(&fm6_dctx_n) - 1;
+        if (i < 128) {
+            fm6_dctx[i].flags = flags;
+            fm6_dctx[i].caller = caller;
+            fm6_dctx[i].idx = (int)i;
+            fm6_dctx[i].ctx = *out;
+        }
+        wlog("d3d: FM6 %s flags=%#x -> diferido d%ld %p, chamador game+%#zx", names[which], flags, i, *out, caller);
+    }
+    return hr;
+}
+static long fm6_defctx0(void *dev, UINT flags, void **out) { return fm6_defctx(0, dev, flags, out); }
+static long fm6_defctx1(void *dev, UINT flags, void **out) { return fm6_defctx(1, dev, flags, out); }
+static long fm6_defctxx(void *dev, UINT flags, void **out) { return fm6_defctx(2, dev, flags, out); }
+
+static void fm6_om_note(void *ctx, UINT n, void *dsv)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (!d) return;
+    InterlockedIncrement(&d->om);
+    if (!n && !dsv) InterlockedIncrement(&d->om_empty);
+}
+
+/* FM6 0x22 OMSetRenderTargets / 0x23 OMSetRenderTargetsAndUnorderedAccessViews do diferido (Azimuth 0x21/0x22) */
+static void fm6_def_OMSetRenderTargets(void *ctx, UINT n, void *const *rtvs, void *dsv)
+{
+    fm6_om_note(ctx, n, dsv);
+    ((void (*)(void *, UINT, void *const *, void *))orig_fm6_om)(ctx, n, rtvs, dsv);
+}
+static void fm6_def_OMSetRenderTargetsUAV(void *ctx, UINT n, void *const *rtvs, void *dsv, UINT s, UINT nu,
+                                          void *const *uavs, const UINT *counts)
+{
+    if (n != 0xffffffff) fm6_om_note(ctx, n, dsv);   /* D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL nao conta */
+    ((void (*)(void *, UINT, void *const *, void *, UINT, UINT, void *const *, const UINT *))orig_fm6_om_uav)(
+        ctx, n, rtvs, dsv, s, nu, uavs, counts);
+}
+
+/* lista devolvida pelo FinishCommandList -> diferido que a gravou (anel) */
+static struct { void *cl, *ctx; } fm6_cl_owner[512];
+static volatile LONG fm6_cl_owner_n;
+
+static void fm6_cl_owner_note(void *cl, void *ctx)
+{
+    LONG i = InterlockedIncrement(&fm6_cl_owner_n) - 1;
+    fm6_cl_owner[i & 511].ctx = ctx;
+    fm6_cl_owner[i & 511].cl = cl;
+}
+
+static void *fm6_cl_owner_find(const void *cl)
+{
+    LONG i, n = fm6_cl_owner_n < 512 ? fm6_cl_owner_n : 512;
+    for (i = 0; i < n; i++)
+        if (fm6_cl_owner[(fm6_cl_owner_n - 1 - i) & 511].cl == cl) return fm6_cl_owner[(fm6_cl_owner_n - 1 - i) & 511].ctx;
+    return NULL;
+}
+
+/* 1a vez de cada par (juntador, worker): flags/chamador dos dois e os OMSetRenderTargets do worker ate agora */
+static void fm6_nest_note(void *ctx, void *cl)
+{
+    static struct { void *j, *w; } seen[64];
+    static volatile LONG nseen;
+    void *w = fm6_cl_owner_find(cl);
+    fm6_dctx_info *dj = fm6_dctx_find(ctx), *dw = w ? fm6_dctx_find(w) : NULL;
+    LONG i, n = nseen < 64 ? nseen : 64;
+    for (i = 0; i < n; i++)
+        if (seen[i].j == ctx && seen[i].w == w) return;
+    i = InterlockedIncrement(&nseen) - 1;
+    if (i >= 64) return;
+    seen[i].j = ctx;
+    seen[i].w = w;
+    wlog("d3d: heranca: aninhado no diferido d%d (flags %#x, game+%#zx, %ld OMSet, %ld vazios) <- lista %p do "
+         "diferido d%d %p (flags %#x, game+%#zx, %ld OMSet, %ld vazios)",
+         dj ? dj->idx : -1, dj ? dj->flags : 0, dj ? dj->caller : 0, dj ? dj->om : 0, dj ? dj->om_empty : 0, cl,
+         dw ? dw->idx : -1, w, dw ? dw->flags : 0, dw ? dw->caller : 0, dw ? dw->om : 0, dw ? dw->om_empty : 0);
+}
+
 static int fm6_device_fixups(void **vt)
 {
     size_t i;
     int n = 0;
+    if (vt[0x1b] != (void *)fm6_defctx0) {
+        orig_fm6_defctx[0] = (defctx_fn)vt[0x1b];
+        vt[0x1b] = (void *)fm6_defctx0;
+        orig_fm6_defctx[1] = (defctx_fn)vt[0x2d];
+        vt[0x2d] = (void *)fm6_defctx1;
+        orig_fm6_defctx[2] = (defctx_fn)vt[0x44];
+        vt[0x44] = (void *)fm6_defctxx;
+    }
     if (vt[5] != (void *)fm6_CreateTexture2D) {
         orig_fm6_create_tex2d = (tex2d_fn)vt[5];
         vt[5] = (void *)fm6_CreateTexture2D;
@@ -1744,6 +1851,7 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
         ReleaseSRWLockExclusive(&fm6_cl_lock);
         if (!ok) wlog("d3d: ExecuteCommandList aninhado no diferido %p: sem memoria; lista %p perdida", ctx, cl);
         if (!restore) ((void (*)(void *))az[AZ_SLOT_CLEAR])(ctx);
+        fm6_nest_note(ctx, cl);
         if (InterlockedIncrement(&logged) <= 8)
             wlog("d3d: ExecuteCommandList aninhado no diferido %p: lista %p (restore %d) -> parte %p, %d pendentes",
                  ctx, cl, restore, part, n);
@@ -1784,6 +1892,7 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
     HRESULT hr = ((finish_fn)(*(void ***)ctx)[AZ_SLOT_FINISH])(ctx, restore, out);
     fm6_chain stale = { 0 }, p;
     if (hr < 0 || !out || !*out) return hr;
+    fm6_cl_owner_note(*out, ctx);
     AcquireSRWLockExclusive(&fm6_cl_lock);
     p = fm6_chain_take(&fm6_pending, ctx);
     stale = fm6_chain_take(&fm6_lists, *out);              /* endereco reaproveitado sem passar pelo Release */
@@ -1907,6 +2016,12 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         if (src[a] == g_base + RVA_STUB_SLOT(a)) dst[s] = fm6_ctx_fast[i];
     }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
+    if (deferred) {   /* diagnostico da heranca: conta os OMSetRenderTargets* de cada diferido */
+        orig_fm6_om = src[0x21];
+        orig_fm6_om_uav = src[0x22];
+        dst[0x22] = (void *)fm6_def_OMSetRenderTargets;
+        dst[0x23] = (void *)fm6_def_OMSetRenderTargetsUAV;
+    }
     if (src[fm6_ctx_slot(FM6_SLOT_SO_SET)] == g_base + RVA_STUB_SLOT(fm6_ctx_slot(FM6_SLOT_SO_SET)))
         dst[FM6_SLOT_SO_SET] = (void *)fm6_SOSetTargets;
     if (src[AZ_SLOT_EXECUTE] != g_base + RVA_STUB_SLOT(AZ_SLOT_EXECUTE))

@@ -1151,6 +1151,68 @@ TEST(fm6_nested_command_lists)
     }
 }
 
+/* diagnostico da heranca (17_fm6.txt PASSO 40): flags/chamador dos diferidos criados, OMSetRenderTargets* por
+   diferido e quem gravou cada lista aninhada */
+static uint8_t inh_ctx[2][0xa000];
+static int inh_made, inh_om_calls, inh_om_uav_calls;
+static long inh_defctx(void *dev, UINT flags, void **out) { (void)dev; (void)flags; *out = inh_ctx[inh_made++ & 1]; return 0; }
+static void inh_om(void *c, UINT n, void *const *r, void *d) { (void)c; (void)n; (void)r; (void)d; inh_om_calls++; }
+static void inh_om_uav(void *c, UINT n, void *const *r, void *d, UINT s, UINT nu, void *const *u, const UINT *k)
+{
+    (void)c; (void)n; (void)r; (void)d; (void)s; (void)nu; (void)u; (void)k;
+    inh_om_uav_calls++;
+}
+
+TEST(fm6_inheritance_diagnostics)
+{
+    static void *dev_vt[0x100], *src_tab[0x10e], *imm[0x10e], *def[0x10e], *az_tab[0x10e];
+    typedef long (*mk_fn)(void *, UINT, void **);
+    typedef void (*om_fn)(void *, UINT, void *const *, void *);
+    typedef void (*omu_fn)(void *, UINT, void *const *, void *, UINT, UINT, void *const *, const UINT *);
+    typedef void (*exec_fn)(void *, void *, BOOL);
+    typedef HRESULT (*fin_fn)(void *, BOOL, void **);
+    void *j = NULL, *w = NULL, *wl = NULL, *rtv = &rtv;
+    int i;
+    fake_azimuth(0);
+    for (i = 0; i < 0x100; i++) dev_vt[i] = (void *)(uintptr_t)(0x2000 + i);
+    dev_vt[0x1b] = dev_vt[0x2d] = dev_vt[0x44] = (void *)inh_defctx;
+    fm6_device_fixups(dev_vt);
+    CHECK(dev_vt[0x1b] == (void *)fm6_defctx0 && dev_vt[0x2d] == (void *)fm6_defctx1 && dev_vt[0x44] == (void *)fm6_defctxx);
+    for (i = 0; i < 0x10e; i++) src_tab[i] = (void *)(uintptr_t)(0x1000 + i);
+    src_tab[0x21] = (void *)inh_om;
+    src_tab[0x22] = (void *)inh_om_uav;
+    fm6_ctx_table(imm, src_tab, 0);
+    fm6_ctx_table(def, src_tab, 1);
+    CHECK(def[0x22] == (void *)fm6_def_OMSetRenderTargets && def[0x23] == (void *)fm6_def_OMSetRenderTargetsUAV);
+    CHECK(imm[0x22] == (void *)inh_om && imm[0x23] == (void *)inh_om_uav);   /* imediato sem diagnostico */
+    log_capture();
+    CHECK(((mk_fn)dev_vt[0x1b])(NULL, 0, &j) == 0 && j == inh_ctx[0]);
+    CHECK(((mk_fn)dev_vt[0x44])(NULL, 0x60000, &w) == 0 && w == inh_ctx[1]);
+    CHECK(log_has("FM6 CreateDeferredContext flags=0 -> diferido d"));
+    CHECK(log_has("FM6 CreateDeferredContextX flags=0x60000 -> diferido d"));
+    ((om_fn)def[0x22])(j, 1, &rtv, rtv);
+    ((om_fn)def[0x22])(w, 0, NULL, NULL);
+    ((omu_fn)def[0x23])(w, 0xffffffff, NULL, NULL, 0, 0, NULL, NULL);       /* KEEP: nao conta */
+    CHECK(inh_om_calls == 2 && inh_om_uav_calls == 1);
+    CHECK(fm6_dctx_find(j)->om == 1 && fm6_dctx_find(j)->om_empty == 0);
+    CHECK(fm6_dctx_find(w)->om == 1 && fm6_dctx_find(w)->om_empty == 1);
+    /* lista do worker w aninhada no juntador j */
+    fake_cl_vt[1] = (void *)fake_cl_addref;
+    fake_cl_vt[2] = (void *)fake_cl_release;
+    az_tab[0x3a] = (void *)fake_exec;
+    az_tab[0x6e] = (void *)fake_clear;
+    az_tab[0x72] = (void *)fake_finish;
+    *(void ***)inh_ctx[0] = *(void ***)inh_ctx[1] = az_tab;
+    inh_ctx[0][0xc48] = inh_ctx[1][0xc48] = 1;
+    CHECK(((fin_fn)def[0x73])(w, FALSE, &wl) == 0 && wl);
+    CHECK(fm6_cl_owner_find(wl) == w);
+    ((exec_fn)def[0x3b])(j, wl, FALSE);
+    CHECK(log_has("heranca: aninhado no diferido d"));
+    CHECK(log_has("1 OMSet, 0 vazios) <- lista"));
+    CHECK(log_has("(flags 0x60000, game+0, 1 OMSet, 1 vazios)"));
+    ((fin_fn)def[0x73])(j, FALSE, &wl);                         /* solta as pecas */
+}
+
 /* reexecucao de lista com a execucao anterior ainda na GPU: submete o lote se ela nao saiu e espera a fence */
 static int rx_submits, rx_waits, rx_orig;
 static uint64_t rx_wait_value;
