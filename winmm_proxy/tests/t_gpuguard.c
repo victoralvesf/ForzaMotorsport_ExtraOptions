@@ -480,3 +480,68 @@ TEST(gpuguard_pso_hash_and_debug8_hash_list)
     CHECK_EQ(gg_nskip_hash, 0);
     gg_trace_on = saved; gg_draw_skip = saved_skip;
 }
+
+/* espelho dos descritores: Create*View grava, CopyDescriptors propaga por ranges, slot fora de heap ignorado */
+TEST(gpuguard_descriptor_shadow)
+{
+    static uint8_t a[16 * 32], b[16 * 32];
+    uintptr_t ha = (uintptr_t)a, hb = (uintptr_t)b;
+    gg_desc d = { 0 }, o;
+    D3D12_CPU_DESCRIPTOR_HANDLE dst[2] = { { hb }, { hb + 5 * 32 } }, src[1] = { { ha + 2 * 32 } };
+    UINT dsz[2] = { 2, 1 }, ssz[1] = { 3 };
+    int k;
+    gg_heap_reset();
+    gg_heap_add(ha, 16, 32, 0);
+    gg_heap_add(hb, 16, 32, 0x1000);
+    for (k = 0; k < 4; k++) {
+        d.kind = GG_DK_SRV; d.va = 0x100 + k; d.fmt = (uint16_t)(10 + k);
+        gg_desc_set(ha + (uintptr_t)(2 + k) * 32, &d);
+    }
+    CHECK(gg_desc_get(ha + 3 * 32, &o));
+    CHECK_EQ(o.va, 0x101);
+    CHECK(!gg_desc_get(0x10, &o));                              /* fora de heap */
+    gg_desc_copy(2, dst, dsz, 1, src, ssz, 32);                 /* a[2..4] -> b[0..1] + b[5] */
+    CHECK(gg_desc_get(hb, &o));
+    CHECK_EQ(o.va, 0x100);
+    CHECK(gg_desc_get(hb + 32, &o));
+    CHECK_EQ(o.va, 0x101);
+    CHECK(gg_desc_get(hb + 5 * 32, &o));
+    CHECK_EQ(o.va, 0x102);
+    CHECK_EQ(o.fmt, 12);
+    CHECK(gg_desc_get(hb + 2 * 32, &o));
+    CHECK_EQ(o.kind, GG_DK_NONE);                               /* nao tocado */
+    {
+        char buf[200];
+        o.kind = GG_DK_SRV; o.flags = GG_DF_RESERVED;
+        desc_text(buf, 7, &o);
+        CHECK(strstr(buf, "[7]SRV") && strstr(buf, "RESERVADO"));
+    }
+    gg_heap_reset();
+}
+
+/* estado grafico por lista: tabelas, root views, IB, VBs; Reset limpa */
+TEST(gpuguard_gfx_state)
+{
+    static int cl;
+    gg_gfx g;
+    D3D12_INDEX_BUFFER_VIEW ib = { 0x5000, 600, DXGI_FORMAT_R16_UINT };
+    D3D12_VERTEX_BUFFER_VIEW vb[2] = { { 0x6000, 64, 16 }, { 0x7000, 32, 8 } };
+    gg_gfx_set(&cl, 0, 3, 0xabc0, NULL, 0);
+    gg_gfx_set(&cl, 1, 1, 0x8000, NULL, 0);
+    gg_gfx_set(&cl, 2, 0, 0, &ib, 0);
+    gg_gfx_set(&cl, 3, 1, 0, vb, 2);
+    CHECK(gg_gfx_get(&cl, &g));
+    CHECK_EQ(g.tab[3], 0xabc0);
+    CHECK_EQ(g.va[1], 0x8000);
+    CHECK_EQ(g.ib.SizeInBytes, 600);
+    CHECK_EQ(g.vb[1].BufferLocation, 0x6000);
+    CHECK_EQ(g.vb[2].StrideInBytes, 8);
+    CHECK_EQ(g.vb[0].BufferLocation, 0);
+    gg_gfx_set(&cl, 3, 1, 0, NULL, 1);                          /* desliga o slot 1 */
+    CHECK(gg_gfx_get(&cl, &g));
+    CHECK_EQ(g.vb[1].BufferLocation, 0);
+    gg_gfx_set(&cl, 4, 0, 0, NULL, 0);
+    CHECK(gg_gfx_get(&cl, &g));
+    CHECK_EQ(g.tab[3], 0);
+    CHECK_EQ(g.ib.BufferLocation, 0);
+}

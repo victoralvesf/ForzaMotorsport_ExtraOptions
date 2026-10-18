@@ -28,12 +28,21 @@ extern void wlog(const char *fmt, ...);
 #define GG_MAX_HEAPS 512
 #define GG_MAX_REPORTS 40
 
+/* espelho de um descritor (o que o Create*View gravou no slot) */
+typedef struct { void *res; uint64_t va; uint32_t w, h; uint16_t fmt; uint8_t kind, dim, rdim, flags; } gg_desc;
+
 typedef struct {
     uintptr_t start;
     uint32_t count, inc;
     volatile LONG *bits;
     uint64_t gpu;                 /* inicio no endereco de GPU (heap visivel pela GPU), 0 senao */
+    gg_desc *desc;                /* espelho por slot (NULL se faltou memoria) */
 } gg_heap;
+
+enum { GG_DK_NONE, GG_DK_CBV, GG_DK_SRV, GG_DK_UAV, GG_DK_GUARD_NULL };
+#define GG_DF_RESERVED 1           /* GetHeapProperties falha: recurso reservado (tiled) */
+#define GG_DF_NO_RESOURCE 2        /* view nula */
+void gg_desc_set(uintptr_t h, const gg_desc *d);
 
 static gg_heap heaps[GG_MAX_HEAPS];
 static int nheaps;
@@ -61,11 +70,12 @@ void gg_heap_add(uintptr_t start, uint32_t count, uint32_t inc, uint64_t gpu)
     for (i = 0; i < nheaps; i++) {
         if (heaps[i].start < end && start < heaps[i].start + (uintptr_t)heaps[i].count * heaps[i].inc) {
             free((void *)heaps[i].bits);
+            free(heaps[i].desc);
             heaps[i] = heaps[--nheaps];
             i--;
         }
     }
-    if (nheaps < GG_MAX_HEAPS) heaps[nheaps++] = (gg_heap){ start, count, inc, bits, gpu };
+    if (nheaps < GG_MAX_HEAPS) heaps[nheaps++] = (gg_heap){ start, count, inc, bits, gpu, calloc(count, sizeof(gg_desc)) };
     else free((void *)bits);
     ReleaseSRWLockExclusive(&heap_lock);
 }
@@ -73,7 +83,7 @@ void gg_heap_add(uintptr_t start, uint32_t count, uint32_t inc, uint64_t gpu)
 void gg_heap_reset(void)
 {
     AcquireSRWLockExclusive(&heap_lock);
-    while (nheaps) free((void *)heaps[--nheaps].bits);
+    while (nheaps) { nheaps--; free((void *)heaps[nheaps].bits); free(heaps[nheaps].desc); }
     ReleaseSRWLockExclusive(&heap_lock);
 }
 
@@ -479,6 +489,11 @@ static void write_null(uintptr_t h)
     d.Buffer.NumElements = 1;
     real_srv(g_dev, NULL, &d, (D3D12_CPU_DESCRIPTOR_HANDLE){ h });
     gg_mark(h, 1);
+    {
+        gg_desc g = { 0 };
+        g.kind = GG_DK_GUARD_NULL; g.dim = D3D12_SRV_DIMENSION_BUFFER; g.fmt = DXGI_FORMAT_R32_UINT; g.flags = GG_DF_NO_RESOURCE;
+        gg_desc_set(h, &g);
+    }
 }
 
 /* slot de origem nunca gravado -> relatorio + SRV nulo nele (copia segura) */
@@ -566,24 +581,210 @@ static HRESULT STDMETHODCALLTYPE hook_rootsig(ID3D12Device *dev, UINT mask, cons
     return hr;
 }
 
+/* ---- espelho do conteudo dos descritores (17_fm6.txt PASSO 28): o handle de CPU na AMD nao aponta para os bytes,
+ * entao cada Create*View grava aqui o que foi criado e os CopyDescriptors* propagam; o dump do estado do draw mostra
+ * o que cada tabela tem na hora do draw. ---- */
+
+/* procura o slot (chamado com heap_lock) */
+static gg_desc *desc_slot(uintptr_t h)
+{
+    int i;
+    for (i = 0; i < nheaps; i++) {
+        gg_heap *p = &heaps[i];
+        if (h >= p->start && h < p->start + (uintptr_t)p->count * p->inc && p->desc)
+            return &p->desc[(h - p->start) / p->inc];
+    }
+    return NULL;
+}
+
+void gg_desc_set(uintptr_t h, const gg_desc *d)
+{
+    gg_desc *s;
+    AcquireSRWLockExclusive(&heap_lock);
+    if ((s = desc_slot(h))) *s = *d;
+    ReleaseSRWLockExclusive(&heap_lock);
+}
+
+int gg_desc_get(uintptr_t h, gg_desc *out)
+{
+    gg_desc *s;
+    AcquireSRWLockShared(&heap_lock);
+    if ((s = desc_slot(h))) *out = *s;
+    ReleaseSRWLockShared(&heap_lock);
+    return s != NULL;
+}
+
+/* CopyDescriptors: os ranges de destino e de origem andam juntos, descritor a descritor */
+void gg_desc_copy(UINT nd, const D3D12_CPU_DESCRIPTOR_HANDLE *dst, const UINT *dsz, UINT ns,
+                  const D3D12_CPU_DESCRIPTOR_HANDLE *src, const UINT *ssz, uint32_t inc)
+{
+    UINT di = 0, dj = 0, si = 0, sj = 0;
+    AcquireSRWLockExclusive(&heap_lock);
+    while (di < nd && si < ns) {
+        UINT dn = dsz ? dsz[di] : 1, sn = ssz ? ssz[si] : 1;
+        if (dj >= dn) { di++; dj = 0; continue; }
+        if (sj >= sn) { si++; sj = 0; continue; }
+        {
+            gg_desc *d = desc_slot(dst[di].ptr + (uintptr_t)dj * inc), *s = desc_slot(src[si].ptr + (uintptr_t)sj * inc);
+            if (d) { if (s) *d = *s; else memset(d, 0, sizeof *d); }
+        }
+        dj++; sj++;
+    }
+    ReleaseSRWLockExclusive(&heap_lock);
+}
+
+static void desc_from_resource(gg_desc *g, ID3D12Resource *r)
+{
+    D3D12_HEAP_PROPERTIES hp;
+    D3D12_HEAP_FLAGS hf;
+    if (!r) { g->flags |= GG_DF_NO_RESOURCE; return; }
+    {
+        D3D12_RESOURCE_DESC rd;
+        r->lpVtbl->GetDesc(r, &rd);
+        g->rdim = (uint8_t)rd.Dimension;
+        g->w = (uint32_t)rd.Width; g->h = rd.Height;
+        if (rd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) g->va = r->lpVtbl->GetGPUVirtualAddress(r);
+    }
+    if (FAILED(r->lpVtbl->GetHeapProperties(r, &hp, &hf))) g->flags |= GG_DF_RESERVED;
+}
+
+static const char *const gg_dk_name[] = { "vazio", "CBV", "SRV", "UAV", "nulo(trava)" };
+
+/* uma linha por slot gravado no espelho */
+static int desc_text(char *out, uint32_t i, const gg_desc *d)
+{
+    if (d->kind == GG_DK_NONE) return wsprintfA(out, " [%u]vazio", i);
+    return wsprintfA(out, " [%u]%s d%u f%u res %p r%u %ux%u va 0x%lx%08lx%s%s", i, gg_dk_name[d->kind], d->dim, d->fmt,
+                     d->res, d->rdim, d->w, d->h, (unsigned long)(d->va >> 32), (unsigned long)d->va,
+                     d->flags & GG_DF_RESERVED ? " RESERVADO" : "", d->flags & GG_DF_NO_RESOURCE ? " sem-recurso" : "");
+}
+
+/* ---- estado grafico por lista para o dump: tabelas, root views, IB, VBs ---- */
+#define GG_ROOT_PARAMS 32
+#define GG_DUMP_VBS 8
+typedef struct {
+    void *cl;
+    uint64_t tab[GG_ROOT_PARAMS], va[GG_ROOT_PARAMS];
+    D3D12_INDEX_BUFFER_VIEW ib;
+    D3D12_VERTEX_BUFFER_VIEW vb[GG_DUMP_VBS];
+} gg_gfx;
+static gg_gfx gfx_tab[GG_CL_SLOTS];
+static SRWLOCK gfx_lock = SRWLOCK_INIT;
+
+/* registro da lista (chamado com gfx_lock exclusivo) */
+static gg_gfx *gfx_slot(void *cl)
+{
+    unsigned h = hptr(cl, GG_CL_SLOTS), k;
+    for (k = 0; k < GG_CL_SLOTS; k++, h = (h + 1) & (GG_CL_SLOTS - 1)) {
+        if (gfx_tab[h].cl == cl) return &gfx_tab[h];
+        if (!gfx_tab[h].cl) { memset(&gfx_tab[h], 0, sizeof gfx_tab[h]); gfx_tab[h].cl = cl; return &gfx_tab[h]; }
+    }
+    return NULL;
+}
+
+/* what: 0 = tabela, 1 = root view, 2 = IB, 3 = VBs, 4 = Reset */
+void gg_gfx_set(void *cl, int what, uint32_t i, uint64_t v, const void *views, uint32_t n)
+{
+    gg_gfx *g;
+    AcquireSRWLockExclusive(&gfx_lock);
+    if ((g = gfx_slot(cl))) {
+        if (what == 0 && i < GG_ROOT_PARAMS) g->tab[i] = v;
+        else if (what == 1 && i < GG_ROOT_PARAMS) g->va[i] = v;
+        else if (what == 2) { if (views) g->ib = *(const D3D12_INDEX_BUFFER_VIEW *)views; else memset(&g->ib, 0, sizeof g->ib); }
+        else if (what == 3) {
+            uint32_t k;
+            for (k = 0; k < n && i + k < GG_DUMP_VBS; k++)
+                if (views) g->vb[i + k] = ((const D3D12_VERTEX_BUFFER_VIEW *)views)[k]; else memset(&g->vb[i + k], 0, sizeof g->vb[0]);
+        } else if (what == 4) { memset(g, 0, sizeof *g); g->cl = cl; }
+    }
+    ReleaseSRWLockExclusive(&gfx_lock);
+}
+
+int gg_gfx_get(void *cl, gg_gfx *out)
+{
+    unsigned h = hptr(cl, GG_CL_SLOTS), k;
+    int r = 0;
+    AcquireSRWLockShared(&gfx_lock);
+    for (k = 0; k < GG_CL_SLOTS && gfx_tab[h].cl; k++, h = (h + 1) & (GG_CL_SLOTS - 1))
+        if (gfx_tab[h].cl == cl) { *out = gfx_tab[h]; r = 1; break; }
+    ReleaseSRWLockShared(&gfx_lock);
+    return r;
+}
+
+#define GG_DUMP_SLOTS 24
+
+/* estado completo do draw no log (os primeiros DrawIndexed de cada tipo) */
+static void dump_draw_state(ID3D12GraphicsCommandList *l, const char *what, const uint32_t *arg, uint32_t hash)
+{
+    static gg_gfx g;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    void *rs = gg_cl_rs(l, 0, NULL, 0);
+    char buf[2048];
+    int len;
+    uint32_t i, j;
+    AcquireSRWLockExclusive(&lock);
+    if (!gg_gfx_get(l, &g)) memset(&g, 0, sizeof g);
+    wlog("gpuguard: estado %s (%u,%u,%u) hash %08lx lista %p rs %p; IB va 0x%lx%08lx %u bytes fmt %u", what, arg[0], arg[1],
+         arg[2], (unsigned long)hash, (void *)l, rs, (unsigned long)(g.ib.BufferLocation >> 32), (unsigned long)g.ib.BufferLocation,
+         g.ib.SizeInBytes, (unsigned)g.ib.Format);
+    for (len = 0, i = 0; i < GG_DUMP_VBS; i++)
+        if (g.vb[i].BufferLocation)
+            len += wsprintfA(buf + len, " vb%u 0x%lx%08lx %u/%u", i, (unsigned long)(g.vb[i].BufferLocation >> 32),
+                             (unsigned long)g.vb[i].BufferLocation, g.vb[i].SizeInBytes, g.vb[i].StrideInBytes);
+    wlog("gpuguard:   VBs:%s", len ? buf : " nenhum");
+    for (i = 0; i < GG_ROOT_PARAMS; i++) {
+        if (g.va[i])
+            wlog("gpuguard:   p%u root view va 0x%lx%08lx", i, (unsigned long)(g.va[i] >> 32), (unsigned long)g.va[i]);
+        if (g.tab[i]) {
+            uint32_t n = gg_rs_table(rs, i);
+            uintptr_t cpu = gg_gpu_to_cpu(g.tab[i]);
+            len = wsprintfA(buf, "gpuguard:   p%u tabela gpu 0x%lx%08lx (%u slots):", i, (unsigned long)(g.tab[i] >> 32),
+                            (unsigned long)g.tab[i], n);
+            for (j = 0; cpu && j < n && j < GG_DUMP_SLOTS && len < 1800; j++) {
+                gg_desc d;
+                memset(&d, 0, sizeof d);
+                gg_desc_get(cpu + (uintptr_t)j * res_inc, &d);
+                len += desc_text(buf + len, j, &d);
+            }
+            wlog("%s", buf);
+        }
+    }
+    ReleaseSRWLockExclusive(&lock);
+}
+
 static void STDMETHODCALLTYPE hook_cbv(ID3D12Device *dev, const D3D12_CONSTANT_BUFFER_VIEW_DESC *d, D3D12_CPU_DESCRIPTOR_HANDLE h)
 {
+    gg_desc g = { 0 };
     if (d && d->BufferLocation && !guard_va("CreateConstantBufferView", d->BufferLocation)) d = NULL;
     real_cbv(dev, d, h);
     gg_mark(h.ptr, 1);
+    g.kind = GG_DK_CBV;
+    if (d) { g.va = d->BufferLocation; g.w = d->SizeInBytes; } else g.flags = GG_DF_NO_RESOURCE;
+    gg_desc_set(h.ptr, &g);
 }
 
 static void STDMETHODCALLTYPE hook_srv(ID3D12Device *dev, ID3D12Resource *r, const D3D12_SHADER_RESOURCE_VIEW_DESC *d, D3D12_CPU_DESCRIPTOR_HANDLE h)
 {
+    gg_desc g = { 0 };
     real_srv(dev, r, d, h);
     gg_mark(h.ptr, 1);
+    g.kind = GG_DK_SRV; g.res = r;
+    if (d) { g.dim = (uint8_t)d->ViewDimension; g.fmt = (uint16_t)d->Format; }
+    desc_from_resource(&g, r);
+    if (d && d->ViewDimension == D3D12_SRV_DIMENSION_BUFFER) g.va += d->Buffer.FirstElement * (d->Buffer.StructureByteStride ? d->Buffer.StructureByteStride : 4);
+    gg_desc_set(h.ptr, &g);
 }
 
 static void STDMETHODCALLTYPE hook_uav(ID3D12Device *dev, ID3D12Resource *r, ID3D12Resource *c, const D3D12_UNORDERED_ACCESS_VIEW_DESC *d,
                                        D3D12_CPU_DESCRIPTOR_HANDLE h)
 {
+    gg_desc g = { 0 };
     real_uav(dev, r, c, d, h);
     gg_mark(h.ptr, 1);
+    g.kind = GG_DK_UAV; g.res = r;
+    if (d) { g.dim = (uint8_t)d->ViewDimension; g.fmt = (uint16_t)d->Format; }
+    desc_from_resource(&g, r);
+    gg_desc_set(h.ptr, &g);
 }
 
 static void STDMETHODCALLTYPE hook_copy1(ID3D12Device *dev, UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src,
@@ -593,6 +794,7 @@ static void STDMETHODCALLTYPE hook_copy1(ID3D12Device *dev, UINT n, D3D12_CPU_DE
         UINT i;
         for (i = 0; i < n; i++) check_src(src.ptr + (uintptr_t)i * res_inc);
         gg_mark(dst.ptr, n);
+        gg_desc_copy(1, &dst, &n, 1, &src, &n, res_inc);
     }
     real_copy1(dev, n, dst, src, type);
 }
@@ -605,6 +807,7 @@ static void STDMETHODCALLTYPE hook_copy(ID3D12Device *dev, UINT nd, const D3D12_
         for (i = 0; i < ns; i++)
             for (j = 0; j < (ssz ? ssz[i] : 1); j++) check_src(src[i].ptr + (uintptr_t)j * res_inc);
         for (i = 0; i < nd; i++) gg_mark(dst[i].ptr, dsz ? dsz[i] : 1);
+        gg_desc_copy(nd, dst, dsz, ns, src, ssz, res_inc);
     }
     real_copy(dev, nd, dst, dsz, ns, src, ssz, type);
 }
@@ -632,14 +835,34 @@ static HRESULT STDMETHODCALLTYPE hook_heap(ID3D12Device *dev, const D3D12_DESCRI
 static void STDMETHODCALLTYPE hook_crs(ID3D12GraphicsCommandList *l, ID3D12RootSignature *rs) { gg_cl_rs(l, 1, rs, 1); real_crs(l, rs); }
 static void STDMETHODCALLTYPE hook_grs(ID3D12GraphicsCommandList *l, ID3D12RootSignature *rs) { gg_cl_rs(l, 0, rs, 1); real_grs(l, rs); }
 static void STDMETHODCALLTYPE hook_ctab(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE g) { check_table(l, 1, i, g); real_ctab(l, i, g); }
-static void STDMETHODCALLTYPE hook_gtab(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE g) { check_table(l, 0, i, g); real_gtab(l, i, g); }
+static void STDMETHODCALLTYPE hook_gtab(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE g)
+{
+    check_table(l, 0, i, g);
+    gg_gfx_set(l, 0, i, g.ptr, NULL, 0);
+    real_gtab(l, i, g);
+}
 
 static void STDMETHODCALLTYPE hook_ccbv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_ccbv(l, i, guard_va("SetComputeRootConstantBufferView", va)); }
-static void STDMETHODCALLTYPE hook_gcbv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_gcbv(l, i, guard_va("SetGraphicsRootConstantBufferView", va)); }
+static void STDMETHODCALLTYPE hook_gcbv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va)
+{
+    va = guard_va("SetGraphicsRootConstantBufferView", va);
+    gg_gfx_set(l, 1, i, va, NULL, 0);
+    real_gcbv(l, i, va);
+}
 static void STDMETHODCALLTYPE hook_csrv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_csrv(l, i, guard_va("SetComputeRootShaderResourceView", va)); }
-static void STDMETHODCALLTYPE hook_gsrv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_gsrv(l, i, guard_va("SetGraphicsRootShaderResourceView", va)); }
+static void STDMETHODCALLTYPE hook_gsrv(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va)
+{
+    va = guard_va("SetGraphicsRootShaderResourceView", va);
+    gg_gfx_set(l, 1, i, va, NULL, 0);
+    real_gsrv(l, i, va);
+}
 static void STDMETHODCALLTYPE hook_cuav(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_cuav(l, i, guard_va("SetComputeRootUnorderedAccessView", va)); }
-static void STDMETHODCALLTYPE hook_guav(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va) { real_guav(l, i, guard_va("SetGraphicsRootUnorderedAccessView", va)); }
+static void STDMETHODCALLTYPE hook_guav(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS va)
+{
+    va = guard_va("SetGraphicsRootUnorderedAccessView", va);
+    gg_gfx_set(l, 1, i, va, NULL, 0);
+    real_guav(l, i, va);
+}
 
 /* ---- entrada do IA (17_fm6.txt PASSO 28): o page fault so some sem os DrawIndexedInstanced do replayer; o UMD da
  * AMD poe 0xdeadbeef.. como endereco de slot de vertex buffer sem buffer. Guarda, por PSO, os slots que o input
@@ -891,6 +1114,7 @@ static void STDMETHODCALLTYPE hook_ib(ID3D12GraphicsCommandList *l, const D3D12_
         c = *v; c.BufferLocation = 0; c.SizeInBytes = 0; v = &c;
     }
     gg_ia_state(l, 2, 0, 0, NULL, v && v->BufferLocation);
+    gg_gfx_set(l, 2, 0, 0, v, 0);
     real_ib(l, v);
 }
 
@@ -908,6 +1132,7 @@ static void STDMETHODCALLTYPE hook_vb(ID3D12GraphicsCommandList *l, UINT start, 
         break;
     }
     gg_ia_state(l, 1, start, n, v, 0);
+    gg_gfx_set(l, 3, start, 0, v, n);
     real_vb(l, start, n, v);
 }
 
@@ -1111,6 +1336,11 @@ static void STDMETHODCALLTYPE hook_draw_indexed(ID3D12GraphicsCommandList *l, UI
     trace_op(l, GG_OP_DRAW_INDEXED, 0, arg, &direct);
     uint32_t h = gg_pso_hash(gg_cl_rs(l, GG_CL_PSO, NULL, 0));
     if (!direct) log_pso_hash(h, arg);
+    if (gg_trace_on) {               /* os primeiros de cada tipo: replayer (suspeito) x diretos (funcionam) */
+        static volatile LONG dumped[2];
+        if (InterlockedIncrement(&dumped[direct != 0]) <= (direct ? 4 : 12))
+            dump_draw_state(l, direct ? "DrawIndexedInstanced direto" : "DrawIndexedInstanced do replayer", arg, h);
+    }
     if (gg_skip_draw(direct, GG_OP_DRAW_INDEXED, check_ia(l, GG_OP_DRAW_INDEXED, arg), h)) return;
     real_draw_indexed(l, idx, ic, si, bv, sinst);
 }
@@ -1201,6 +1431,7 @@ static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12
     gg_trace_reset(l);
     gg_cl_rs(l, GG_CL_PSO, ps, 1);
     gg_ia_state(l, 3, 0, 0, NULL, 0);
+    gg_gfx_set(l, 4, 0, 0, NULL, 0);
     return real_reset(l, a, ps);
 }
 
