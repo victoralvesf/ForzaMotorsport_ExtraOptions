@@ -1135,3 +1135,43 @@ TEST(fm6_nested_command_lists)
     ((exec_fn)def[0x3b])(d2ctx, w1, FALSE);
     CHECK(exec_n == 1 && exec_ctx[0] == d2ctx && w1->ref == 1);
 }
+
+/* reexecucao de lista com a execucao anterior ainda na GPU: submete o lote se ela nao saiu e espera a fence */
+static int rx_submits, rx_waits, rx_orig;
+static uint64_t rx_wait_value;
+static uint8_t *rx_fence;
+static void rx_submit(uint8_t *ctx, int why, int flag) { (void)ctx; CHECK(why == 0x10 && flag == 0); rx_submits++; }
+static void rx_wait(uint8_t *fence, uint64_t v) { rx_waits++; rx_wait_value = v; *(uint64_t *)(fence + AZ_FENCE_DONE) = v; }
+static void rx_apply(uint8_t *ctx, uint8_t *cl, int restore, void *ret)
+{
+    (void)ctx; (void)restore; (void)ret;
+    rx_orig++;
+    *(uint64_t *)(*(uint8_t **)(cl + AZ_LIST_STATE) + AZ_STATE_LAST_FENCE) = *(uint64_t *)(rx_fence + AZ_FENCE_SUBMITTED) + 1;
+}
+
+TEST(fm6_reexecuted_list_waits_for_gpu)
+{
+    static uint8_t dev[0x1000], ctx[0xd00], cl[0x60], st[0x300];
+    rx_fence = dev + AZ_DEV_FENCE;
+    *(uint8_t **)(ctx + AZ_CTX_DEVICE) = dev;
+    *(uint8_t **)(cl + AZ_LIST_STATE) = st;
+    az_submit = rx_submit; az_fence_wait = rx_wait; orig_apply_execute = rx_apply;
+    *(uint64_t *)(rx_fence + AZ_FENCE_SUBMITTED) = 10;
+    *(uint64_t *)(rx_fence + AZ_FENCE_DONE) = 9;
+    fm6_apply_execute(ctx, cl, 0, NULL);                     /* 1a execucao: nada a esperar */
+    CHECK(rx_orig == 1 && rx_submits == 0 && rx_waits == 0);
+    CHECK_EQ(*(uint64_t *)(st + AZ_STATE_LAST_FENCE), 11);
+    fm6_apply_execute(ctx, cl, 0, NULL);                     /* mesma lista no mesmo lote: submete e espera 11 */
+    CHECK(rx_orig == 2 && rx_submits == 1 && rx_waits == 1 && rx_wait_value == 11);
+    *(uint64_t *)(rx_fence + AZ_FENCE_SUBMITTED) = 12;       /* lote saiu, GPU ainda no 11 */
+    *(uint64_t *)(rx_fence + AZ_FENCE_DONE) = 11;
+    fm6_apply_execute(ctx, cl, 0, NULL);                     /* anterior em 11... */
+    *(uint64_t *)(rx_fence + AZ_FENCE_SUBMITTED) = 13;
+    fm6_apply_execute(ctx, cl, 0, NULL);                     /* ...agora em 13, ja submetida: so espera */
+    CHECK(rx_orig == 4 && rx_submits == 1 && rx_waits == 2 && rx_wait_value == 13);
+    CHECK(log_has("reexecutada antes da GPU terminar"));
+    *(uint64_t *)(rx_fence + AZ_FENCE_DONE) = 20;
+    fm6_apply_execute(ctx, cl, 0, NULL);                     /* GPU ja passou: direto */
+    CHECK(rx_orig == 5 && rx_waits == 2);
+    orig_apply_execute = NULL; az_submit = NULL; az_fence_wait = NULL;
+}

@@ -840,6 +840,7 @@ extern int winrt_install(void);
 extern int shape_install(void);
 extern int debug12_install(void);
 extern int fm6_batch_install(uint8_t *game);
+extern int fm6_reexec_install(void);
 
 /* EXPERIMENTO D3D12Debug=5 (17_fm6.txt PASSO 24): o criterio 0x14013bae0 de title_storage (so chamado por
    CreatePlacementTexture2D/3D) escolhe recurso reservado (tiled) em vez de committed; com tiled tier 4 vale p/
@@ -926,6 +927,7 @@ static void hook_apply_patches(void *image, const void *options)
         take_tls_template(game);
         implicit_apu_heap("FM6");
         fm6_batch_install(game);
+        fm6_reexec_install();
         fm6_patches(game);
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;

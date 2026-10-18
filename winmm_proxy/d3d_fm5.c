@@ -1798,6 +1798,62 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
     return hr;
 }
 
+/* Reexecucao de lista ainda na GPU (17_fm6.txt PASSO 35): o laco do FM6 (game+0xf96b1) aninha a lista de cada
+   worker; worker sem trabalho novo repete a lista antiga, no mesmo quadro ou no seguinte. O worker do Azimuth
+   (op 0x2e, 0x14011bd40) reenvia as mesmas command lists do D3D12 sem esperar a execucao anterior (erro 553 da
+   debug layer, depois 0x887a0007). O estado da lista guarda a fence da ultima execucao ([estado+0x298]); se a GPU
+   ainda nao passou dela: submete o lote atual se ela ainda nao saiu e espera a fence (o mesmo par submit/espera
+   que o Azimuth ja usa nessa funcao para os dados de upload da lista). */
+extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
+#define RVA_APPLY_EXECUTE   0x11bd40
+#define RVA_SUBMIT          0xdf730
+#define RVA_FENCE_WAIT      0xf2c10
+#define AZ_CTX_DEVICE       0xc40
+#define AZ_LIST_STATE       0x48
+#define AZ_STATE_LAST_FENCE 0x298
+#define AZ_DEV_FENCE        0xcc0
+#define AZ_FENCE_SUBMITTED  0x160
+#define AZ_FENCE_DONE       0x180
+typedef void (*apply_execute_fn)(uint8_t *ctx, uint8_t *cl, int restore, void *ret);
+static apply_execute_fn orig_apply_execute;
+static void (*az_submit)(uint8_t *ctx, int why, int flag);
+static void (*az_fence_wait)(uint8_t *fence, uint64_t value);
+static volatile LONG fm6_reexec_waits;
+
+static void fm6_apply_execute(uint8_t *ctx, uint8_t *cl, int restore, void *ret)
+{
+    uint8_t *st = cl ? *(uint8_t **)(cl + AZ_LIST_STATE) : NULL, *fence = *(uint8_t **)(ctx + AZ_CTX_DEVICE) + AZ_DEV_FENCE;
+    uint64_t last = st ? *(volatile uint64_t *)(st + AZ_STATE_LAST_FENCE) : 0;
+    if (last > *(volatile uint64_t *)(fence + AZ_FENCE_DONE)) {
+        LONG k = InterlockedIncrement(&fm6_reexec_waits);
+        int unsent = *(volatile uint64_t *)(fence + AZ_FENCE_SUBMITTED) < last;
+        if (unsent) az_submit(ctx, 0x10, 0);
+        az_fence_wait(fence, last);
+        if ((k & (k - 1)) == 0)
+            wlog("d3d: lista %p reexecutada antes da GPU terminar a anterior (fence %llu%s) -> espera (#%ld)", cl,
+                 (unsigned long long)last, unsent ? ", lote submetido antes" : "", k);
+    }
+    orig_apply_execute(ctx, cl, restore, ret);
+}
+
+int fm6_reexec_install(void)
+{
+    if (!bytes_match(g_base + RVA_SUBMIT, "48895c24188954241055565741544155", 16) ||
+        !bytes_match(g_base + RVA_FENCE_WAIT, "48895c24185556574881ec00010000", 15)) {
+        wlog("d3d: submit/espera de fence do Azimuth nao conferem; reexecucao sem espera");
+        return 0;
+    }
+    az_submit = (void *)(g_base + RVA_SUBMIT);
+    az_fence_wait = (void *)(g_base + RVA_FENCE_WAIT);
+    if (!hook_function(RVA_APPLY_EXECUTE, "48895c241855565741544155415641574883ec50", 16, (void *)fm6_apply_execute,
+                       (void **)&orig_apply_execute)) {
+        wlog("d3d: execucao de lista do worker (%#x) nao confere; reexecucao sem espera", RVA_APPLY_EXECUTE);
+        return 0;
+    }
+    wlog("d3d: FM6: reexecucao de lista espera a fence da execucao anterior");
+    return 1;
+}
+
 int fm6_batch_install(uint8_t *game)
 {
     static const struct { uint32_t rva; const char *orig; void *fn; } site[2] = {
