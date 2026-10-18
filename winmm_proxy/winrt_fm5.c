@@ -21,6 +21,7 @@
 extern uint8_t *g_base;
 extern void wlog(const char *fmt, ...);
 extern int is_fm5(void);
+extern int is_fm6(void);
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
 extern void abs_jmp(uint8_t *at, const void *to, size_t len);
@@ -294,9 +295,131 @@ static int install_machine_storage(void)
     return 1;
 }
 
+/* ------------------------------------------------------------------------ */
+/* Microsoft.Xbox.GameChat do FM6 (DLL mais nova que a do FH2)                 */
+/* ------------------------------------------------------------------------ */
+/*
+ * O Azimuth serve o GameChat com objetos de tabela: [obj+0x10] = descritor da interface ({+0x10 std::string
+ * nome, +0x30/+0x38 vetor de metodos de 0xa8 bytes}), [obj+0x18] = "TBLEFACE"; a vtable e um banco de stubs
+ * (slot s -> r10d = s) que cai em 0x203b60(slot, &args salvos {this, rdx, r8, r9, pilha...}, retorno,
+ * &xmm1..3 salvos). O descritor segue a DLL do FH2; a do FM6 tem slots a mais (comparacao dos thunks __abi das
+ * duas DLLs, tools\gc_slots.py / gc_fields.py):
+ *   ChatManager (30 -> 33): 17/18 = add/remove de um 6o evento (AudioHardwareFailedHandler, so no FM6);
+ *     19..29 = 17..27 do FH2; 30 = metodo novo (Object) -> IAsyncAction, mesma forma do 22 do FH2; 31/32 = 28/29.
+ *   ChatManagerSettings (30 -> 34): 30/31 get/put UInt32, 32/33 get/put Boolean, novos no fim.
+ *   ChatPerformanceCounters (11 -> 14): 6 tempos (ChatPerformanceTime) em vez de 5 (o 11 vira o 10) e
+ *     12/13 = getters Double novos.
+ *   ChatUser (21 -> 23): 21/22 get/put Single novos.
+ * => no FM6: slots renumerados para o descritor do FH2; os novos respondidos aqui (valores guardados).
+ */
+#define RVA_TABLE_DISPATCH  0x203b60
+#define TABLE_DISPATCH_STOLEN 15   /* push rbx/rbp/rsi/rdi/r12/r14/r15 ; sub rsp,0x60 */
+#define TABLE_MAGIC         0x45434146454c4254ull   /* "TBLEFACE" */
+#define TABLE_METHOD_SIZE   0xa8
+
+typedef uint64_t (*table_dispatch_fn)(uint32_t slot, uint64_t *args, void *ret, double *fargs);
+static table_dispatch_fn orig_table_dispatch;
+
+enum { GC_MANAGER, GC_SETTINGS, GC_COUNTERS, GC_USER, GC_N };
+static const struct { const char *name; uint32_t fh2_slots; } gc_ifaces[GC_N] = {
+    { "__IChatManagerPublicNonVirtuals", 30 },
+    { "__IChatManagerSettingsPublicNonVirtuals", 30 },
+    { "__IChatPerformanceCountersPublicNonVirtuals", 11 },
+    { "__IChatUserPublicNonVirtuals", 21 },
+};
+
+static volatile LONG64 gc_next_token;
+static volatile LONG gc_settings_u32, gc_settings_bool, gc_user_single = 0x3f800000;  /* Single 1.0 */
+static volatile LONG gc_logged[GC_N];
+
+/* interface do GameChat (GC_*) do objeto de tabela, -1 se outro; *slots = slots do descritor */
+static int gc_iface(const uint8_t *obj, uint32_t *slots)
+{
+    const uint8_t *desc;
+    const char *name;
+    size_t len;
+    int i;
+    if (!obj || *(const uint64_t *)(obj + 0x18) != TABLE_MAGIC) return -1;
+    desc = *(const uint8_t *const *)(obj + 0x10);
+    if (!desc) return -1;
+    len = *(const size_t *)(desc + 0x20);
+    name = *(const size_t *)(desc + 0x28) > 15 ? *(const char *const *)(desc + 0x10) : (const char *)(desc + 0x10);
+    for (i = 0; i < GC_N; i++)
+        if (strlen(gc_ifaces[i].name) == len && !memcmp(gc_ifaces[i].name, name, len)) {
+            *slots = (uint32_t)((*(const uint64_t *)(desc + 0x38) - *(const uint64_t *)(desc + 0x30)) /
+                                TABLE_METHOD_SIZE) + 6;
+            return i;
+        }
+    return -1;
+}
+
+/* slot do FM6 -> slot do descritor do FH2; -1 = slot novo, respondido em gc_own() */
+static int gc_route(int iface, uint32_t slot)
+{
+    switch (iface) {
+    case GC_MANAGER:
+        if (slot < 17) return slot;
+        if (slot < 19) return -1;
+        if (slot < 30) return slot - 2;
+        if (slot == 30) return 22;
+        return slot - 3;
+    case GC_SETTINGS: return slot < 30 ? (int)slot : -1;
+    case GC_COUNTERS: return slot < 11 ? (int)slot : slot == 11 ? 10 : -1;
+    case GC_USER:     return slot < 21 ? (int)slot : -1;
+    }
+    return slot;
+}
+
+static uint64_t gc_own(int iface, uint32_t slot, const uint64_t *args, const double *fargs)
+{
+    void *out = (void *)args[1];
+    switch (iface * 64 + slot) {
+    case GC_MANAGER * 64 + 17:                                   /* add_X(handler, out token) */
+        if (!args[2]) return E_POINTER;
+        *(int64_t *)args[2] = InterlockedIncrement64(&gc_next_token);
+        return S_OK;
+    case GC_MANAGER * 64 + 18: return S_OK;                     /* remove_X(token) */
+    case GC_SETTINGS * 64 + 30: if (!out) return E_POINTER; *(uint32_t *)out = (uint32_t)gc_settings_u32; return S_OK;
+    case GC_SETTINGS * 64 + 31: gc_settings_u32 = (LONG)(uint32_t)args[1]; return S_OK;
+    case GC_SETTINGS * 64 + 32: if (!out) return E_POINTER; *(uint8_t *)out = (uint8_t)gc_settings_bool; return S_OK;
+    case GC_SETTINGS * 64 + 33: gc_settings_bool = (uint8_t)args[1]; return S_OK;
+    case GC_COUNTERS * 64 + 12:
+    case GC_COUNTERS * 64 + 13: if (!out) return E_POINTER; *(double *)out = 0.0; return S_OK;
+    case GC_USER * 64 + 21: if (!out) return E_POINTER; *(LONG *)out = gc_user_single; return S_OK;
+    case GC_USER * 64 + 22: gc_user_single = *(const LONG *)&fargs[0]; return S_OK;   /* Single em xmm1 */
+    }
+    return E_NOTIMPL;
+}
+
+static uint64_t gamechat_call(uint32_t slot, uint64_t *args, void *ret, double *fargs)
+{
+    uint32_t slots = 0;
+    int iface = gc_iface((const uint8_t *)args[0], &slots), to;
+    if (iface < 0) return orig_table_dispatch(slot, args, ret, fargs);
+    if (slots != gc_ifaces[iface].fh2_slots) {                  /* descritor inesperado: nao mexe */
+        if (!InterlockedExchange(&gc_logged[iface], 1))
+            wlog("gamechat: %s com %u slots (esperado %u), sem renumerar", gc_ifaces[iface].name, slots,
+                 gc_ifaces[iface].fh2_slots);
+        return orig_table_dispatch(slot, args, ret, fargs);
+    }
+    if (!InterlockedExchange(&gc_logged[iface], 1))
+        wlog("gamechat: %s no layout do FM6 (slots renumerados p/ os %u do FH2)", gc_ifaces[iface].name, slots);
+    to = gc_route(iface, slot);
+    if (to < 0) return gc_own(iface, slot, args, fargs);
+    return orig_table_dispatch((uint32_t)to, args, ret, fargs);
+}
+
+static uint64_t hook_table_dispatch(uint32_t slot, uint64_t *args, void *ret, double *fargs)
+{
+    if (is_fm6()) return gamechat_call(slot, args, ret, fargs);
+    return orig_table_dispatch(slot, args, ret, fargs);
+}
+
 int winrt_install(void)
 {
     return hook_function(RVA_GET_FACTORY, "48895c2420555657" "4881ec20010000", GET_FACTORY_STOLEN,
                          (void *)hook_get_factory, (void **)&orig_get_factory) &&
-           install_template_hook() && install_machine_storage();
+           install_template_hook() && install_machine_storage() &&
+           hook_function(RVA_TABLE_DISPATCH, "40535556574154415641574883ec60", TABLE_DISPATCH_STOLEN,
+                         (void *)hook_table_dispatch, (void **)&orig_table_dispatch);
 }

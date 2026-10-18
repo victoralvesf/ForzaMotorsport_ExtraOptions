@@ -527,6 +527,7 @@ TEST(install_on_real_azimuth)
     /* hooks de d3d/winrt/shape: todos instalados (log "hook %#x instalado") */
     CHECK(log_has("hook 0x12b780 instalado") && log_has("hook 0x1338e0 instalado") && log_has("hook 0x3a290 instalado"));
     CHECK(log_has("hook 0xda9e0 instalado") && log_has("hook 0x9a680 instalado") && log_has("hook 0x208790 instalado"));
+    CHECK(log_has("hook 0x203b60 instalado"));                  /* despacho de tabela (GameChat do FM6) */
     /* LocalSpaceStatics slot 8 (GetForMachineAsync): stub fatal 0x189bd0 -> proxy (winrt_fm5.c) */
     CHECK(*(uint8_t **)(az + 0x2b6628) != az + 0x189bd0 && log_has("patch 0x2b6628: LocalSpaceStatics"));
     dump_log_on_fail();

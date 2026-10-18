@@ -104,3 +104,122 @@ TEST(machine_storage_local_space)
     RemoveDirectoryW(machine);
     machine_space = NULL;
 }
+
+/* ---- GameChat do FM6: slots renumerados p/ o descritor do FH2 do Azimuth ---- */
+static uint32_t disp_slot, disp_calls;
+static uint64_t fake_dispatch(uint32_t slot, uint64_t *args, void *ret, double *fargs)
+{
+    (void)args; (void)ret; (void)fargs;
+    disp_slot = slot; disp_calls++;
+    return 0x77;
+}
+
+/* objeto de tabela {vtbl, classe, descritor, "TBLEFACE"} com descritor {.., +0x10 std::string, +0x30/+0x38} */
+typedef struct { uint64_t pad[2]; const char *name; uint64_t pad2; size_t len, cap; uint8_t *mb, *me; } FakeDesc;
+static uint8_t fake_methods[0xa8 * 40];
+static void fake_table_obj(uint64_t obj[4], FakeDesc *d, const char *name, unsigned slots)
+{
+    memset(d, 0, sizeof *d);
+    d->name = name; d->len = strlen(name); d->cap = 31;
+    d->mb = fake_methods; d->me = fake_methods + 0xa8 * (slots - 6);
+    obj[0] = 0; obj[1] = 0; obj[2] = (uint64_t)d; obj[3] = 0x45434146454c4254ull;
+}
+
+static uint32_t routed(uint64_t *obj, uint32_t slot)
+{
+    uint64_t args[4] = { (uint64_t)obj, 0, 0, 0 };
+    disp_slot = 0xffff; disp_calls = 0;
+    CHECK_EQ(gamechat_call(slot, args, NULL, NULL), 0x77);
+    return disp_slot;
+}
+
+TEST(gamechat_manager_slots)
+{
+    uint64_t obj[4], args[4], tok1 = 0, tok2 = 0;
+    FakeDesc d;
+    orig_table_dispatch = fake_dispatch;
+    log_capture();
+    fake_table_obj(obj, &d, "__IChatManagerPublicNonVirtuals", 30);
+    CHECK_EQ(routed(obj, 6), 6);       /* ChatSettings */
+    CHECK_EQ(routed(obj, 7), 7);
+    CHECK_EQ(routed(obj, 16), 16);     /* 5o evento (remove) */
+    CHECK_EQ(routed(obj, 19), 17);
+    CHECK_EQ(routed(obj, 20), 18);
+    CHECK_EQ(routed(obj, 25), 23);
+    CHECK_EQ(routed(obj, 29), 27);
+    CHECK_EQ(routed(obj, 30), 22);     /* (Object) -> IAsyncAction */
+    CHECK_EQ(routed(obj, 31), 28);
+    CHECK_EQ(routed(obj, 32), 29);     /* ChatPerformanceCounters (game+0xcd20f8) */
+    /* 6o evento: add devolve tokens distintos, remove S_OK, nada chega ao Azimuth */
+    disp_calls = 0;
+    args[0] = (uint64_t)obj; args[1] = 0x1000; args[2] = (uint64_t)&tok1;
+    CHECK_EQ(gamechat_call(17, args, NULL, NULL), S_OK);
+    args[2] = (uint64_t)&tok2;
+    CHECK_EQ(gamechat_call(17, args, NULL, NULL), S_OK);
+    CHECK(tok1 && tok2 && tok1 != tok2);
+    args[2] = 0;
+    CHECK_EQ(gamechat_call(17, args, NULL, NULL), E_POINTER);
+    args[1] = tok1;
+    CHECK_EQ(gamechat_call(18, args, NULL, NULL), S_OK);
+    CHECK_EQ(disp_calls, 0);
+    CHECK(log_has("__IChatManagerPublicNonVirtuals no layout do FM6"));
+}
+
+TEST(gamechat_settings_counters_user)
+{
+    uint64_t obj[4], args[4];
+    FakeDesc d;
+    uint32_t u = 0; uint8_t b = 0; double dbl = 1.0, f[3] = { 0 }; float sf = 0;
+    orig_table_dispatch = fake_dispatch;
+    fake_table_obj(obj, &d, "__IChatManagerSettingsPublicNonVirtuals", 30);
+    CHECK_EQ(routed(obj, 29), 29);
+    args[0] = (uint64_t)obj; args[1] = 1234;
+    CHECK_EQ(gamechat_call(31, args, NULL, NULL), S_OK);          /* put UInt32 */
+    args[1] = (uint64_t)&u;
+    CHECK_EQ(gamechat_call(30, args, NULL, NULL), S_OK);
+    CHECK_EQ(u, 1234);
+    args[1] = 0x101;                                              /* Boolean: so o byte baixo */
+    CHECK_EQ(gamechat_call(33, args, NULL, NULL), S_OK);
+    args[1] = (uint64_t)&b;
+    CHECK_EQ(gamechat_call(32, args, NULL, NULL), S_OK);
+    CHECK_EQ(b, 1);
+    args[1] = 0;
+    CHECK_EQ(gamechat_call(30, args, NULL, NULL), E_POINTER);
+
+    fake_table_obj(obj, &d, "__IChatPerformanceCountersPublicNonVirtuals", 11);
+    CHECK_EQ(routed(obj, 9), 9);                                  /* game+0xcd209c */
+    CHECK_EQ(routed(obj, 10), 10);
+    CHECK_EQ(routed(obj, 11), 10);                                /* 6o tempo */
+    args[0] = (uint64_t)obj; args[1] = (uint64_t)&dbl;
+    CHECK_EQ(gamechat_call(13, args, NULL, NULL), S_OK);
+    CHECK(dbl == 0.0);
+
+    fake_table_obj(obj, &d, "__IChatUserPublicNonVirtuals", 21);
+    CHECK_EQ(routed(obj, 20), 20);
+    args[0] = (uint64_t)obj; args[1] = (uint64_t)&sf;
+    CHECK_EQ(gamechat_call(21, args, NULL, NULL), S_OK);
+    CHECK(sf == 1.0f);                                            /* padrao */
+    *(float *)&f[0] = 0.25f;                                      /* put Single: xmm1 salvo em fargs[0] */
+    CHECK_EQ(gamechat_call(22, args, NULL, f), S_OK);
+    CHECK_EQ(gamechat_call(21, args, NULL, NULL), S_OK);
+    CHECK(sf == 0.25f);
+}
+
+/* outros objetos/interfaces, descritor com outro tamanho: slot intacto */
+TEST(gamechat_passthrough)
+{
+    uint64_t obj[4], args[4] = { 0 };
+    FakeDesc d;
+    orig_table_dispatch = fake_dispatch;
+    log_capture();
+    fake_table_obj(obj, &d, "__IChatPerformanceTimePublicNonVirtuals", 12);
+    CHECK_EQ(routed(obj, 7), 7);
+    fake_table_obj(obj, &d, "__IChatManagerPublicNonVirtuals", 30);
+    obj[3] = 0;                                                   /* sem "TBLEFACE" */
+    CHECK_EQ(routed(obj, 32), 32);
+    CHECK_EQ(gamechat_call(32, args, NULL, NULL), 0x77);          /* this NULL */
+    fake_table_obj(obj, &d, "__IChatUserPublicNonVirtuals", 23);  /* ja no layout novo */
+    gc_logged[GC_USER] = 0;
+    CHECK_EQ(routed(obj, 22), 22);
+    CHECK(log_has("__IChatUserPublicNonVirtuals com 23 slots (esperado 21)"));
+}
