@@ -124,7 +124,7 @@ static void fake_orig_apply(void *image, const void *options) { (void)image; (vo
 /* FM6 (registro carregado = fm6_rec): sites do FH2 nao rodam; outro jogo segue para o original */
 TEST(apply_patches_skips_fm6)
 {
-    static uint8_t game[0x400];                  /* PE sem diretorio TLS */
+    uint8_t *game = VirtualAlloc(NULL, 0xdab000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);   /* PE sem TLS */
     uint8_t *img[1] = { game }, opt[0x40] = { 0 };
     uint8_t *az = fake_azimuth(0);
     ((IMAGE_DOS_HEADER *)game)->e_lfanew = 0x80;
@@ -144,11 +144,13 @@ TEST(apply_patches_skips_fm6)
     CHECK_EQ(*(uint32_t *)(az + RVA_APU_HEAPS + 8), 0x1000000);
     VirtualFree(*(void **)(az + RVA_APU_HEAPS), 0, MEM_RELEASE);
     CHECK(slot0_game == game && slot0_n == 329 && game_tls_pending);   /* sites do slot 0 para o 1o import */
+    CHECK(log_has("montador de batch do FM6 em game+0xda9b94 nao confere"));   /* zerado: nada muda */
     slot0_n = 0; game_tls_pending = 0;
     *(void **)(az + RVA_GAME_RECORD) = NULL;
     hook_apply_patches(img, opt);
     CHECK_EQ(orig_apply_calls, 1);
     orig_apply_patches = NULL;
+    VirtualFree(game, 0, MEM_RELEASE);
 }
 
 /* TLS do FM6: template guardado/zerado na imagem e aplicado no azimuth-tls.dll real (thread atual + nova) */

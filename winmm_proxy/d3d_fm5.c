@@ -1314,6 +1314,8 @@ static int fm6_device_fixups(void **vt)
 
 extern void write_mem(void *dst, const void *src, size_t len);
 extern uint8_t *alloc_near(uint8_t *mod, size_t size);
+extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
+extern void abs_jmp(uint8_t *at, const void *to, size_t len);
 
 static int fm6_ctx_slot(int s)
 {
@@ -1420,6 +1422,105 @@ static void fm6_UpdateSubresource(void *ctx, uint8_t *res, UINT sub, const UINT 
     ((update_sub_fn)(*(void ***)ctx)[fm6_ctx_slot(0x31)])(ctx, res, sub, box, src, rp, dp);
 }
 
+/* Batches de recursos do FM6 (SetFastResourcesFromBatch, FM6 0xd7 = Azimuth 0xd4, stub fatal; game+0xda9ad1). No
+   console o jogo monta o batch sozinho: game+0xda9b94 (CB) e game+0xda9cac (SRV) apontam [ctx+0x40]/[ctx+0x48] do
+   contexto para a memoria do batch (o BeginResourceBatch inline) e gravam pacotes da CE prontos: cabecalho
+   (n - 1) << 16 | offset na CE RAM + o descritor da GPU copiado do objeto (V# de 16 bytes em [buf+0x20], T# de 32
+   em [srv+0x30]); o registro i fica em batch + i * 20 (CB) ou i * 36 (SRV). O FromBatch so copia os pacotes para
+   o stream. Estagio = {5, 1, 2, 3}[i / 14] (CB, slot i % 14) ou [i >> 7] (SRV, slot i & 0x7f), na numeracao do
+   driver: 0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS (bases da CE RAM 0x1c40, 0x2fb0, 0x4320, 0x5690, 0x6a00, 0 dos
+   XXSetFast* do umd). O Azimuth nao tem como voltar do descritor ao objeto -> os dois montadores sao trocados por
+   versoes que gravam no registro (mesmo tamanho) o estagio, o slot e o PONTEIRO do objeto, sem tocar no contexto
+   do Azimuth, e o FromBatch aplica cada registro com o Set* padrao (1 elemento). */
+#define FM6_BATCH_CB       0xda9b94
+#define FM6_BATCH_SRV      0xda9cac
+#define FM6_BATCH_MAGIC    0xf6ba0000u
+#define FM6_BATCH_SRV_FLAG 0x8000u
+#define FM6_BATCH_CB_SIZE  20
+#define FM6_BATCH_SRV_SIZE 36
+#define FM6_BATCH_PM4_NOP  0x80000000u   /* o jogo completa o batch ate 16 bytes com NOPs tipo 2 */
+typedef struct { uint8_t *cb, *srv; uint32_t cb_size, srv_size; } fm6_batch;
+static const uint8_t fm6_batch_stage[4] = { 5, 1, 2, 3 };
+/* Azimuth (layout com o slot 7) por estagio do driver: CB e SRV */
+static const uint8_t fm6_stage_cb[6] = { 0x08, 0x3e, 0x42, 0x17, 0x11, 0x47 };
+static const uint8_t fm6_stage_srv[6] = { 0x19, 0x3b, 0x3f, 0x1f, 0x09, 0x43 };
+
+static void fm6_batch_put(uint8_t *rec, uint32_t hdr, void *obj)
+{
+    memcpy(rec, &hdr, 4);
+    memcpy(rec + 4, &obj, 8);
+}
+
+/* game+0xda9b94(batch, buffer, i) */
+static void fm6_batch_add_cb(fm6_batch *b, void *buf, uint32_t i)
+{
+    if (i * FM6_BATCH_CB_SIZE >= b->cb_size || i / 14 >= 4) return;
+    fm6_batch_put(b->cb + i * FM6_BATCH_CB_SIZE, FM6_BATCH_MAGIC | fm6_batch_stage[i / 14] << 8 | i % 14, buf);
+}
+
+/* game+0xda9cac(batch, srv, i) */
+static void fm6_batch_add_srv(fm6_batch *b, void *srv, uint32_t i)
+{
+    if (i * FM6_BATCH_SRV_SIZE >= b->srv_size || i >> 7 >= 4) return;
+    fm6_batch_put(b->srv + i * FM6_BATCH_SRV_SIZE,
+                  FM6_BATCH_MAGIC | FM6_BATCH_SRV_FLAG | fm6_batch_stage[i >> 7] << 8 | (i & 0x7f), srv);
+}
+
+static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size)
+{
+    const uint8_t *end = p + size;
+    while (p + 4 <= end) {
+        uint32_t hdr, stage, slot, n;
+        void *obj;
+        memcpy(&hdr, p, 4);
+        if (hdr == FM6_BATCH_PM4_NOP) { p += 4; continue; }
+        n = hdr & FM6_BATCH_SRV_FLAG ? FM6_BATCH_SRV_SIZE : FM6_BATCH_CB_SIZE;
+        stage = hdr >> 8 & 0x7f;
+        slot = hdr & 0xff;
+        if ((hdr & 0xffff0000u) != FM6_BATCH_MAGIC || stage >= 6 || p + n > end) {
+            static volatile LONG logged;
+            if (InterlockedIncrement(&logged) <= 8)
+                wlog("d3d: SetFastResourcesFromBatch do FM6: registro desconhecido %#x em +%#x de %u bytes; resto "
+                     "ignorado", hdr, (UINT)(size - (end - p)), size);
+            return;
+        }
+        memcpy(&obj, p + 4, 8);
+        {
+            static volatile LONG logged;
+            LONG k = InterlockedIncrement(&logged);
+            if (k <= 16) {
+                uint8_t *vt = obj ? *(uint8_t **)obj : NULL, *tabs = g_base + RVA_VTBL_TABLES;
+                wlog("d3d: batch do FM6 #%ld: %s estagio %u slot %u obj %p (tipo do Azimuth %d)", k,
+                     hdr & FM6_BATCH_SRV_FLAG ? "SRV" : "CB", stage, slot, obj,
+                     vt >= tabs && vt < tabs + NTYPES * SLOTS * 8 ? (int)((vt - tabs) / (SLOTS * 8)) : -1);
+            }
+        }
+        ((set_fn)(*(void ***)ctx)[hdr & FM6_BATCH_SRV_FLAG ? fm6_stage_srv[stage] : fm6_stage_cb[stage]])
+            (ctx, slot, 1, &obj);
+        p += n;
+    }
+}
+
+int fm6_batch_install(uint8_t *game)
+{
+    static const struct { uint32_t rva; const char *orig; void *fn; } site[2] = {
+        { FM6_BATCH_CB, "48895c240848896c2410488974241857" "4883ec30438d3480418bd8488bfac1e602488be93b7110",
+          (void *)fm6_batch_add_cb },
+        { FM6_BATCH_SRV, "48895c240848896c2410488974241857" "4883ec30418bf0488bda488be98d3cf6c1e7023b7914",
+          (void *)fm6_batch_add_srv },
+    };
+    int i;
+    for (i = 0; i < 2; i++)
+        if (!bytes_match(game + site[i].rva, site[i].orig, strlen(site[i].orig) / 2)) {
+            wlog("d3d: montador de batch do FM6 em game+%#x nao confere; batches sem conversao", site[i].rva);
+            return 0;
+        }
+    for (i = 0; i < 2; i++) abs_jmp(game + site[i].rva, site[i].fn, 14);
+    wlog("d3d: montadores de batch do FM6 (game+%#x CB, game+%#x SRV) -> registros com o objeto", FM6_BATCH_CB,
+         FM6_BATCH_SRV);
+    return 1;
+}
+
 /* monta em dst (0x870 bytes, ja copiados) a tabela do FM6 a partir da tabela do Azimuth src; devolve quantos slots
    triviais do driver entraram no lugar do stub fatal (ou de um slot novo) */
 static int fm6_ctx_table(void **dst, void *const *src, int deferred)
@@ -1443,6 +1544,8 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         if (src[a] == g_base + RVA_STUB_SLOT(a)) dst[s] = fm6_ctx_fast[i];
     }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
+    if (src[fm6_ctx_slot(0xd7)] == g_base + RVA_STUB_SLOT(fm6_ctx_slot(0xd7)))
+        dst[0xd7] = (void *)fm6_SetFastResourcesFromBatch;
     for (s = 0; s < FM6_CTX_SLOTS; s++)
         if (!dst[s]) dst[s] = g_base + RVA_STUB_SLOT(s);       /* novo sem comportamento: nao acontece hoje */
     return n;

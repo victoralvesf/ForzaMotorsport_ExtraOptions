@@ -811,6 +811,7 @@ extern int d3d_install(void);
 extern int winrt_install(void);
 extern int shape_install(void);
 extern int debug12_install(void);
+extern int fm6_batch_install(uint8_t *game);
 
 static void hook_apply_patches(void *image, const void *options)
 {
@@ -820,11 +821,12 @@ static void hook_apply_patches(void *image, const void *options)
         fm5_patches(game, options);
         return;
     }
-    if (is_fm6()) {  /* os sites do registro sao do FH2: so o TLS e o heap da APU por enquanto */
+    if (is_fm6()) {  /* os sites do registro sao do FH2: TLS, heap da APU e batches */
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM6 em %p, sem patches", game);
         take_tls_template(game);
         implicit_apu_heap("FM6");
+        fm6_batch_install(game);
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;
         return;

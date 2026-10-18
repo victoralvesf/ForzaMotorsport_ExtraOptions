@@ -787,8 +787,10 @@ TEST(fm6_context_table_layout)
         for (i = 0; i < 0x10e; i++) src2[i] = (void *)(uintptr_t)(0x1000 + i);
         src2[0xb3] = az + 0xf5f30 + 0xb3 * 0x100;
         src2[0xa1] = az + 0xf5f30 + 0xa1 * 0x100;
+        src2[0xd4] = az + 0xf5f30 + 0xd4 * 0x100;
         CHECK(site_imm(imm2, src2, 0x870) == imm2);
         CHECK(imm2[0xa3] == (void *)0x10a0);                    /* implementado no Azimuth: intacto */
+        CHECK(imm2[0xd7] == (void *)fm6_SetFastResourcesFromBatch && imm[0xd7] == (void *)0x10d4);
         az_tab[0x14] = (void *)fake_set_ib;
         ((void (*)(void *, UINT, void *))imm2[0xb6])(ctx, 1, (void *)0x1b1b);
         CHECK(ib_ctx == ctx && ib_buf == (void *)0x1b1b);
@@ -850,4 +852,92 @@ TEST(fm6_deferred_update_placement_buffer)
         fm6_UpdateSubresource(ctx, res, 0, box, data, 0, 0);
         CHECK(upd_calls == 3 && upd_res == res);
     }
+}
+
+/* Batches de recursos do FM6: montadores do jogo (game+0xda9b94 CB, 0xda9cac SRV) gravam o objeto no registro e o
+   SetFastResourcesFromBatch (FM6 0xd7) aplica com o Set* padrao do Azimuth em [ctx] */
+static int batch_calls;
+static UINT batch_slot[8], batch_start[8], batch_n[8];
+static void *batch_obj[8];
+static void fake_batch_set(void *c, UINT s, UINT n, void *const *v, UINT slot)
+{
+    (void)c;
+    if (batch_calls < 8) {
+        batch_slot[batch_calls] = slot; batch_start[batch_calls] = s; batch_n[batch_calls] = n;
+        batch_obj[batch_calls] = v[0];
+    }
+    batch_calls++;
+}
+static void fake_batch_47(void *c, UINT s, UINT n, void *const *v) { fake_batch_set(c, s, n, v, 0x47); }
+static void fake_batch_3e(void *c, UINT s, UINT n, void *const *v) { fake_batch_set(c, s, n, v, 0x3e); }
+static void fake_batch_43(void *c, UINT s, UINT n, void *const *v) { fake_batch_set(c, s, n, v, 0x43); }
+static void fake_batch_1f(void *c, UINT s, UINT n, void *const *v) { fake_batch_set(c, s, n, v, 0x1f); }
+
+TEST(fm6_resource_batch_records_objects)
+{
+    static uint8_t cb[16 * 20], srv[0x81 * 36];
+    static void *az_tab[0x10e], *ctx[1] = { az_tab }, *o[8][1];
+    fm6_batch b = { cb, srv, sizeof cb, sizeof srv };
+    memset(cb, 0xee, sizeof cb);
+    fake_azimuth(0);
+    fm6_batch_add_cb(&b, o[0], 0);
+    fm6_batch_add_cb(&b, o[3], 3);
+    fm6_batch_add_cb(&b, o[4], 14);                           /* estagio 1 (HS), slot 0 */
+    fm6_batch_add_cb(&b, o[5], 16);                           /* fora do batch: ignorado */
+    CHECK_HEX(cb, "0005baf6");                                /* CS (5) slot 0 */
+    CHECK(*(void **)(cb + 4) == o[0]);
+    CHECK_HEX(cb + 3 * 20, "0305baf6");
+    CHECK(*(void **)(cb + 3 * 20 + 4) == o[3]);
+    CHECK_HEX(cb + 14 * 20, "0001baf6");
+    CHECK(*(void **)(cb + 14 * 20 + 4) == o[4]);
+    fm6_batch_add_srv(&b, o[6], 7);
+    fm6_batch_add_srv(&b, o[7], 0x80);                        /* estagio 1 (HS), slot 0; 0x80 * 36 < 0x81 * 36 */
+    CHECK_HEX(srv + 7 * 36, "0785baf6");
+    CHECK(*(void **)(srv + 7 * 36 + 4) == o[6]);
+    CHECK_HEX(srv + 0x80 * 36, "0081baf6");
+    CHECK(*(void **)(srv + 0x80 * 36 + 4) == o[7]);
+    az_tab[0x47] = (void *)fake_batch_47;
+    az_tab[0x3e] = (void *)fake_batch_3e;
+    az_tab[0x43] = (void *)fake_batch_43;
+    az_tab[0x1f] = (void *)fake_batch_1f;
+    fm6_SetFastResourcesFromBatch(ctx, cb, 20);
+    CHECK_EQ(batch_calls, 1);
+    CHECK(batch_slot[0] == 0x47 && batch_start[0] == 0 && batch_n[0] == 1 && batch_obj[0] == o[0]);
+    batch_calls = 0;
+    fm6_batch_add_cb(&b, o[1], 1);
+    fm6_batch_add_cb(&b, o[2], 2);
+    memcpy(cb + 4 * 20, "\0\0\0\x80\0\0\0\x80\0\0\0\x80", 12);   /* NOPs tipo 2 ate 16 bytes */
+    log_capture();
+    fm6_SetFastResourcesFromBatch(ctx, cb, 4 * 20 + 12);
+    CHECK_EQ(batch_calls, 4);
+    CHECK(!log_has("registro desconhecido"));
+    CHECK(batch_start[3] == 3 && batch_obj[3] == o[3] && batch_obj[2] == o[2]);
+    batch_calls = 0;
+    fm6_SetFastResourcesFromBatch(ctx, srv + 7 * 36, 36);
+    CHECK(batch_calls == 1 && batch_slot[0] == 0x43 && batch_start[0] == 7 && batch_obj[0] == o[6]);
+    batch_calls = 0;
+    fm6_SetFastResourcesFromBatch(ctx, cb + 14 * 20, 20);
+    CHECK(batch_calls == 1 && batch_slot[0] == 0x3e && batch_start[0] == 0);
+    batch_calls = 0;
+    log_capture();
+    fm6_SetFastResourcesFromBatch(ctx, cb + 4 * 20, 20);      /* registro nao gravado: nada */
+    CHECK_EQ(batch_calls, 0);
+    CHECK(log_has("registro desconhecido 0xeeeeeeee"));
+}
+
+TEST(fm6_resource_batch_builders_patched)
+{
+    uint8_t *game = pe_map(FM6_EXE, NULL);
+    void *to;
+    if (!game) { test_skip(FM6_EXE " ausente"); return; }
+    fake_azimuth(0);
+    CHECK(fm6_batch_install(game));
+    CHECK_HEX(game + 0xda9b94, "ff2500000000");
+    memcpy(&to, game + 0xda9b94 + 6, 8);
+    CHECK(to == (void *)fm6_batch_add_cb);
+    CHECK_HEX(game + 0xda9cac, "ff2500000000");
+    memcpy(&to, game + 0xda9cac + 6, 8);
+    CHECK(to == (void *)fm6_batch_add_srv);
+    CHECK(!fm6_batch_install(game));                          /* ja trocado: bytes nao conferem */
+    pe_unmap(game);
 }
