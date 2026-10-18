@@ -1642,10 +1642,21 @@ static int fm6_chain_push(fm6_chain *c, void *item)
 static void fm6_obj_addref(void *obj) { ((release_fn)(*(void ***)obj)[1])(obj); }
 static void fm6_obj_release(void *obj) { ((release_fn)(*(void ***)obj)[2])(obj); }
 
+/* diagnostico do vazamento de listas (17_fm6.txt PASSO 34): referencias nossas vivas em cadeias */
+static volatile LONG fm6_refs_live, fm6_refs_logged;
+
+static void fm6_refs_note(LONG d, const char *why, int chain)
+{
+    LONG v = InterlockedExchangeAdd(&fm6_refs_live, d) + d;
+    if (v >= 64 && (v & (v - 1)) == 0 && InterlockedExchange(&fm6_refs_logged, v) != v)
+        wlog("d3d: %ld referencias de pecas aninhadas vivas (%s, cadeia de %d)", v, why, chain);
+}
+
 static void fm6_chain_free(fm6_chain *c)
 {
     int i;
     for (i = 0; i < c->n; i++) fm6_obj_release(c->items[i]);
+    if (c->n) fm6_refs_note(-c->n, "soltas", c->n);
     free(c->items);
 }
 
@@ -1703,11 +1714,21 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
         AcquireSRWLockExclusive(&fm6_cl_lock);
         p = fm6_chain_get(&fm6_pending, ctx);
         if (p && fm6_chain_push(p, part)) {
+            int before = p->n - 1, inner = 0;
             if ((e = fm6_chain_find(&fm6_lists, cl)) != NULL)
                 for (i = 0; i < e->n; i++)
                     if (fm6_chain_push(p, e->items[i])) fm6_obj_addref(e->items[i]);
             if (fm6_chain_push(p, cl)) fm6_obj_addref(cl);
             n = p->n;
+            inner = e ? e->n : 0;
+            fm6_refs_note(n - before, "aninhado", n);
+            {   /* lista que ja traz cadeia: mostra as primeiras e as cadeias recorde */
+                static volatile LONG shown, longest;
+                if (inner && (InterlockedIncrement(&shown) <= 8 || n > longest)) {
+                    if (n > longest) longest = n;
+                    wlog("d3d: aninhado no diferido %p: lista %p ja tem cadeia de %d -> pendentes %d", ctx, cl, inner, n);
+                }
+            }
         } else
             part = NULL;
         ReleaseSRWLockExclusive(&fm6_cl_lock);
@@ -1766,6 +1787,11 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
         }
     }
     ReleaseSRWLockExclusive(&fm6_cl_lock);
+    if (stale.n) {
+        static volatile LONG k;
+        LONG c = InterlockedIncrement(&k);
+        if ((c & (c - 1)) == 0) wlog("d3d: FinishCommandList: lista %p reaproveitada sem Release, cadeia velha de %d (#%ld)", *out, stale.n, c);
+    }
     if (p.n) wlog("d3d: FinishCommandList do diferido %p: %d pecas aninhadas perdidas", ctx, p.n);
     fm6_chain_free(&p);
     fm6_chain_free(&stale);
