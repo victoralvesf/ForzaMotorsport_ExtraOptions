@@ -131,6 +131,36 @@ uintptr_t gg_gpu_to_cpu(uint64_t g)
     return r;
 }
 
+/* tabela de n slots a partir do handle de GPU g num heap visivel pela GPU: quantos slots nunca foram gravados (-1 fora
+   de heap conhecido); *cpu = handle de CPU do 1o slot. Um lock e uma busca do heap por tabela, bitmap lido de 32 em 32
+   (o check_table pegava o lock e varria os heaps em cada slot: milhares de tabelas por quadro, 17_fm6.txt PASSO 56) */
+int gg_table_unwritten(uint64_t g, uint32_t n, uintptr_t *cpu)
+{
+    int i, r = -1;
+    AcquireSRWLockShared(&heap_lock);
+    for (i = 0; i < nheaps; i++) {
+        gg_heap *p = &heaps[i];
+        uint32_t idx, end;
+        if (!p->gpu || g < p->gpu || g >= p->gpu + (uint64_t)p->count * p->inc) continue;
+        idx = (uint32_t)((g - p->gpu) / p->inc);
+        end = n > p->count - idx ? p->count : idx + n;
+        *cpu = p->start + (uintptr_t)idx * p->inc;
+        for (r = 0; idx < end; ) {
+            uint32_t w = (uint32_t)p->bits[idx / 32];
+            if (idx % 32 == 0 && end - idx >= 32) {
+                if (w != 0xffffffffu) r += 32 - __builtin_popcount(w);
+                idx += 32;
+            } else {
+                if (!(w & (1u << (idx % 32)))) r++;
+                idx++;
+            }
+        }
+        break;
+    }
+    ReleaseSRWLockShared(&heap_lock);
+    return r;
+}
+
 /* tabela so com ranges de UAV (o GS do FM6 grava num UAV que o jogo nao liga, ver gg_null_uavs) */
 int gg_table_uav_only(const D3D12_ROOT_DESCRIPTOR_TABLE1 *t)
 {
@@ -589,8 +619,8 @@ static void check_src(uintptr_t h)
 static void check_table(ID3D12GraphicsCommandList *l, int compute, UINT param, D3D12_GPU_DESCRIPTOR_HANDLE g)
 {
     uint32_t n = gg_rs_table(gg_cl_rs(l, compute, NULL, 0), param), i, bad = 0;
-    uintptr_t cpu = n ? gg_gpu_to_cpu(g.ptr) : 0;
-    if (!cpu) return;
+    uintptr_t cpu = 0;
+    if (!n || gg_table_unwritten(g.ptr, n, &cpu) <= 0) return;   /* caso comum: tudo gravado (ou heap desconhecido) */
     for (i = 0; i < n; i++) {
         uintptr_t h = cpu + (uintptr_t)i * res_inc;
         if (gg_written(h) != 0) continue;

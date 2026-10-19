@@ -51,6 +51,24 @@ TEST(gpuguard_gpu_handle_to_cpu)
     gg_heap_reset();
 }
 
+/* contagem de slots nunca gravados de uma tabela (1 lock por tabela): inicio desalinhado, palavras inteiras e fim do heap */
+TEST(gpuguard_table_unwritten)
+{
+    static uint8_t mem[100 * 32];
+    uintptr_t a = (uintptr_t)mem, cpu = 0;
+    gg_heap_reset();
+    CHECK_EQ(gg_table_unwritten(0x10000000ull, 8, &cpu), (unsigned long long)-1);   /* heap desconhecido */
+    gg_heap_add(a, 100, 32, 0x10000000ull);
+    CHECK_EQ(gg_table_unwritten(0x10000000ull + 3 * 32, 70, &cpu), 70);
+    CHECK_EQ(cpu, a + 3 * 32);
+    gg_mark(a + 3 * 32, 70);                                  /* slots 3..72 */
+    CHECK_EQ(gg_table_unwritten(0x10000000ull + 3 * 32, 70, &cpu), 0);
+    CHECK_EQ(gg_table_unwritten(0x10000000ull, 128, &cpu), 3 + 27);   /* 0..2 e 73..99; passa do fim do heap */
+    CHECK_EQ(gg_table_unwritten(0x10000000ull + 32 * 32, 32, &cpu), 0);   /* palavra inteira gravada */
+    CHECK_EQ(gg_table_unwritten(0x10000000ull + 72 * 32, 2, &cpu), 1);
+    gg_heap_reset();
+}
+
 TEST(gpuguard_table_size)
 {
     D3D12_DESCRIPTOR_RANGE1 r[3] = {
