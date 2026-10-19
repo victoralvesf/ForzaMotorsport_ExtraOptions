@@ -1,0 +1,102 @@
+/*
+ * Testes de stutter_fm6.c: regra de pico, media movel, percentil, maiores esperas de um intervalo, tamanho
+ * aproximado de recurso e instalacao (StutterLog no debug.ini).
+ */
+#include "test.h"
+#include "../stutter_fm6.c"
+
+TEST(stutter_spike_rule)
+{
+    CHECK(!st_is_spike(40, 0));          /* sem historico */
+    CHECK(!st_is_spike(24, 8));          /* abaixo de 25 ms */
+    CHECK(!st_is_spike(28, 16.7));       /* abaixo de 1,8x a media */
+    CHECK(st_is_spike(31, 16.7));
+    CHECK(st_is_spike(90, 33.3));
+}
+
+TEST(stutter_moving_average)
+{
+    static st_avg a;
+    int i;
+    memset(&a, 0, sizeof a);
+    CHECK(st_avg_get(&a) == 0);
+    for (i = 0; i < ST_AVG_N; i++) st_avg_add(&a, 16);
+    CHECK(st_avg_get(&a) > 15.99 && st_avg_get(&a) < 16.01);
+    for (i = 0; i < ST_AVG_N; i++) st_avg_add(&a, 32);   /* janela inteira trocada */
+    CHECK(st_avg_get(&a) > 31.99 && st_avg_get(&a) < 32.01);
+}
+
+TEST(stutter_percentile)
+{
+    float v[100];
+    int i;
+    for (i = 0; i < 100; i++) v[i] = (float)(100 - i);   /* 100..1 */
+    CHECK(st_percentile(v, 100, 99) == 99);
+    CHECK(st_percentile(v, 100, 0) == 1);
+    CHECK(st_percentile(v, 0, 99) == 0);
+}
+
+TEST(stutter_wait_top)
+{
+    uint32_t idx[3], n;
+    void *f[1] = { 0 };
+    st_wait_reset();
+    st_wait_add(100, 5000, 1, 0, f, 0);
+    st_wait_add(150, 9000, 2, 3, f, 0);
+    st_wait_add(200, 7000, 3, 4, f, 0);
+    st_wait_add(250, 20000, 4, 0, f, 0);   /* fora do intervalo */
+    st_wait_add(120, 6000, 5, 5, f, 0);
+    n = st_wait_top(99, 200, idx, 3);
+    CHECK_EQ(n, 3);
+    CHECK_EQ(waits[idx[0]].tid, 2);
+    CHECK_EQ(waits[idx[1]].tid, 3);
+    CHECK_EQ(waits[idx[2]].tid, 5);
+    n = st_wait_top(200, 300, idx, 3);
+    CHECK_EQ(n, 1);
+    CHECK_EQ(waits[idx[0]].us, 20000);
+    st_wait_reset();
+}
+
+TEST(stutter_resource_bytes)
+{
+    D3D12_RESOURCE_DESC d;
+    memset(&d, 0, sizeof d);
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; d.Width = 65536; d.Height = 1; d.DepthOrArraySize = 1;
+    CHECK_EQ(st_res_bytes(&d), 65536);
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width = 1024; d.Height = 512; d.DepthOrArraySize = 6;
+    CHECK_EQ(st_res_bytes(&d), 1024ull * 512 * 6 * 4);
+    CHECK_EQ(st_res_bytes(NULL), 0);
+}
+
+TEST(stutter_off_by_default)
+{
+    dbgini_set(NULL);
+    log_capture();
+    stutter_install();
+    CHECK(!st_on);
+    CHECK(!log_has("stutter:"));
+}
+
+/* StutterLog=1: so troca os slots da IAT que apontam para a funcao real (os outros ficam como estao) */
+TEST(stutter_install_checks_iat)
+{
+    uint8_t *az = fake_azimuth(0);
+    HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
+    void *sleep_fn = (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "Sleep");
+    REQUIRE(dxgi && sleep_fn);
+    *(void **)(az + 0x26f878) = (void *)GetProcAddress(dxgi, "CreateDXGIFactory1");
+    *(void **)(az + 0x26f880) = (void *)GetProcAddress(dxgi, "CreateDXGIFactory2");
+    *(void **)(az + 0x26f320) = sleep_fn;                     /* Sleep */
+    *(void **)(az + 0x26f2b8) = (void *)0x1234;               /* WaitForSingleObject: outro alvo */
+    dbgini_set("[Debug]\nStutterLog=1\n");
+    log_capture();
+    stutter_install();
+    CHECK(st_on);
+    CHECK(*(void **)(az + 0x26f878) == (void *)st_factory1 && *(void **)(az + 0x26f880) == (void *)st_factory2);
+    CHECK(*(void **)(az + 0x26f320) == (void *)st_Sleep && wait_real[5] == sleep_fn);
+    CHECK(*(void **)(az + 0x26f2b8) == (void *)0x1234);
+    CHECK(log_has("stutter: IAT 0x26f2b8 (WaitForSingleObject) nao confere"));
+    CHECK(log_has("1 de 7 esperas do azimuth.exe medidas"));
+    st_on = 0;
+    dbgini_set(NULL);
+}

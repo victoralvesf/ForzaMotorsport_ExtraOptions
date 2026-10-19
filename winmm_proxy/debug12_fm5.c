@@ -28,6 +28,7 @@ extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
 extern int dbg_int(const wchar_t *key, int def);
 extern void wlog(const char *fmt, ...);
 extern void gpuguard_install(IUnknown *dev);
+extern void stutter_device(IUnknown *dev);
 extern void gg_trace_dump(void *cl);
 extern void gg_ring_dump(void);
 extern int gg_trace_on, gg_draw_skip;
@@ -163,7 +164,10 @@ HRESULT WINAPI debug12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level,
     if (g_mode) enable_debug_layer();
     /* o que estiver na IAT agora: d3d12.dll ou o hook do RenderDoc (device embrulhado, capturado com a trava) */
     hr = (*(create_device_fn *)(g_base + RVA_IAT_D3D12_CREATE_DEVICE))(adapter, level, riid, out);
-    if (SUCCEEDED(hr) && out && *out) gpuguard_install((IUnknown *)*out);
+    if (SUCCEEDED(hr) && out && *out) {
+        gpuguard_install((IUnknown *)*out);
+        stutter_device((IUnknown *)*out);   /* StutterLog=1 (stutter_fm6.c); por fora dos hooks do gpuguard */
+    }
     if (!g_mode) return hr;
     if (g_mode >= 3 && SUCCEEDED(hr) && out && *out) {
         static int watching;

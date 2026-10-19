@@ -856,6 +856,7 @@ extern int shape_install(void);
 extern int audio_fm6_install(void);
 extern void audio_fm6_game_hooks(uint8_t *game);
 extern int debug12_install(void);
+extern void stutter_install(void);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
 
@@ -1196,6 +1197,7 @@ static int install(void)
 
     /* 10) diagnostico opcional: debug layer do D3D12 (D3D12Debug no debug.ini, debug12_fm5.c) */
     debug12_install();
+    stutter_install();   /* StutterLog no debug.ini: picos de quadro (stutter_fm6.c) */
     return 1;
 }
 
