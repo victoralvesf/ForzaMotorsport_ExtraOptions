@@ -1417,9 +1417,14 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
    D3D12 do juntador) -> 3384 draws sem RT/DS = cena cinza. O proxy acompanha, por diferido, RT/DS, viewports e
    scissors; no aninhado de um bundle guarda uma copia (views com AddRef) na cadeia, antes do bundle, e o imediato
    aplica a copia (OMSetRenderTargets/RSSetViewports/RSSetScissorRects do Azimuth) antes de executar o bundle.
-   Tambem registra flags/chamador dos diferidos e o dono das listas aninhadas (log). */
+   Tambem registra flags/chamador dos diferidos e o dono das listas aninhadas (log).
+   PASSO 45: o bundle tambem herda depth-stencil (+stencil ref), blend (+fator/mascara) e rasterizer do juntador;
+   sem eles os PSOs do mundo saiam com o padrao do D3D11 (depth Less) sobre a prof limpa em 0 (reversed-Z). */
 #define AZ_SLOT_OM        0x21
 #define AZ_SLOT_OM_UAV    0x22
+#define AZ_SLOT_BLEND     0x23
+#define AZ_SLOT_DEPTH     0x24
+#define AZ_SLOT_RS        0x2b
 #define AZ_SLOT_VIEWPORTS 0x2c
 #define AZ_SLOT_SCISSORS  0x2d
 #define AZ_SLOT_CLEARST   0x6e
@@ -1436,7 +1441,14 @@ typedef struct {
     /* CB/SRV estacionados pelo SetFastResourcesFromBatch (n = ultimo slot ligado + 1, por estagio do driver) */
     uint8_t ncb[6], nsrv[6];
     void *cb[6][14], *srv[6][128];
+    /* estados de pipeline ligados (FM6_HAS_*: NULL ligado = padrao, tambem herdado) */
+    UINT has, stencil_ref, sample_mask;
+    void *blend, *depth, *rs;
+    float blend_factor[4];
 } fm6_om;
+#define FM6_HAS_BLEND 1u
+#define FM6_HAS_DEPTH 2u
+#define FM6_HAS_RS    4u
 typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; fm6_om st; } fm6_dctx_info;
 static fm6_dctx_info fm6_dctx[128];
 static volatile LONG fm6_dctx_n;
@@ -1550,6 +1562,38 @@ static void fm6_def_RSSetScissorRects(void *ctx, UINT n, const RECT *r)
     }
     ((void (*)(void *, UINT, const RECT *))fm6_az_fn(ctx, AZ_SLOT_SCISSORS))(ctx, n, r);
 }
+/* FM6 0x24/0x25/0x2c do diferido (Azimuth 0x23/0x24/0x2b): OMSetBlendState, OMSetDepthStencilState, RSSetState */
+static void fm6_def_OMSetBlendState(void *ctx, void *bs, const float *factor, UINT mask)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (d) {
+        d->st.has |= FM6_HAS_BLEND;
+        d->st.blend = bs;
+        d->st.sample_mask = mask;
+        if (factor) memcpy(d->st.blend_factor, factor, sizeof d->st.blend_factor);
+        else d->st.blend_factor[0] = d->st.blend_factor[1] = d->st.blend_factor[2] = d->st.blend_factor[3] = 1.0f;
+    }
+    ((void (*)(void *, void *, const float *, UINT))fm6_az_fn(ctx, AZ_SLOT_BLEND))(ctx, bs, factor, mask);
+}
+static void fm6_def_OMSetDepthStencilState(void *ctx, void *ds, UINT ref)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (d) {
+        d->st.has |= FM6_HAS_DEPTH;
+        d->st.depth = ds;
+        d->st.stencil_ref = ref;
+    }
+    ((void (*)(void *, void *, UINT))fm6_az_fn(ctx, AZ_SLOT_DEPTH))(ctx, ds, ref);
+}
+static void fm6_def_RSSetState(void *ctx, void *rs)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (d) {
+        d->st.has |= FM6_HAS_RS;
+        d->st.rs = rs;
+    }
+    ((void (*)(void *, void *))fm6_az_fn(ctx, AZ_SLOT_RS))(ctx, rs);
+}
 /* RemapConstantBufferInheritance / RemapShaderResourceInheritance (FM6 0x9f/0xa0 = Azimuth 0x9c/0x9d) do diferido:
    so conta os do bundle (estagio/slot de destino <- origem) e repassa */
 #define AZ_SLOT_REMAP_CB 0x9c
@@ -1588,6 +1632,9 @@ static void fm6_om_views(fm6_om *st, int add)
     UINT i, s;
     for (i = 0; i < st->nrtv; i++) fm6_obj_ref(st->rtv[i], add);
     fm6_obj_ref(st->dsv, add);
+    fm6_obj_ref(st->blend, add);
+    fm6_obj_ref(st->depth, add);
+    fm6_obj_ref(st->rs, add);
     for (s = 0; s < 6; s++) {
         for (i = 0; i < st->ncb[s]; i++) fm6_obj_ref(st->cb[s][i], add);
         for (i = 0; i < st->nsrv[s]; i++) fm6_obj_ref(st->srv[s][i], add);
@@ -1636,7 +1683,7 @@ static fm6_om_item *fm6_om_snapshot(void *ctx)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
     fm6_om_item *o;
-    if (!d || (!d->st.nrtv && !d->st.dsv && !d->st.nvp && !fm6_om_has_res(&d->st))) return NULL;
+    if (!d || (!d->st.nrtv && !d->st.dsv && !d->st.nvp && !d->st.has && !fm6_om_has_res(&d->st))) return NULL;
     if (!(o = malloc(sizeof *o))) return NULL;
     o->vt = fm6_om_item_vt;
     o->ref = 1;
@@ -1655,6 +1702,12 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
         ((void (*)(void *, UINT, void *const *, void *))az[AZ_SLOT_OM])(ctx, o->st.nrtv, o->st.rtv, o->st.dsv);
     if (o->st.nvp) ((void (*)(void *, UINT, const float *))az[AZ_SLOT_VIEWPORTS])(ctx, o->st.nvp, &o->st.vp[0][0]);
     if (o->st.nsc) ((void (*)(void *, UINT, const RECT *))az[AZ_SLOT_SCISSORS])(ctx, o->st.nsc, o->st.sc);
+    if (o->st.has & FM6_HAS_BLEND)
+        ((void (*)(void *, void *, const float *, UINT))az[AZ_SLOT_BLEND])(ctx, o->st.blend, o->st.blend_factor,
+                                                                            o->st.sample_mask);
+    if (o->st.has & FM6_HAS_DEPTH)
+        ((void (*)(void *, void *, UINT))az[AZ_SLOT_DEPTH])(ctx, o->st.depth, o->st.stencil_ref);
+    if (o->st.has & FM6_HAS_RS) ((void (*)(void *, void *))az[AZ_SLOT_RS])(ctx, o->st.rs);
     /* os remaps do bundle resolvem a origem no estado do imediato (pacote 0xc, 0x140111820) */
     for (s = 0; s < 6; s++) {
         if (o->st.ncb[s]) ((set_fn)az[fm6_stage_cb[s]])(ctx, 0, o->st.ncb[s], o->st.cb[s]);
@@ -1664,7 +1717,10 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
     }
     if (InterlockedIncrement(&logged) <= 4)
         wlog("d3d: heranca: bundle aninhado executa com o OM do juntador (%u RTs, DS %p, %u viewports, %u scissors, "
-             "%u slots de CB e %u de SRV estacionados)", o->st.nrtv, o->st.dsv, o->st.nvp, o->st.nsc, ncb, nsrv);
+             "%u slots de CB e %u de SRV estacionados; blend %s%p, depth %s%p ref %u, rs %s%p)", o->st.nrtv, o->st.dsv,
+             o->st.nvp, o->st.nsc, ncb, nsrv, o->st.has & FM6_HAS_BLEND ? "" : "(nao ligado) ", o->st.blend,
+             o->st.has & FM6_HAS_DEPTH ? "" : "(nao ligado) ", o->st.depth, o->st.stencil_ref,
+             o->st.has & FM6_HAS_RS ? "" : "(nao ligado) ", o->st.rs);
 }
 
 /* lista devolvida pelo FinishCommandList -> diferido que a gravou (anel) */
@@ -2353,6 +2409,9 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
     if (deferred) {   /* heranca do OM no aninhado: acompanha RT/DS, viewports e scissors de cada diferido */
         dst[0x2d] = (void *)fm6_def_RSSetViewports;
         dst[0x2e] = (void *)fm6_def_RSSetScissorRects;
+        dst[0x24] = (void *)fm6_def_OMSetBlendState;
+        dst[0x25] = (void *)fm6_def_OMSetDepthStencilState;
+        dst[0x2c] = (void *)fm6_def_RSSetState;
         if (src[AZ_SLOT_REMAP_CB] != g_base + RVA_STUB_SLOT(AZ_SLOT_REMAP_CB)) dst[0x9f] = (void *)fm6_def_RemapCB;
         if (src[AZ_SLOT_REMAP_CB + 1] != g_base + RVA_STUB_SLOT(AZ_SLOT_REMAP_CB + 1)) dst[0xa0] = (void *)fm6_def_RemapSRV;
     }

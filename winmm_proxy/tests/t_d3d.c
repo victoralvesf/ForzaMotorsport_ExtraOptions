@@ -1190,6 +1190,16 @@ static void inh_remap(void *c, UINT ds, UINT dslot, UINT ss, UINT sslot)
     (void)c;
     if (ds == 4 && dslot == 0 && ss == 5 && sslot == 3) inh_remap_n++;
 }
+static int inh_bs_n, inh_ds_n, inh_rs_n;
+static void *inh_bs_ctx, *inh_bs, *inh_ds, *inh_rs;
+static UINT inh_ds_ref, inh_bs_mask;
+static float inh_bs_f0;
+static void inh_bs_fn(void *c, void *s, const float *f, UINT m)
+{
+    inh_bs_n++; inh_bs_ctx = c; inh_bs = s; inh_bs_mask = m; inh_bs_f0 = f ? f[0] : -1.0f;
+}
+static void inh_ds_fn(void *c, void *s, UINT r) { (void)c; inh_ds_n++; inh_ds = s; inh_ds_ref = r; }
+static void inh_rs_fn(void *c, void *s) { (void)c; inh_rs_n++; inh_rs = s; }
 static int inh_om_uav_n;
 static void inh_om_uav(void *c, UINT n, void *const *r, void *d, UINT s, UINT nu, void *const *u, const UINT *k)
 {
@@ -1208,6 +1218,7 @@ TEST(fm6_nested_bundle_inherits_om)
     typedef void (*exec_fn)(void *, void *, BOOL);
     typedef HRESULT (*fin_fn)(void *, BOOL, void **);
     static inh_view rtv = { inh_view_vt, 1 }, dsv = { inh_view_vt, 1 }, cbv = { inh_view_vt, 1 }, srvv = { inh_view_vt, 1 };
+    static inh_view bsv = { inh_view_vt, 1 }, dssv = { inh_view_vt, 1 }, rsv = { inh_view_vt, 1 };
     static uint8_t bcb[14 * 20], bsrv[4 * 36];
     fm6_batch bt = { bcb, bsrv, sizeof bcb, sizeof bsrv };
     void *j = NULL, *w = NULL, *out = NULL, *rtvs[1] = { &rtv };
@@ -1226,6 +1237,9 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(def[0x22] == (void *)fm6_def_OMSetRenderTargets && def[0x23] == (void *)fm6_def_OMSetRenderTargetsUAV);
     CHECK(def[0x2d] == (void *)fm6_def_RSSetViewports && def[0x2e] == (void *)fm6_def_RSSetScissorRects);
     CHECK(def[0x6f] == (void *)fm6_def_ClearState);
+    CHECK(def[0x24] == (void *)fm6_def_OMSetBlendState && def[0x25] == (void *)fm6_def_OMSetDepthStencilState);
+    CHECK(def[0x2c] == (void *)fm6_def_RSSetState);
+    CHECK(imm[0x24] == (void *)0x1023 && imm[0x25] == (void *)0x1024 && imm[0x2c] == (void *)0x102b);
     CHECK(def[0x9f] == (void *)fm6_def_RemapCB && def[0xa0] == (void *)fm6_def_RemapSRV);
     CHECK(imm[0x2d] == (void *)0x102c && imm[0x2e] == (void *)0x102d);   /* imediato: Azimuth */
     CHECK(imm[0x22] == (void *)fm6_def_OMSetRenderTargets && imm[0x6f] == (void *)fm6_def_ClearState);   /* aliasing */
@@ -1234,6 +1248,9 @@ TEST(fm6_nested_bundle_inherits_om)
     az_tab[0x22] = (void *)inh_om_uav;
     az_tab[0x2c] = (void *)inh_vp;
     az_tab[0x2d] = (void *)inh_sc;
+    az_tab[0x23] = (void *)inh_bs_fn;
+    az_tab[0x24] = (void *)inh_ds_fn;
+    az_tab[0x2b] = (void *)inh_rs_fn;
     az_tab[0x6e] = (void *)inh_clear;
     az_tab[0x47] = (void *)inh_res_47;                                   /* CS CB */
     az_tab[0x43] = (void *)inh_res_43;                                   /* CS SRV */
@@ -1256,6 +1273,17 @@ TEST(fm6_nested_bundle_inherits_om)
     ((omu_fn)def[0x23])(j, FM6_KEEP_RTS, NULL, NULL, 0, 0, NULL, NULL);   /* KEEP: mantem */
     CHECK(inh_om_n == 1 && inh_om_ctx == j && inh_vp_n == 1 && inh_sc_n == 1 && inh_om_uav_n == 1);
     CHECK(fm6_dctx_find(j)->om == 1 && fm6_dctx_find(j)->st.nrtv == 1 && fm6_dctx_find(j)->st.dsv == &dsv);
+    /* juntador liga depth-stencil (reversed-Z, ref 3), blend (fator nulo = 1) e rasterizer (PASSO 45) */
+    {
+        static const float bf[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
+        ((void (*)(void *, void *, const float *, UINT))def[0x24])(j, &bsv, bf, 0xff);
+        ((void (*)(void *, void *, const float *, UINT))def[0x24])(j, &bsv, NULL, 0xffffffffu);
+        ((void (*)(void *, void *, UINT))def[0x25])(j, &dssv, 3);
+        ((void (*)(void *, void *))def[0x2c])(j, &rsv);
+        CHECK(inh_bs_n == 2 && inh_bs_ctx == j && inh_ds_n == 1 && inh_ds_ref == 3 && inh_rs_n == 1);
+        CHECK(fm6_dctx_find(j)->st.has == 7 && fm6_dctx_find(j)->st.blend_factor[0] == 1.0f);
+        inh_bs_n = inh_ds_n = inh_rs_n = 0;
+    }
     /* juntador estaciona CB (CS slot 2) e SRV (CS slot 3) pelo batch; o bundle le com Remap (PS 0 <- CS 3) */
     fm6_batch_add_cb(&bt, &cbv, 2);
     fm6_batch_add_srv(&bt, &srvv, 3);
@@ -1274,6 +1302,7 @@ TEST(fm6_nested_bundle_inherits_om)
     ((exec_fn)def[0x3b])(j, b, FALSE);
     part = &cl_pool[cl_used - 1];
     CHECK(rtv.ref == 2 && dsv.ref == 2 && cbv.ref == 2 && srvv.ref == 2);   /* views seguras pela copia */
+    CHECK(bsv.ref == 2 && dssv.ref == 2 && rsv.ref == 2);
     CHECK(log_has("<- bundle"));
     CHECK(fm6_dctx_find(j)->st.nrtv == 1 && fm6_dctx_find(j)->st.nsrv[5] == 4);   /* restore FALSE: juntador mantem */
     /* PS SRV pelo Set* padrao (forma empacotada do FM6: slot 2, 1 view) tambem entra */
@@ -1301,14 +1330,18 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(exec_cl[0] == part && exec_cl[1] == b && exec_cl[2] == b2 && exec_cl[3] == f);
     CHECK(inh_om_n == 2 && inh_om_ctx == inh_ctx[2] && inh_om_rts == 1 && inh_om_rtv0 == &rtv && inh_om_dsv == &dsv);
     CHECK(inh_vp_n == 2 && inh_sc_n == 2);
+    CHECK(inh_bs_n == 2 && inh_bs_ctx == inh_ctx[2] && inh_bs == &bsv && inh_bs_mask == 0xffffffffu && inh_bs_f0 == 1.0f);
+    CHECK(inh_ds_n == 2 && inh_ds == &dssv && inh_ds_ref == 3 && inh_rs_n == 2 && inh_rs == &rsv);
     CHECK(log_has("bundle aninhado executa com o OM do juntador (1 RTs"));
+    CHECK(log_has("depth ") && log_has(" ref 3, rs "));
     CHECK(rtv.ref == 3);                                                 /* f ainda segura as copias */
     CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);
     CHECK(rtv.ref == 1 && dsv.ref == 1 && cbv.ref == 1 && srvv.ref == 1);
+    CHECK(bsv.ref == 1 && dssv.ref == 1 && rsv.ref == 1);
     /* ClearState do jogo no juntador zera o acompanhado */
     ((om_fn)def[0x22])(j, 1, rtvs, NULL);
     ((void (*)(void *))def[0x6f])(j);
-    CHECK(inh_clear_n >= 1 && fm6_dctx_find(j)->st.nrtv == 0);
+    CHECK(inh_clear_n >= 1 && fm6_dctx_find(j)->st.nrtv == 0 && fm6_dctx_find(j)->st.has == 0);
     /* lista comum (com estado do D3D12) aninhada: sem copia */
     ((om_fn)def[0x22])(j, 1, rtvs, NULL);
     b = new_cl();
