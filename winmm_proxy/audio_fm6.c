@@ -272,6 +272,37 @@ static void acp_message(uint8_t *proc, uint32_t *msg)
     orig_acp_message(proc, msg);
 }
 
+/* ---- mensagem ACP 0x10 (conclusao de comando com tag) no layout do FM6 (PASSO 53 parte 3) ----
+   O Azimuth (layout do FH2/FM5) poe o tag u64 em +0xc e um contador u32 em +0x14; o laco ACP do FM6
+   (game+0x655c97) le o tag u64 em +0x10. Com o valor errado, [engine+0x244] nunca zera e [engine+0x240]
+   (ultimo tag concluido) nao anda: o FMOD fica esperando (game+0x6553a0) o comando XMA terminar -> so
+   silencio. PopMessage do IAcpHal do Azimuth (slot 3, 0x1400b16d0): no FM6 copia o tag para +0x10. */
+#define RVA_ACP_POP_MESSAGE 0xb16d0
+#define ACP_MSG_COMPLETION  0x10
+
+static uint64_t (*orig_acp_pop)(void *hal, uint8_t *msg);
+static volatile LONG acp_fixed;
+
+static void fm6_acp_message_layout(uint8_t *msg)
+{
+    uint64_t tag;
+    LONG k;
+    if (*(uint32_t *)msg != ACP_MSG_COMPLETION) return;
+    memcpy(&tag, msg + 0xc, sizeof tag);
+    memcpy(msg + 0x10, &tag, sizeof tag);
+    k = InterlockedIncrement(&acp_fixed);
+    if (log_point(k))
+        wlog("audio FM6: mensagem ACP 0x10 #%ld (comando tipo %u): tag %#llx em +0x10", k, *(uint32_t *)(msg + 8),
+             (unsigned long long)tag);
+}
+
+static uint64_t acp_pop(void *hal, uint8_t *msg)
+{
+    uint64_t r = orig_acp_pop(hal, msg);
+    if ((uint8_t)r && msg && is_fm6()) fm6_acp_message_layout(msg);
+    return r;
+}
+
 void audio_fm6_game_hooks(uint8_t *game)
 {
     int ok = hook_at(game + FM6_SOUND_INIT, "4489442418895424105556574154", 14, (void *)fm6_sound_init,
@@ -300,6 +331,9 @@ int audio_fm6_install(void)
     if (!hook_at(g_base + RVA_ACP_MESSAGE, "48895c241856574154415641574881ecd0000000", 20, (void *)acp_message,
                  (void **)&orig_acp_message))
         wlog("audio: processamento de mensagens ACP (%#x) nao confere, sem contagem", RVA_ACP_MESSAGE);
+    if (!hook_at(g_base + RVA_ACP_POP_MESSAGE, "48895c24104889742418574883ec20", 15, (void *)acp_pop,
+                 (void **)&orig_acp_pop))
+        wlog("audio: PopMessage do ACP (%#x) nao confere, mensagem 0x10 do FM6 sem correcao", RVA_ACP_POP_MESSAGE);
     for (i = 0; i < n; i++) swap_slot(vt, client_slots[i].slot, hooks[i], origs[i]);
     wlog("audio: FmodAudioClient (vtable %#x) com diagnostico do FM6", RVA_FMOD_CLIENT_VT);
     return 1;

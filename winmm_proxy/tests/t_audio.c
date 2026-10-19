@@ -112,3 +112,54 @@ TEST(audio_fm6_game_hooks_on_real_exe)
     CHECK_HEX(orig_sound_init, "4489442418895424105556574154ff25");
     CHECK_HEX(orig_acp_setup, "40534881ecc0000000488bd933d2ff25");
 }
+
+/* mensagem ACP 0x10 do Azimuth: {0x10, 0, tipo do comando, tag u64 em +0xc, contador u32 em +0x14} */
+static uint8_t fake_msg[0x18];
+static uint64_t fake_pop(void *hal, uint8_t *msg) { (void)hal; memcpy(msg, fake_msg, sizeof fake_msg); return 1; }
+
+static void make_completion(uint32_t type, uint32_t cmd, uint64_t tag, uint32_t counter)
+{
+    memset(fake_msg, 0, sizeof fake_msg);
+    memcpy(fake_msg, &type, 4);
+    memcpy(fake_msg + 8, &cmd, 4);
+    memcpy(fake_msg + 0xc, &tag, 8);
+    memcpy(fake_msg + 0x14, &counter, 4);
+}
+
+TEST(audio_fm6_acp_completion_tag_moved_to_fm6_offset)
+{
+    uint8_t m[0x18];
+    uint64_t tag;
+    fake_azimuth(2);
+    log_capture();
+    orig_acp_pop = fake_pop;
+    make_completion(0x10, 7, 0x0000000500000003ull, 1);
+    CHECK_EQ(acp_pop(NULL, m), 1);
+    memcpy(&tag, m + 0x10, 8);
+    CHECK(tag == 0x0000000500000003ull);                  /* FM6 le o tag em +0x10 */
+    CHECK_HEX(m, "10000000000000000700000003000000");    /* tipo/comando/inicio do tag intactos */
+    CHECK(log_has("mensagem ACP 0x10 #"));
+    /* outros tipos: intactos */
+    make_completion(2, 0, 0x1234, 9);
+    acp_pop(NULL, m);
+    CHECK(!memcmp(m, fake_msg, sizeof m));
+    /* fora do FM6: layout do Azimuth (FH2/FM5) */
+    fake_azimuth(1);
+    make_completion(0x10, 7, 3, 1);
+    acp_pop(NULL, m);
+    CHECK(!memcmp(m, fake_msg, sizeof m));
+}
+
+TEST(audio_acp_pop_hook_on_real_azimuth)
+{
+    uint8_t *az = pe_map(AZIMUTH_EXE, NULL);
+    if (!az) { test_skip(AZIMUTH_EXE " ausente"); return; }
+    g_base = az;
+    log_capture();
+    REQUIRE(hook_at(az + RVA_ACP_POP_MESSAGE, "48895c24104889742418574883ec20", 15, (void *)acp_pop,
+                    (void **)&orig_acp_pop));
+    CHECK_HEX(az + 0xb16d0, "ff2500000000");
+    CHECK(*(void **)(az + 0xb16d6) == (void *)acp_pop);
+    CHECK_HEX(orig_acp_pop, "48895c24104889742418574883ec20ff25");
+    pe_unmap(az);
+}
