@@ -347,7 +347,9 @@ static void al_set(void **slot, void *tex)
     if (*slot) ((ULONG (*)(void *))(*(void ***)*slot)[2])(*slot);
     *slot = tex;
 }
-static void alias_track(const UINT *desc, void *tex)
+/* esram = exige a cor 1x na ESRAM (misc 0x20000; FM5). No FM6 a cor 1x lida pelo pos e a 1a fmt 26 1x do mesmo
+ * tamanho criada logo depois da cor MSAA e das profundidades (17_fm6.txt PASSO 44) */
+static void alias_track_ex(const UINT *desc, void *tex, int esram)
 {
     if (alias_test < 0) { char v[8] = ""; alias_test = GetEnvironmentVariableA("FM5_ALIAS_TEST", v, sizeof v) ? atoi(v) : 1;
                           wlog("d3d: FM5_ALIAS_TEST=%d", alias_test); }
@@ -357,10 +359,73 @@ static void alias_track(const UINT *desc, void *tex)
     /* MSAA 2x (corrida) ou 4x (garagem/menus com carro, cont. 21: mesmo padrao, profundidades sem ESRAM) */
     if (desc[5] >= 2 && desc[4] == 26) { al_set(&al_color2x, tex); al_w = desc[0]; al_h = desc[1]; al_set(&al_color1x, NULL); }
     else if (desc[5] >= 2 && desc[4] == 19) { al_set(&al_depth_a, al_depth_b); al_set(&al_depth_b, tex); }
-    else if (desc[5] <= 1 && desc[4] == 26 && (desc[10] & 0x20000) && !al_color1x && al_color2x &&
+    else if (desc[5] <= 1 && desc[4] == 26 && (!esram || (desc[10] & 0x20000)) && !al_color1x && al_color2x &&
              desc[0] == al_w && desc[1] == al_h) al_set(&al_color1x, tex);
     ReleaseSRWLockExclusive(&alias_lock);
     wlog("d3d: alias: cor2x=%p prof=%p,%p cor1x=%p (%ux%u)", al_color2x, al_depth_a, al_depth_b, al_color1x, al_w, al_h);
+}
+static void alias_track(const UINT *desc, void *tex) { alias_track_ex(desc, tex, 1); }
+
+/* FM6 (17_fm6.txt PASSO 44): mesmo aliasing, mas o compute de profundidade e o pos rodam em contextos do FM6 (tabela
+ * embutida, sem o proxy c0). RTVs criadas sobre a cor MSAA (al_rtv) dizem quando o contexto sai da cena: o Dispatch
+ * (W/8, H/8, 1) copia prof a -> b e deixa o resolve pendente naquele contexto; o 1o OMSetRenderTargets dele com
+ * outro RT (ou ClearState) faz o resolve cor2x -> cor1x depois de repassar a chamada. */
+static struct { void *rtv, *res; } al_rtv[32];
+static LONG al_rtv_n;
+static void *volatile al_ctx;
+static void alias_rtv_note(void *rtv, void *res)
+{
+    LONG i, n;
+    AcquireSRWLockExclusive(&alias_lock);
+    n = al_rtv_n < 32 ? al_rtv_n : 32;
+    for (i = 0; i < n && al_rtv[i].rtv != rtv; i++) ;
+    if (i < n) al_rtv[i].res = res;                         /* ponteiro reaproveitado por outra view */
+    else if (res && res == al_color2x) { i = al_rtv_n++ & 31; al_rtv[i].rtv = rtv; al_rtv[i].res = res; }
+    ReleaseSRWLockExclusive(&alias_lock);
+}
+static int alias_is_scene_rtv(void *rtv)
+{
+    LONG i, n;
+    int r = 0;
+    AcquireSRWLockShared(&alias_lock);
+    n = al_rtv_n < 32 ? al_rtv_n : 32;
+    for (i = 0; i < n && !r; i++) r = al_rtv[i].rtv == rtv && al_rtv[i].res == al_color2x;
+    ReleaseSRWLockShared(&alias_lock);
+    return r;
+}
+typedef void *(*alias_fn_lookup)(void *ctx, int slot);
+static int alias_fm6_dispatch(void *ctx, UINT x, UINT y, UINT z, int bundle, alias_fn_lookup fn)
+{
+    typedef void (*copy_fn)(void *, void *, void *);
+    static volatile LONG nb;
+    if (alias_test <= 0 || !al_w || x != (al_w + 7) / 8 || y != (al_h + 7) / 8 || z != 1) return 0;
+    if (bundle) {
+        if (InterlockedIncrement(&nb) <= 3) wlog("d3d: alias: Dispatch %ux%ux%u num draw bundle %p: ignorado", x, y, z, ctx);
+        return 0;
+    }
+    AcquireSRWLockShared(&alias_lock);
+    if (al_depth_a && al_depth_b) ((copy_fn)fn(ctx, 0x2f))(ctx, al_depth_b, al_depth_a);
+    ReleaseSRWLockShared(&alias_lock);
+    al_ctx = ctx;
+    if (InterlockedIncrement(&al_count) <= 3)
+        wlog("d3d: alias: FM6 Dispatch %ux%ux%u no contexto %p -> copia profundidade %p -> %p, resolve da cor pendente",
+             x, y, z, ctx, al_depth_a, al_depth_b);
+    return 1;
+}
+/* depois do OMSetRenderTargets (n RTs; ~0u = KEEP) ou do ClearState (clear = 1) do contexto ctx */
+static void alias_fm6_leave_scene(void *ctx, UINT n, void *const *rtvs, int clear, alias_fn_lookup fn)
+{
+    typedef void (*resolve_fn)(void *, void *, UINT, void *, UINT, UINT);
+    static volatile LONG nr;
+    if (!ctx || al_ctx != ctx) return;
+    if (!clear && (n == 0xffffffffu || !n || !rtvs || !rtvs[0] || alias_is_scene_rtv(rtvs[0]))) return;
+    if (InterlockedCompareExchangePointer((void *volatile *)&al_ctx, NULL, ctx) != ctx) return;
+    AcquireSRWLockShared(&alias_lock);
+    if (al_color2x && al_color1x) ((resolve_fn)fn(ctx, 0x39))(ctx, al_color1x, 0, al_color2x, 0, 26);
+    ReleaseSRWLockShared(&alias_lock);
+    if (InterlockedIncrement(&nr) <= 3)
+        wlog("d3d: alias: FM6 contexto %p saiu da cena (%s) -> resolve cor %p -> %p", ctx,
+             clear ? "ClearState" : "outro RT", al_color2x, al_color1x);
 }
 
 /* Quality original das texturas MSAA do FM5 (o D3D12 recebe D3D12_STANDARD_MULTISAMPLE_PATTERN, abaixo). O GetDesc
@@ -1212,13 +1277,30 @@ static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
 {
     UINT d[16];
     long hr;
-    if (!desc || desc[5] <= 1 || desc[6] == 0 || desc[6] == 0xffffffff)
-        return orig_fm6_create_tex2d(dev, desc, init, out);
+    if (!desc || desc[5] <= 1 || desc[6] == 0 || desc[6] == 0xffffffff) {
+        hr = orig_fm6_create_tex2d(dev, desc, init, out);
+        if (desc && desc[0] >= 1280 && hr >= 0 && out && *out) {   /* texturas de tela: aliasing da ESRAM */
+            wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u bind=%#x misc=%#x esram[0xb]=%#x) hr=%#lx tex=%p",
+                 desc[0], desc[1], desc[4], desc[5], desc[8], desc[10], desc[11], hr, *out);
+            alias_track_ex(desc, *out, 0);
+        }
+        return hr;
+    }
     memcpy(d, desc, 12 * sizeof(UINT));
     d[6] = 0xffffffff;
     hr = orig_fm6_create_tex2d(dev, d, init, out);
     wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> padrao, bind=%#x misc=%#x) hr=%#lx tex=%p",
          d[0], d[1], d[4], d[5], desc[6], d[8], d[10], hr, out ? *out : NULL);
+    if (hr >= 0 && out && *out) alias_track_ex(desc, *out, 0);
+    return hr;
+}
+
+/* CreateRenderTargetView (slot 9) do FM6: views da cor MSAA da cena (aliasing, alias_rtv_note) */
+static rtv_fn orig_fm6_create_rtv;
+static long fm6_CreateRenderTargetView(void *dev, void *res, const UINT *desc, void **out)
+{
+    long hr = orig_fm6_create_rtv(dev, res, desc, out);
+    if (hr >= 0 && out && *out) alias_rtv_note(*out, res);
     return hr;
 }
 
@@ -1427,11 +1509,13 @@ static void fm6_om_reset(void *ctx)
     if (d) memset(&d->st, 0, sizeof d->st);
 }
 
-/* FM6 0x22/0x23/0x2d/0x2e/0x6f do diferido (Azimuth 0x21/0x22/0x2c/0x2d/0x6e): acompanha e repassa */
+/* FM6 0x22/0x23/0x2d/0x2e/0x6f do diferido (Azimuth 0x21/0x22/0x2c/0x2d/0x6e): acompanha e repassa. 0x22/0x23/0x6f
+   e o Dispatch (FM6 0x2a = Azimuth 0x29) tambem no imediato: aliasing da ESRAM (alias_fm6_*) */
 static void fm6_def_OMSetRenderTargets(void *ctx, UINT n, void *const *rtvs, void *dsv)
 {
     fm6_om_set_rts(ctx, n, rtvs, dsv);
     ((void (*)(void *, UINT, void *const *, void *))fm6_az_fn(ctx, AZ_SLOT_OM))(ctx, n, rtvs, dsv);
+    alias_fm6_leave_scene(ctx, n, rtvs, 0, fm6_az_fn);
 }
 static void fm6_def_OMSetRenderTargetsUAV(void *ctx, UINT n, void *const *rtvs, void *dsv, UINT s, UINT nu,
                                           void *const *uavs, const UINT *counts)
@@ -1439,6 +1523,14 @@ static void fm6_def_OMSetRenderTargetsUAV(void *ctx, UINT n, void *const *rtvs, 
     if (n != FM6_KEEP_RTS) fm6_om_set_rts(ctx, n, rtvs, dsv);
     ((void (*)(void *, UINT, void *const *, void *, UINT, UINT, void *const *, const UINT *))fm6_az_fn(ctx, AZ_SLOT_OM_UAV))(
         ctx, n, rtvs, dsv, s, nu, uavs, counts);
+    alias_fm6_leave_scene(ctx, n, rtvs, 0, fm6_az_fn);
+}
+#define AZ_SLOT_DISPATCH  0x29
+static void fm6_Dispatch(void *ctx, UINT x, UINT y, UINT z)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    alias_fm6_dispatch(ctx, x, y, z, d && (d->flags & 0x60000) == 0x60000, fm6_az_fn);
+    ((void (*)(void *, UINT, UINT, UINT))fm6_az_fn(ctx, AZ_SLOT_DISPATCH))(ctx, x, y, z);
 }
 static void fm6_def_RSSetViewports(void *ctx, UINT n, const float *vp)
 {
@@ -1479,6 +1571,7 @@ static void fm6_def_ClearState(void *ctx)
 {
     fm6_om_reset(ctx);
     ((void (*)(void *))fm6_az_fn(ctx, AZ_SLOT_CLEARST))(ctx);
+    alias_fm6_leave_scene(ctx, 0, NULL, 1, fm6_az_fn);
 }
 
 /* copia do estado do juntador na cadeia: objeto com AddRef/Release (slots 1/2) como as pecas */
@@ -1631,6 +1724,8 @@ static int fm6_device_fixups(void **vt)
         vt[5] = (void *)fm6_CreateTexture2D;
         orig_fm6_create_srv = (srv_fn)vt[7];
         vt[7] = (void *)fm6_CreateShaderResourceView;
+        orig_fm6_create_rtv = (rtv_fn)vt[9];
+        vt[9] = (void *)fm6_CreateRenderTargetView;
         orig_fm6_placement_tex2d = (ptex2d_fn)vt[0x40];
         vt[0x40] = (void *)fm6_CreatePlacementTexture2D;
         orig_fm6_input_layout = vt[0xb];
@@ -2250,12 +2345,14 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
     if (deferred)
         for (i = 0; i < 6; i++) dst[fm6_stage_cb[i] + 1] = fm6_def_cbs[i];   /* Azimuth 8..0x8c = FM6 - 1 */
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
+    /* aliasing da ESRAM (imediato e diferido) e heranca do OM no aninhado (diferido) */
+    dst[0x22] = (void *)fm6_def_OMSetRenderTargets;
+    dst[0x23] = (void *)fm6_def_OMSetRenderTargetsUAV;
+    dst[0x2a] = (void *)fm6_Dispatch;
+    dst[0x6f] = (void *)fm6_def_ClearState;
     if (deferred) {   /* heranca do OM no aninhado: acompanha RT/DS, viewports e scissors de cada diferido */
-        dst[0x22] = (void *)fm6_def_OMSetRenderTargets;
-        dst[0x23] = (void *)fm6_def_OMSetRenderTargetsUAV;
         dst[0x2d] = (void *)fm6_def_RSSetViewports;
         dst[0x2e] = (void *)fm6_def_RSSetScissorRects;
-        dst[0x6f] = (void *)fm6_def_ClearState;
         if (src[AZ_SLOT_REMAP_CB] != g_base + RVA_STUB_SLOT(AZ_SLOT_REMAP_CB)) dst[0x9f] = (void *)fm6_def_RemapCB;
         if (src[AZ_SLOT_REMAP_CB + 1] != g_base + RVA_STUB_SLOT(AZ_SLOT_REMAP_CB + 1)) dst[0xa0] = (void *)fm6_def_RemapSRV;
     }

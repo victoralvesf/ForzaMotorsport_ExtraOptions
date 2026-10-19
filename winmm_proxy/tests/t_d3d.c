@@ -1227,7 +1227,8 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(def[0x2d] == (void *)fm6_def_RSSetViewports && def[0x2e] == (void *)fm6_def_RSSetScissorRects);
     CHECK(def[0x6f] == (void *)fm6_def_ClearState);
     CHECK(def[0x9f] == (void *)fm6_def_RemapCB && def[0xa0] == (void *)fm6_def_RemapSRV);
-    CHECK(imm[0x22] == (void *)0x1021 && imm[0x2d] == (void *)0x102c && imm[0x6f] == (void *)0x106e);   /* imediato: Azimuth */
+    CHECK(imm[0x2d] == (void *)0x102c && imm[0x2e] == (void *)0x102d);   /* imediato: Azimuth */
+    CHECK(imm[0x22] == (void *)fm6_def_OMSetRenderTargets && imm[0x6f] == (void *)fm6_def_ClearState);   /* aliasing */
     /* o Azimuth em [ctx] (sem registro da copia embutida nos testes) */
     az_tab[0x21] = (void *)inh_om;
     az_tab[0x22] = (void *)inh_om_uav;
@@ -1315,6 +1316,90 @@ TEST(fm6_nested_bundle_inherits_om)
     ((exec_fn)def[0x3b])(j, b, TRUE);
     CHECK(rtv.ref == 1);
     ((fin_fn)def[0x73])(j, FALSE, &out);
+}
+
+/* aliasing da ESRAM no FM6 (17_fm6.txt PASSO 44): cena em cor 2x + prof a; o compute (W/8, H/8, 1) le a prof b e o
+   pos le a cor 1x -> copia no Dispatch e resolve quando o mesmo contexto liga outro RT (ou ClearState) */
+static int al6_copy_n, al6_resolve_n, al6_disp_n;
+static void *al6_a[4];
+static UINT al6_fmt;
+static void al6_copy(void *c, void *dst, void *src) { al6_copy_n++; al6_a[0] = c; al6_a[1] = dst; al6_a[2] = src; }
+static void al6_resolve(void *c, void *dst, UINT ds, void *src, UINT ss, UINT fmt)
+{
+    (void)ds; (void)ss;
+    al6_resolve_n++; al6_a[0] = c; al6_a[1] = dst; al6_a[2] = src; al6_fmt = fmt;
+}
+static void al6_dispatch(void *c, UINT x, UINT y, UINT z) { (void)c; (void)x; (void)y; (void)z; al6_disp_n++; }
+static void al6_om(void *c, UINT n, void *const *r, void *d) { (void)c; (void)n; (void)r; (void)d; }
+static void al6_clear(void *c) { (void)c; }
+static long al6_tex(void *dev, const UINT *desc, const void *init, void **out)
+{
+    (void)dev; (void)desc; (void)init;
+    *out = fake_obj();
+    return 0;
+}
+static long al6_rtv(void *dev, void *res, const UINT *desc, void **out) { (void)dev; (void)res; (void)desc; *out = fake_obj(); return 0; }
+
+TEST(fm6_esram_alias_copy_and_resolve)
+{
+    static void *dev_vt[0x100], *src_tab[0x10e], *imm[0x10e], *az_tab[0x10e];
+    static void *ctx[1] = { az_tab }, *ctx2[1] = { az_tab };
+    typedef long (*mk_tex_fn)(void *, const UINT *, const void *, void **);
+    typedef long (*mk_rtv_fn)(void *, void *, const UINT *, void **);
+    typedef void (*om_fn)(void *, UINT, void *const *, void *);
+    typedef void (*disp_fn)(void *, UINT, UINT, UINT);
+    UINT c2[12] = { 1920, 1080, 1, 1, 26, 2, 2, 0, 0x28, 0, 0x40000, 0 };
+    UINT dp[12] = { 1920, 1080, 1, 1, 19, 2, 2, 0, 0x48, 0, 0x60000, 0 };
+    UINT c1[12] = { 1920, 1080, 1, 1, 26, 1, 0, 0, 0xa8, 0, 0, 0 };
+    void *tc2, *ta, *tb, *tc1, *rs, *ro, *rtvs[1];
+    int i;
+    fake_azimuth(0);
+    for (i = 0; i < 0x100; i++) dev_vt[i] = (void *)(uintptr_t)(0x2000 + i);
+    dev_vt[5] = (void *)al6_tex;
+    dev_vt[9] = (void *)al6_rtv;
+    fm6_device_fixups(dev_vt);
+    CHECK(dev_vt[5] == (void *)fm6_CreateTexture2D && dev_vt[9] == (void *)fm6_CreateRenderTargetView);
+    for (i = 0; i < 0x10e; i++) src_tab[i] = (void *)(uintptr_t)(0x1000 + i);
+    fm6_ctx_table(imm, src_tab, 0);
+    CHECK(imm[0x2a] == (void *)fm6_Dispatch && imm[0x23] == (void *)fm6_def_OMSetRenderTargetsUAV);
+    az_tab[0x21] = (void *)al6_om;
+    az_tab[0x29] = (void *)al6_dispatch;
+    az_tab[0x2f] = (void *)al6_copy;
+    az_tab[0x39] = (void *)al6_resolve;
+    az_tab[0x6e] = (void *)al6_clear;
+    log_capture();
+    alias_test = 1;
+    ((mk_tex_fn)dev_vt[5])(NULL, c2, NULL, &tc2);
+    ((mk_tex_fn)dev_vt[5])(NULL, dp, NULL, &ta);
+    ((mk_tex_fn)dev_vt[5])(NULL, dp, NULL, &tb);
+    ((mk_tex_fn)dev_vt[5])(NULL, c1, NULL, &tc1);                /* 1x sem ESRAM: vale no FM6 */
+    CHECK(al_color2x == tc2 && al_depth_a == ta && al_depth_b == tb && al_color1x == tc1);
+    ((mk_rtv_fn)dev_vt[9])(NULL, tc2, NULL, &rs);
+    ((mk_rtv_fn)dev_vt[9])(NULL, tc1, NULL, &ro);
+    CHECK(alias_is_scene_rtv(rs) && !alias_is_scene_rtv(ro));
+    /* Dispatch de outro tamanho: nada; 240x135x1: copia b <- a e repassa */
+    ((disp_fn)imm[0x2a])(ctx, 22, 1, 1);
+    CHECK(al6_copy_n == 0 && al6_disp_n == 1);
+    ((disp_fn)imm[0x2a])(ctx, 240, 135, 1);
+    CHECK(al6_copy_n == 1 && al6_disp_n == 2 && al6_a[0] == ctx && al6_a[1] == tb && al6_a[2] == ta);
+    CHECK(log_has("alias: FM6 Dispatch 240x135x1"));
+    /* ainda na cena (RT da cor 2x), KEEP ou outro contexto: sem resolve */
+    rtvs[0] = rs;
+    ((om_fn)imm[0x22])(ctx, 1, rtvs, NULL);
+    ((om_fn)imm[0x22])(ctx, 0, NULL, NULL);
+    rtvs[0] = ro;
+    ((om_fn)imm[0x22])(ctx2, 1, rtvs, NULL);
+    CHECK_EQ(al6_resolve_n, 0);
+    /* sai da cena: resolve cor 1x <- cor 2x (R11G11B10) uma vez */
+    ((om_fn)imm[0x22])(ctx, 1, rtvs, NULL);
+    CHECK(al6_resolve_n == 1 && al6_a[0] == ctx && al6_a[1] == tc1 && al6_a[2] == tc2 && al6_fmt == 26);
+    ((om_fn)imm[0x22])(ctx, 1, rtvs, NULL);
+    CHECK_EQ(al6_resolve_n, 1);
+    /* ClearState tambem fecha a cena */
+    ((disp_fn)imm[0x2a])(ctx, 240, 135, 1);
+    ((void (*)(void *))imm[0x6f])(ctx);
+    CHECK(al6_resolve_n == 2 && log_has("saiu da cena (ClearState)"));
+    alias_test = 0;
 }
 
 /* reexecucao de lista com a execucao anterior ainda na GPU: submete o lote se ela nao saiu e espera a fence */
