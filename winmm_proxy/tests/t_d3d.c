@@ -752,7 +752,7 @@ TEST(fm6_context_table_layout)
     CHECK(imm[0] == (void *)0x1000 && imm[7] == (void *)0x1007);
     CHECK_EQ(((long (*)(void))imm[8])(), 0);                    /* slot novo */
     CHECK(imm[0x8d] == (void *)0x108c);
-    CHECK(imm[9] == (void *)fm6_imm_set_cbs_0 && imm[0x12] == (void *)fm6_imm_set_cbs_4);   /* b4 (PASSO 49) */
+    CHECK(imm[9] == (void *)0x1008 && imm[0x12] == (void *)0x1011);   /* imediato: CB do Azimuth */
     CHECK(imm[0x18] == (void *)0x1017 && def[9] == (void *)fm6_def_set_cbs_0);
     CHECK_EQ(((long (*)(void))imm[0x8e])(), (long)-1);          /* PIXBeginEventEx */
     CHECK(imm[0x8f] == (void *)0x108d && imm[0x90] == (void *)0x108e);
@@ -802,57 +802,6 @@ TEST(fm6_context_table_layout)
         ((void (*)(void *, UINT, void *))imm2[0xa4])(ctx, 4, (void *)0x5a5a);   /* PSSetFastShaderResource */
         CHECK(srvs_slot == 0x09 && srvs_start == 4 && srvs_n == 1 && srvs_views[0] == (void *)0x5a5a);
     }
-}
-
-/* diagnostico do b4 de VS/PS (17_fm6.txt PASSO 49): imediato padrao/Fast repassam ao Azimuth em [ctx] e contam;
-   objeto novo e NULL logados; copia da heranca loga os slots (x/.); remaps distintos */
-static void *cb4_ctx, *const *cb4_cbs;
-static UINT cb4_start, cb4_cnt, cb4_slot, cb4_calls;
-static void fake_cb4(void *ctx, UINT start, UINT n, void *const *cbs, UINT slot)
-{
-    cb4_ctx = ctx; cb4_start = start; cb4_cnt = n; cb4_cbs = cbs; cb4_slot = slot; cb4_calls++;
-}
-static void fake_cb4_08(void *c, UINT s, UINT n, void *const *v) { fake_cb4(c, s, n, v, 0x08); }
-static void fake_cb4_11(void *c, UINT s, UINT n, void *const *v) { fake_cb4(c, s, n, v, 0x11); }
-
-TEST(fm6_cb4_diag)
-{
-    uint8_t *az = fake_azimuth(0);
-    static void *src[0x10e], *imm[0x10e], *az_tab[0x10e], *ctx[1] = { az_tab };
-    static uint8_t buf[0x180];
-    void *cbs[6] = { 0 };
-    int i;
-    for (i = 0; i < 0x10e; i++) src[i] = (void *)(uintptr_t)(0x1000 + i);
-    src[0xa0] = az + 0xf5f30 + 0xa0 * 0x100;                    /* PSSetFastConstantBuffer: stub fatal */
-    fm6_ctx_table(imm, src, 0);
-    CHECK(imm[0xa3] == (void *)fm6_imm_PSSetFastConstantBuffer);
-    az_tab[0x08] = (void *)fake_cb4_08;
-    az_tab[0x11] = (void *)fake_cb4_11;
-    *(uint8_t **)buf = az + RVA_VTBL_TABLES + 5 * SLOTS * 8;    /* buffer do Azimuth (tipo 5) */
-    *(UINT *)(buf + AZ_BUF_WIDTH) = 1712;
-    buf[AZ_BUF_PLACEMENT] = buf[AZ_BUF_PLACEMENT + 1] = 1;
-    log_capture();
-    /* PS slots 3..5 com NULL no b4: repassa e conta NULL */
-    ((void (*)(void *, UINT, UINT, void *const *))imm[0x12])(ctx, 3, 3, cbs);
-    CHECK(cb4_ctx == ctx && cb4_slot == 0x11 && cb4_start == 3 && cb4_cnt == 3 && cb4_cbs == cbs);
-    CHECK(log_has("d3d: b4: PS imediato grava NULL #1"));
-    /* VS slot 4 com o buffer: objeto novo com ByteWidth/placement; de novo = sem log */
-    cbs[0] = buf;
-    ((void (*)(void *, UINT, UINT, void *const *))imm[9])(ctx, 4, 1, cbs);
-    CHECK(cb4_slot == 0x08 && cb4_start == 4 && cb4_cnt == 1);
-    CHECK(log_has("d3d: b4: objeto novo #1 no VS imediato") && log_has("ByteWidth 1712 placement 1/1"));
-    ((void (*)(void *, UINT, UINT, void *const *))imm[9])(ctx, 4, 1, cbs);
-    CHECK(!log_has("objeto novo #2"));
-    /* slots sem o 4: nada */
-    ((void (*)(void *, UINT, UINT, void *const *))imm[0x12])(ctx, 0, 4, cbs);
-    CHECK(cb4_n[CB4_IMM][1][0] == 1 && cb4_n[CB4_IMM][1][1] == 0 && cb4_n[CB4_IMM][0][1] == 2);
-    /* Fast do PS no imediato: conta e chama o Set* padrao do Azimuth (slot 0x11) */
-    ((void (*)(void *, UINT, void *))imm[0xa3])(ctx, 4, NULL);
-    CHECK(cb4_slot == 0x11 && cb4_start == 4 && cb4_cnt == 1);
-    CHECK(log_has("d3d: b4: PS imediato Fast grava NULL #1"));
-    fm6_cb4_summary(3);
-    CHECK(log_has("d3d: b4 apos 3 gravacoes: diferido VS 0/0 PS 0/0; diferido Fast VS 0/0 PS 0/0; imediato VS 2/0 "
-                  "PS 0/1; imediato Fast VS 0/0 PS 0/1;"));
 }
 
 /* UpdateSubresource de placement buffer no contexto diferido do FM6 -> memoria do jogo; resto -> Azimuth 0x30 */
@@ -930,8 +879,9 @@ TEST(fm6_deferred_placement_update_shadow_to_immediate)
     static uint8_t jctx[0xd00], ictx[0xd00], res[0x200], mem[64];
     static const UINT box[6] = { 8, 0, 0, 12, 1, 1 };
     uint8_t d1[4] = { 1, 2, 3, 4 }, d2[64];
-    fm6_om_item *o1, *o2;
+    fm6_om_item *o1, *o2, *o3;
     fm6_dctx_info *d;
+    fm6_ver *v1;
     LONG i = InterlockedIncrement(&fm6_dctx_n) - 1;
     REQUIRE(i < 128);
     fake_azimuth(0);
@@ -952,32 +902,43 @@ TEST(fm6_deferred_placement_update_shadow_to_immediate)
     log_capture();
     fm6_UpdateSubresource(jctx, res, 0, box, d1, 0, 0);       /* [8, 12) */
     CHECK(mem[8] == 0xee && mem[11] == 0xee);                  /* memoria do jogo intacta */
-    CHECK(d->upd[0].buf == res && d->upd[0].size == 64 && d->upd[0].dirty == 1 && shd_ref == 1);
-    CHECK(d->upd[0].data[7] == 0xee && d->upd[0].data[8] == 1 && d->upd[0].data[11] == 4 && d->upd[0].data[12] == 0xee);
+    REQUIRE(d->upd[0].buf == res && d->upd[0].size == 64 && d->upd[0].dirty == 1 && d->upd[0].cur);
+    v1 = d->upd[0].cur;
+    CHECK(shd_ref == 1 && v1->ref == 1 && v1->size == 64);
+    CHECK(v1->data[7] == 0xee && v1->data[8] == 1 && v1->data[11] == 4 && v1->data[12] == 0xee);
     CHECK(log_has("sombra de buf") && log_has("-> sombra"));
+    fm6_UpdateSubresource(jctx, res, 0, box, d1, 0, 0);       /* sem versao compartilhada: altera no lugar */
+    CHECK(d->upd[0].cur == v1);
     o1 = fm6_om_snapshot(jctx);                                /* so a sombra suja ja gera a copia */
     REQUIRE(o1 != NULL);
-    CHECK(o1->nupd == 1 && o1->upd[0].buf == res && o1->upd[0].size == 64 && o1->upd[0].data[8] == 1);
+    CHECK(o1->nupd == 1 && o1->upd[0].buf == res && o1->upd[0].ver == v1 && v1->ref == 2);   /* sem copia */
     CHECK_EQ(shd_ref, 2);
-    fm6_UpdateSubresource(jctx, res, 0, NULL, d2, 0, 0);      /* buffer inteiro */
-    CHECK(o1->upd[0].data[8] == 1 && d->upd[0].data[8] == 0x48);
+    fm6_UpdateSubresource(jctx, res, 0, box, d1, 0, 0);       /* mesmo conteudo: mesma versao */
+    CHECK(d->upd[0].cur == v1);
     o2 = fm6_om_snapshot(jctx);
     REQUIRE(o2 != NULL);
-    CHECK(o2->upd[0].data[0] == 0x40 && o2->upd[0].data[63] == 0x7f);
-    /* imediato (fm6_om_apply): cada copia vira um UpdateSubresource do buffer inteiro; a repetida e pulada */
+    CHECK(o2->upd[0].ver == v1 && v1->ref == 3);
+    fm6_UpdateSubresource(jctx, res, 0, NULL, d2, 0, 0);      /* buffer inteiro, versao compartilhada: nova */
+    CHECK(d->upd[0].cur != v1 && v1->data[8] == 1 && d->upd[0].cur->data[8] == 0x48 && v1->ref == 2);
+    o3 = fm6_om_snapshot(jctx);
+    REQUIRE(o3 != NULL);
+    CHECK(o3->upd[0].ver->data[0] == 0x40 && o3->upd[0].ver->data[63] == 0x7f);
+    /* imediato (fm6_om_apply): cada versao vira um UpdateSubresource do buffer inteiro; a repetida e pulada */
     fm6_upd_apply(ictx, o1);
     CHECK(shd_upd_n == 1 && shd_upd_ctx == ictx && shd_upd_res == res && shd_upd_box == NULL);
     CHECK(shd_upd_data[7] == 0xee && shd_upd_data[8] == 1 && shd_upd_data[12] == 0xee);
-    fm6_upd_apply(ictx, o1);
-    CHECK_EQ(shd_upd_n, 1);
     fm6_upd_apply(ictx, o2);
+    CHECK_EQ(shd_upd_n, 1);
+    fm6_upd_apply(ictx, o3);
     CHECK(shd_upd_n == 2 && shd_upd_data[0] == 0x40 && shd_upd_data[8] == 0x48);
-    fm6_upd_apply(ictx, o1);                                    /* lista reexecutada: volta a versao dela */
+    fm6_upd_apply(ictx, o1);                                   /* lista reexecutada: volta a versao dela */
     CHECK(shd_upd_n == 3 && shd_upd_data[8] == 1);
     CHECK(log_has("versoes de placement buffer aplicadas no imediato"));
     fm6_om_item_release(o1);
     fm6_om_item_release(o2);
+    fm6_om_item_release(o3);
     CHECK_EQ(shd_ref, 1);                                      /* so a sombra segura o buffer */
+    CHECK_EQ(v1->ref, 1);                                      /* so a tabela do imediato (ultima aplicada) */
     d->upd[0].dirty = 0;                                       /* FinishCommandList: lista nova */
     CHECK(fm6_om_snapshot(jctx) == NULL);
     d->ctx = NULL;
@@ -1038,110 +999,6 @@ TEST(fm6_placement_uav_only_committed)
     CHECK(pt_tex2d_calls == 1 && pt_place_calls == 2);
     orig_fm6_create_tex2d = NULL;
     orig_fm6_placement_tex2d = NULL;
-}
-
-/* diagnostico das texturas pequenas do FM6 (PASSO 46): registro na criacao, contagem de refresh, resumo */
-static uint8_t td_res[2][0x140];
-static uint64_t td_layout[4] = { 0, 0, 0x10000, 0 };
-static uint8_t *td_title[2] = { (uint8_t *)0x1024d0000, (uint8_t *)td_layout };
-static int td_refreshes;
-static long fake_td_place(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
-{
-    (void)dev; (void)desc; (void)tile; (void)pitch; (void)addr;
-    *out = td_res[pt_place_calls++];
-    *(uint8_t ***)(td_res[0] + AZ_RES_TITLE) = td_title;
-    *(uint8_t ***)(td_res[1] + AZ_RES_TITLE) = td_title;
-    return 0;
-}
-static void fake_td_refresh(void *ctx, uint8_t *res) { (void)ctx; (void)res; td_refreshes++; }
-static int fake_td_state(uintptr_t addr, uint64_t size)
-{
-    return addr == 0x1024d0000 && size == 0x10000 ? 2 : -7;
-}
-
-TEST(fm6_small_title_texture_diag)
-{
-    UINT small[11] = { 32, 32, 6, 1, 80, 1, 0, 0, 0x8, 0, 0 };
-    UINT big[11] = { 512, 512, 10, 1, 98, 1, 0, 0, 0x8, 0, 0 };
-    void *out = NULL;
-    fm6_td *e;
-    orig_fm6_placement_tex2d = fake_td_place;
-    orig_title_refresh = fake_td_refresh;
-    az_title_mem_state = fake_td_state;
-    pt_place_calls = td_refreshes = 0;
-    log_capture();
-    CHECK(fm6_CreatePlacementTexture2D(NULL, small, 14, 0, (void *)0x1024d0000, &out) == 0 && out == td_res[0]);
-    CHECK(fm6_CreatePlacementTexture2D(NULL, big, 14, 0, (void *)0x1024e0000, &out) == 0 && out == td_res[1]);
-    CHECK(fm6_td_n == 1);
-    e = fm6_td_find(td_res[0]);
-    CHECK(e && e->size == 0x10000 && e->w == 32 && e->mips == 6 && e->fmt == 80 && e->refreshes == 0);
-    CHECK(fm6_td_find(td_res[1]) == NULL);
-    CHECK(log_has("titulo pequeno #1 32x32 mips=6 arr=1 fmt=80"));
-    CHECK(log_has("titulo pequeno fora do rastreador 32x32 fmt=80"));   /* estado 2; memoria livre: -1 bytes */
-    CHECK(log_has(", -1 bytes != 0; pilha"));
-    CHECK(fm6_td_created[1][2] == 1 && fm6_td_created[0][5] == 1);
-    fm6_td_report(1);
-    CHECK(log_has("1 criados, 1 nunca com refresh; estado da memoria 0:0 1:0 2:1"));
-    CHECK(log_has("placement pelo XG pequenas criadas por estado da memoria: 0:0 1:0 2:1"));
-    fm6_title_refresh(NULL, td_res[1]);                         /* fora do registro: so repassa */
-    fm6_title_refresh(NULL, td_res[0]);
-    fm6_title_refresh(NULL, td_res[0]);
-    CHECK(td_refreshes == 3 && e->refreshes == 2 && e->first_state == 2);
-    CHECK(log_has("1o refresh, estado da memoria 2"));
-    memset(fm6_tds, 0, sizeof fm6_tds);
-    fm6_td_n = fm6_td_calls = fm6_td_logged = fm6_td_untracked_logged = 0;
-    memset((void *)fm6_td_created, 0, sizeof fm6_td_created);
-    orig_fm6_placement_tex2d = NULL;
-    orig_title_refresh = NULL;
-    az_title_mem_state = NULL;
-}
-
-/* placement maior sobre memoria reservada sem commit (estado 3) -> registro proprio; refresh conta o estado visto */
-static int tr_state;
-static int fake_tr_state(uintptr_t addr, uint64_t size)
-{
-    return addr == 0x1024e0000 && size == 0x10000 ? tr_state : 1;
-}
-
-TEST(fm6_reserved_title_texture_diag)
-{
-    UINT big[11] = { 512, 512, 10, 1, 98, 1, 0, 0, 0x8, 0, 0 };
-    UINT committed[11] = { 256, 256, 9, 1, 71, 1, 0, 0, 0x8, 0, 0 };
-    void *out = NULL;
-    fm6_td *r;
-    orig_fm6_placement_tex2d = fake_td_place;
-    orig_title_refresh = fake_td_refresh;
-    az_title_mem_state = fake_tr_state;
-    pt_place_calls = td_refreshes = 0;
-    tr_state = 3;
-    log_capture();
-    CHECK(fm6_CreatePlacementTexture2D(NULL, big, 14, 0, (void *)0x1024e0000, &out) == 0 && out == td_res[0]);
-    CHECK(fm6_CreatePlacementTexture2D(NULL, committed, 14, 0, (void *)0x1024f0000, &out) == 0 && out == td_res[1]);
-    CHECK(fm6_td_n == 0 && fm6_tr_n == 1);
-    r = fm6_tr_find(td_res[0]);
-    CHECK(r && r->size == 0x10000 && r->w == 512 && r->mips == 10 && r->fmt == 98 && r->refreshes == 0);
-    CHECK(fm6_tr_find(td_res[1]) == NULL);
-    CHECK(fm6_td_created[0][3] == 1 && fm6_td_created[0][1] == 1);
-    CHECK(log_has("reservada #1 512x512 mips=10 arr=1 fmt=98 addr="));
-    fm6_title_refresh(NULL, td_res[0]);                          /* ainda reservada */
-    CHECK(r->refreshes == 1 && r->first_state == 3 && r->ready == 0 && r->ready_at == 0);
-    fm6_tr_report(1);
-    CHECK(log_has("1 criadas; 0 nunca com refresh (0 com dados), 1 refresh so fora do estado 1 (0 com dados), 0 refresh "
-                  "no estado 1 (0 com dados); estado agora 0:0 1:0 2:0 3:1"));
-    tr_state = 1;                                                /* commit */
-    fm6_title_refresh(NULL, td_res[0]);
-    fm6_title_refresh(NULL, td_res[0]);
-    CHECK(td_refreshes == 3 && r->refreshes == 3 && r->ready == 2 && r->ready_at == 2 && r->first_state == 3);
-    CHECK(log_has("1o refresh no estado 1 = refresh #2 (no 1o: estado 3)"));
-    fm6_tr_report(3);
-    CHECK(log_has("reservada refresh no estado 1: 512x512"));
-    CHECK(log_has("0 refresh so fora do estado 1 (0 com dados), 1 refresh no estado 1"));
-    memset(fm6_trs, 0, sizeof fm6_trs);
-    fm6_tr_n = fm6_tr_logged = fm6_td_calls = 0;
-    memset((void *)fm6_td_created, 0, sizeof fm6_td_created);
-    orig_fm6_placement_tex2d = NULL;
-    orig_title_refresh = NULL;
-    az_title_mem_state = NULL;
 }
 
 /* SOSetTargets do FM6 (0x26 = Azimuth 0x25, stub fatal): desligar (0, NULL, NULL) = no-op; buffer -> Azimuth */
@@ -1553,7 +1410,6 @@ TEST(fm6_nested_bundle_inherits_om)
         CHECK(fr_n == 1 && fr_ctx == j && fr_p == pk && fr_end == pk + sizeof pk);
         CHECK(fm6_dctx_find(j)->st.cb[4][4] == &fcb && fm6_dctx_find(j)->st.ncb[4] == 5);
         CHECK(fm6_dctx_find(j)->st.cbset[4][0] == 1u << 4 && fm6_dctx_find(j)->st.nsrv[4] == 0);
-        CHECK(log_has("b4: objeto novo") && log_has("no PS SetFastResources"));
     }
     /* bundle do worker (sem estado do D3D12) aninhado: parte + copia do estado + bundle */
     b = new_cl();
@@ -1597,7 +1453,7 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(inh_ds_n == 2 && inh_ds == &dssv && inh_ds_ref == 3 && inh_rs_n == 2 && inh_rs == &rsv);
     CHECK(log_has("bundle aninhado executa com o OM do juntador (1 RTs"));
     CHECK(log_has("CBs da copia no imediato"));   /* PASSO 49 */
-    CHECK(log_has("remap distinto #1 SRV no diferido d") && log_has("estagio 4 slot 0 <- estagio 5 slot 3"));
+    CHECK(log_has("estagio 4 slot 0 <- estagio 5 slot 3"));
     CHECK(log_has("depth ") && log_has(" ref 3, rs "));
     CHECK(rtv.ref == 3);                                                 /* f ainda segura as copias */
     CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);
