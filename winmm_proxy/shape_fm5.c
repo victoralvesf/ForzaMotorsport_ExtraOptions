@@ -13,6 +13,7 @@
 extern uint8_t *g_base;
 extern void wlog(const char *fmt, ...);
 extern int is_fm5(void);
+extern int is_fm6(void);
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 
 #define RVA_SHAPE_GRAPH 0x18fbd0
@@ -54,9 +55,24 @@ static void translate_graph(uint64_t *b, uint64_t *e)
     }
 }
 
+/* diagnostico do audio do FM6 (17_fm6.txt PASSO 53): grafos chegam ao interpretador? (sem traducao) */
+static volatile LONG fm6_graphs;
+
+static void fm6_graph_log(uint8_t *graph)
+{
+    uint64_t *b = *(uint64_t **)(graph + 0x48), *e = *(uint64_t **)(graph + 0x50), *p;
+    LONG n = InterlockedIncrement(&fm6_graphs);
+    if (n > 4 && (n & (n - 1))) return;
+    wlog("shape: grafo do FM6 #%ld (%u entradas)", n, (unsigned)(e - b));
+    if (n <= 2)
+        for (p = b; p != e && p - b < 16; p++)
+            wlog("shape:   [%u] %016llx op %u", (unsigned)(p - b), (unsigned long long)*p, (unsigned)(*p & 0x1f));
+}
+
 static uint64_t hook_shape_graph(uint8_t *proc, uint8_t *graph)
 {
     uint64_t ret, *b;
+    if (is_fm6()) fm6_graph_log(graph);
     if (!is_fm5()) return orig_shape_graph(proc, graph);
     b = *(uint64_t **)(graph + 0x48);
     if (graph != pending_graph || b != pending_data)

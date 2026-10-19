@@ -844,6 +844,7 @@ int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook,
 extern int d3d_install(void);
 extern int winrt_install(void);
 extern int shape_install(void);
+extern int audio_fm6_install(void);
 extern int debug12_install(void);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
@@ -1180,6 +1181,7 @@ static int install(void)
 
     /* 9) grafos SHAPE (audio) do XDK do FM5 (shape_fm5.c) */
     if (!shape_install()) return 0;
+    audio_fm6_install();   /* diagnostico do WASAPI do FM6 (audio_fm6.c); se o vtable nao conferir, so loga */
 
     /* 10) diagnostico opcional: debug layer do D3D12 (D3D12Debug no .ini, debug12_fm5.c) */
     debug12_install();

@@ -720,6 +720,7 @@ TEST(install_on_real_azimuth)
     CHECK(fh2_rec > az && fh2_rec < az + 0x3b9000);  /* relocado para dentro da imagem */
     REQUIRE(install());
     CHECK(!log_has("nao confere"));
+    CHECK(log_has("FmodAudioClient (vtable 0x2a1da0) com diagnostico do FM6"));   /* slots do Azimuth conferidos */
     /* allow list {fh2, fh2 f&f, fm5, fm6} */
     span = (void *)(az + RVA_ALLOW_SPAN);
     CHECK_EQ(span->count, 4);
