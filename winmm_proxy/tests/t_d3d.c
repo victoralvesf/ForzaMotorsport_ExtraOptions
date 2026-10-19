@@ -967,6 +967,54 @@ TEST(fm6_small_title_texture_diag)
     az_title_mem_state = NULL;
 }
 
+/* placement maior sobre memoria reservada sem commit (estado 3) -> registro proprio; refresh conta o estado visto */
+static int tr_state;
+static int fake_tr_state(uintptr_t addr, uint64_t size)
+{
+    return addr == 0x1024e0000 && size == 0x10000 ? tr_state : 1;
+}
+
+TEST(fm6_reserved_title_texture_diag)
+{
+    UINT big[11] = { 512, 512, 10, 1, 98, 1, 0, 0, 0x8, 0, 0 };
+    UINT committed[11] = { 256, 256, 9, 1, 71, 1, 0, 0, 0x8, 0, 0 };
+    void *out = NULL;
+    fm6_td *r;
+    orig_fm6_placement_tex2d = fake_td_place;
+    orig_title_refresh = fake_td_refresh;
+    az_title_mem_state = fake_tr_state;
+    pt_place_calls = td_refreshes = 0;
+    tr_state = 3;
+    log_capture();
+    CHECK(fm6_CreatePlacementTexture2D(NULL, big, 14, 0, (void *)0x1024e0000, &out) == 0 && out == td_res[0]);
+    CHECK(fm6_CreatePlacementTexture2D(NULL, committed, 14, 0, (void *)0x1024f0000, &out) == 0 && out == td_res[1]);
+    CHECK(fm6_td_n == 0 && fm6_tr_n == 1);
+    r = fm6_tr_find(td_res[0]);
+    CHECK(r && r->size == 0x10000 && r->w == 512 && r->mips == 10 && r->fmt == 98 && r->refreshes == 0);
+    CHECK(fm6_tr_find(td_res[1]) == NULL);
+    CHECK(fm6_td_created[0][3] == 1 && fm6_td_created[0][1] == 1);
+    CHECK(log_has("reservada #1 512x512 mips=10 arr=1 fmt=98 addr="));
+    fm6_title_refresh(NULL, td_res[0]);                          /* ainda reservada */
+    CHECK(r->refreshes == 1 && r->first_state == 3 && r->ready == 0 && r->ready_at == 0);
+    fm6_tr_report(1);
+    CHECK(log_has("1 criadas; 0 nunca com refresh (0 com dados), 1 refresh so fora do estado 1 (0 com dados), 0 refresh "
+                  "no estado 1 (0 com dados); estado agora 0:0 1:0 2:0 3:1"));
+    tr_state = 1;                                                /* commit */
+    fm6_title_refresh(NULL, td_res[0]);
+    fm6_title_refresh(NULL, td_res[0]);
+    CHECK(td_refreshes == 3 && r->refreshes == 3 && r->ready == 2 && r->ready_at == 2 && r->first_state == 3);
+    CHECK(log_has("1o refresh no estado 1 = refresh #2 (no 1o: estado 3)"));
+    fm6_tr_report(3);
+    CHECK(log_has("reservada refresh no estado 1: 512x512"));
+    CHECK(log_has("0 refresh so fora do estado 1 (0 com dados), 1 refresh no estado 1"));
+    memset(fm6_trs, 0, sizeof fm6_trs);
+    fm6_tr_n = fm6_tr_logged = fm6_td_calls = 0;
+    memset((void *)fm6_td_created, 0, sizeof fm6_td_created);
+    orig_fm6_placement_tex2d = NULL;
+    orig_title_refresh = NULL;
+    az_title_mem_state = NULL;
+}
+
 /* SOSetTargets do FM6 (0x26 = Azimuth 0x25, stub fatal): desligar (0, NULL, NULL) = no-op; buffer -> Azimuth */
 static int so_calls;
 static UINT so_n;

@@ -1394,7 +1394,9 @@ static __attribute__((noinline)) uintptr_t fm6_game_caller(void)
    foi mapeada (conteudo 0). O Azimuth so mapeia/envia uma title texture no refresh_title_texture (0x14014aef0,
    ExecuteCommandList e mais 5 pontos), e so a faixa cuja memoria do jogo esta no estado 1 do rastreador
    (0x140114a80). Cada uma e registrada na criacao (endereco e tamanho do layout do XG em [res+0x128]) e o hook do
-   refresh conta as chamadas; resumo periodico com as que nunca tiveram refresh ou com a memoria em outro estado. */
+   refresh conta as chamadas; resumo periodico com as que nunca tiveram refresh ou com a memoria em outro estado.
+   PASSO 48: as placement maiores criadas sobre memoria reservada sem commit (estado 3; carro sem textura) vao para
+   outro registro, com o estado que cada refresh ve e o 1o refresh no estado 1 (unico em que o Azimuth envia). */
 extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 #define RVA_TITLE_REFRESH   0x14aef0
@@ -1408,10 +1410,13 @@ typedef struct {
     UINT w, h, mips, arr, fmt;
     uintptr_t caller;
     volatile LONG refreshes;
+    volatile LONG ready;        /* refresh com a memoria no estado 1 (antes do original) */
+    LONG ready_at;              /* numero do 1o refresh no estado 1 (0 = nunca) */
     int first_state;
 } fm6_td;
-static fm6_td fm6_tds[FM6_TD_SLOTS];
-static volatile LONG fm6_td_n, fm6_td_calls, fm6_td_logged;
+#define FM6_TR_SLOTS        8192
+static fm6_td fm6_tds[FM6_TD_SLOTS], fm6_trs[FM6_TR_SLOTS];
+static volatile LONG fm6_td_n, fm6_td_calls, fm6_td_logged, fm6_tr_n, fm6_tr_logged;
 static void (*orig_title_refresh)(void *ctx, uint8_t *res);
 static int (*az_title_mem_state)(uintptr_t addr, uint64_t size);
 
@@ -1446,37 +1451,67 @@ static __attribute__((noinline)) void fm6_game_stack(uintptr_t *out, int n)
         if (*sp > g_fm6_game && *sp < g_fm6_game + 0x1800000 && k++ > 0) out[k - 2] = (uintptr_t)(*sp - g_fm6_game);
 }
 
-static fm6_td *fm6_td_find(const uint8_t *res)
+static unsigned fm6_td_hash(const uint8_t *res, unsigned slots)
 {
-    unsigned i = (unsigned)((uintptr_t)res >> 4 ^ (uintptr_t)res >> 18) & (FM6_TD_SLOTS - 1), k;
-    for (k = 0; k < FM6_TD_SLOTS; k++, i = (i + 1) & (FM6_TD_SLOTS - 1)) {
-        uint8_t *r = fm6_tds[i].res;
-        if (r == res) return &fm6_tds[i];
+    return (unsigned)((uintptr_t)res >> 4 ^ (uintptr_t)res >> 18) & (slots - 1);
+}
+
+static fm6_td *fm6_td_find_in(fm6_td *tab, unsigned slots, const uint8_t *res)
+{
+    unsigned i = fm6_td_hash(res, slots), k;
+    for (k = 0; k < slots; k++, i = (i + 1) & (slots - 1)) {
+        uint8_t *r = tab[i].res;
+        if (r == res) return &tab[i];
         if (!r) return NULL;
     }
     return NULL;
 }
 
-/* res recem criado (o mesmo ponteiro reaproveitado zera o registro) */
-static void fm6_td_note(uint8_t *res, const UINT *d, void *addr, uintptr_t caller)
+static fm6_td *fm6_td_find(const uint8_t *res) { return fm6_td_find_in(fm6_tds, FM6_TD_SLOTS, res); }
+static fm6_td *fm6_tr_find(const uint8_t *res) { return fm6_td_find_in(fm6_trs, FM6_TR_SLOTS, res); }
+
+/* res recem criado no registro tab (o mesmo ponteiro reaproveitado zera o registro); NULL com a tabela cheia */
+static fm6_td *fm6_td_put(fm6_td *tab, unsigned slots, uint8_t *res, const UINT *d, void *addr, uintptr_t caller)
 {
-    unsigned i = (unsigned)((uintptr_t)res >> 4 ^ (uintptr_t)res >> 18) & (FM6_TD_SLOTS - 1), k;
+    unsigned i = fm6_td_hash(res, slots), k;
     uint8_t **title = *(uint8_t ***)(res + AZ_RES_TITLE);
     fm6_td *e = NULL;
-    for (k = 0; k < FM6_TD_SLOTS && !e; k++, i = (i + 1) & (FM6_TD_SLOTS - 1)) {
-        uint8_t *r = InterlockedCompareExchangePointer((void *volatile *)&fm6_tds[i].res, res, NULL);
-        if (!r || r == res) e = &fm6_tds[i];
+    for (k = 0; k < slots && !e; k++, i = (i + 1) & (slots - 1)) {
+        uint8_t *r = InterlockedCompareExchangePointer((void *volatile *)&tab[i].res, res, NULL);
+        if (!r || r == res) e = &tab[i];
     }
-    if (!e) return;
+    if (!e) return NULL;
     e->addr = addr;
     e->size = title && title[1] ? *(uint64_t *)(title[1] + 0x10) : 0;
     e->w = d[0]; e->h = d[1]; e->mips = d[2]; e->arr = d[3]; e->fmt = d[4];
     e->caller = caller;
     e->refreshes = 0;
+    e->ready = 0;
+    e->ready_at = 0;
     e->first_state = -1;
+    return e;
+}
+
+/* PASSO 48: placement MAIOR criada sobre memoria reservada sem commit (estado 3) - candidatas ao carro sem textura */
+static void fm6_tr_note(uint8_t *res, const UINT *d, void *addr, uintptr_t caller)
+{
+    fm6_td *e = fm6_td_put(fm6_trs, FM6_TR_SLOTS, res, d, addr, caller);
+    LONG k;
+    if (!e) return;
+    k = InterlockedIncrement(&fm6_tr_n);
+    if (k <= 32 || (k & (k - 1)) == 0)
+        wlog("d3d: reservada #%ld %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx res=%p, chamador game+%#zx", k, e->w,
+             e->h, e->mips, e->arr, e->fmt, addr, (unsigned long long)e->size, (void *)res, caller);
+}
+
+static void fm6_td_note(uint8_t *res, const UINT *d, void *addr, uintptr_t caller)
+{
+    fm6_td *e = fm6_td_put(fm6_tds, FM6_TD_SLOTS, res, d, addr, caller);
+    LONG k;
+    if (!e) return;
     k = InterlockedIncrement(&fm6_td_n);
     if (k <= 32)
-        wlog("d3d: titulo pequeno #%u %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx res=%p, chamador game+%#zx", k,
+        wlog("d3d: titulo pequeno #%ld %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx res=%p, chamador game+%#zx", k,
              e->w, e->h, e->mips, e->arr, e->fmt, addr, (unsigned long long)e->size, (void *)res, caller);
     if (az_title_mem_state && e->size && az_title_mem_state((uintptr_t)addr, e->size) != 1 &&
         InterlockedIncrement(&fm6_td_untracked_logged) <= 24) {
@@ -1492,12 +1527,41 @@ static void fm6_td_note(uint8_t *res, const UINT *d, void *addr, uintptr_t calle
 }
 
 /* estado da memoria (rastreador do Azimuth) de toda placement texture pelo XG na criacao: [pequena][estado] */
-static void fm6_td_count(const UINT *d, uint8_t *res, const void *addr)
+static int fm6_td_count(const UINT *d, uint8_t *res, const void *addr)
 {
     uint8_t **title = *(uint8_t ***)(res + AZ_RES_TITLE);
     uint64_t size = title && title[1] ? *(uint64_t *)(title[1] + 0x10) : 0;
     int st = az_title_mem_state && size ? az_title_mem_state((uintptr_t)addr, size) : -1;
     InterlockedIncrement(&fm6_td_created[fm6_td_small(d)][st >= 0 && st <= 4 ? st : 5]);
+    return st;
+}
+
+/* reservadas: nunca com refresh / refresh so fora do estado 1 / refresh no estado 1 (envio possivel) */
+static void fm6_tr_report(LONG calls)
+{
+    static const char *const kind[3] = { "nunca com refresh", "refresh so fora do estado 1", "refresh no estado 1" };
+    int hist[6] = { 0 }, n[3] = { 0 }, nz[3] = { 0 };
+    unsigned i;
+    for (i = 0; i < FM6_TR_SLOTS; i++) {
+        fm6_td *e = &fm6_trs[i];
+        int st, c;
+        long bytes;
+        if (!e->res) continue;
+        st = az_title_mem_state && e->size ? az_title_mem_state((uintptr_t)e->addr, e->size) : -1;
+        hist[st >= 0 && st <= 4 ? st : 5]++;
+        c = !e->refreshes ? 0 : !e->ready ? 1 : 2;
+        bytes = fm6_td_nonzero(e->addr, e->size);
+        nz[c] += bytes > 0;
+        if (n[c]++ < 4)
+            wlog("d3d: reservada %s: %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx: %ld refresh (%ld no estado 1, 1o no "
+                 "#%ld), estado %d (no 1o refresh %d), %ld bytes != 0, chamador game+%#zx", kind[c], e->w, e->h, e->mips,
+                 e->arr, e->fmt, (void *)e->addr, (unsigned long long)e->size, e->refreshes, e->ready, e->ready_at, st,
+                 e->first_state, bytes, e->caller);
+    }
+    wlog("d3d: reservadas (placement maiores nascidas no estado 3) apos %ld refresh: %ld criadas; %d nunca com refresh "
+         "(%d com dados), %d refresh so fora do estado 1 (%d com dados), %d refresh no estado 1 (%d com dados); estado "
+         "agora 0:%d 1:%d 2:%d 3:%d 4:%d outro:%d", calls, fm6_tr_n, n[0], nz[0], n[1], nz[1], n[2], nz[2], hist[0],
+         hist[1], hist[2], hist[3], hist[4], hist[5]);
 }
 
 static void fm6_td_report(LONG calls)
@@ -1527,8 +1591,10 @@ static void fm6_td_report(LONG calls)
 
 static void fm6_title_refresh(void *ctx, uint8_t *res)
 {
-    fm6_td *e = fm6_td_n ? fm6_td_find(res) : NULL;
-    LONG calls;
+    fm6_td *e = fm6_td_n ? fm6_td_find(res) : NULL, *r = !e && fm6_tr_n ? fm6_tr_find(res) : NULL;
+    LONG calls, k;
+    int st = -1;
+    if (r && az_title_mem_state && r->size) st = az_title_mem_state((uintptr_t)r->addr, r->size);   /* o que o refresh ve */
     orig_title_refresh(ctx, res);
     if (e && InterlockedIncrement(&e->refreshes) == 1) {
         e->first_state = az_title_mem_state && e->size ? az_title_mem_state((uintptr_t)e->addr, e->size) : -1;
@@ -1536,8 +1602,22 @@ static void fm6_title_refresh(void *ctx, uint8_t *res)
             wlog("d3d: titulo pequeno %ux%u mips=%u fmt=%u addr=%p: 1o refresh, estado da memoria %d", e->w, e->h,
                  e->mips, e->fmt, (void *)e->addr, e->first_state);
     }
+    if (r) {
+        k = InterlockedIncrement(&r->refreshes);
+        if (k == 1) r->first_state = st;
+        if (st == 1 && InterlockedIncrement(&r->ready) == 1) {
+            r->ready_at = k;
+            if (InterlockedIncrement(&fm6_tr_logged) <= 32)
+                wlog("d3d: reservada %ux%u mips=%u fmt=%u addr=%p: 1o refresh no estado 1 = refresh #%ld (no 1o: estado "
+                     "%d), %ld bytes != 0", r->w, r->h, r->mips, r->fmt, (void *)r->addr, k, r->first_state,
+                     fm6_td_nonzero(r->addr, r->size));
+        }
+    }
     calls = InterlockedIncrement(&fm6_td_calls);
-    if ((calls & 0x7fff) == 0 && fm6_td_n) fm6_td_report(calls);
+    if ((calls & 0x7fff) == 0) {
+        if (fm6_td_n) fm6_td_report(calls);
+        if (fm6_tr_n) fm6_tr_report(calls);
+    }
 }
 
 int fm6_title_diag_install(void)
@@ -1575,8 +1655,9 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
              fm6_game_caller());
     hr = orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
     if (hr >= 0 && desc && out && *out && orig_title_refresh && desc[8] == 8) {
-        fm6_td_count(desc, *out, addr);
+        int st = fm6_td_count(desc, *out, addr);
         if (fm6_td_small(desc)) fm6_td_note(*out, desc, addr, fm6_game_caller());
+        else if (st == 3) fm6_tr_note(*out, desc, addr, fm6_game_caller());
     }
     return hr;
 }
