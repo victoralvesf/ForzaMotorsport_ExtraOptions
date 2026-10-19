@@ -911,6 +911,57 @@ TEST(fm6_placement_uav_only_committed)
     orig_fm6_placement_tex2d = NULL;
 }
 
+/* diagnostico das texturas pequenas do FM6 (PASSO 46): registro na criacao, contagem de refresh, resumo */
+static uint8_t td_res[2][0x140];
+static uint64_t td_layout[4] = { 0, 0, 0x10000, 0 };
+static uint8_t *td_title[2] = { (uint8_t *)0x1024d0000, (uint8_t *)td_layout };
+static int td_refreshes;
+static long fake_td_place(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
+{
+    (void)dev; (void)desc; (void)tile; (void)pitch; (void)addr;
+    *out = td_res[pt_place_calls++];
+    *(uint8_t ***)(td_res[0] + AZ_RES_TITLE) = td_title;
+    *(uint8_t ***)(td_res[1] + AZ_RES_TITLE) = td_title;
+    return 0;
+}
+static void fake_td_refresh(void *ctx, uint8_t *res) { (void)ctx; (void)res; td_refreshes++; }
+static int fake_td_state(uintptr_t addr, uint64_t size)
+{
+    return addr == 0x1024d0000 && size == 0x10000 ? 2 : -7;
+}
+
+TEST(fm6_small_title_texture_diag)
+{
+    UINT small[11] = { 32, 32, 6, 1, 80, 1, 0, 0, 0x8, 0, 0 };
+    UINT big[11] = { 512, 512, 10, 1, 98, 1, 0, 0, 0x8, 0, 0 };
+    void *out = NULL;
+    fm6_td *e;
+    orig_fm6_placement_tex2d = fake_td_place;
+    orig_title_refresh = fake_td_refresh;
+    az_title_mem_state = fake_td_state;
+    pt_place_calls = td_refreshes = 0;
+    log_capture();
+    CHECK(fm6_CreatePlacementTexture2D(NULL, small, 14, 0, (void *)0x1024d0000, &out) == 0 && out == td_res[0]);
+    CHECK(fm6_CreatePlacementTexture2D(NULL, big, 14, 0, (void *)0x1024e0000, &out) == 0 && out == td_res[1]);
+    CHECK(fm6_td_n == 1);
+    e = fm6_td_find(td_res[0]);
+    CHECK(e && e->size == 0x10000 && e->w == 32 && e->mips == 6 && e->fmt == 80 && e->refreshes == 0);
+    CHECK(fm6_td_find(td_res[1]) == NULL);
+    CHECK(log_has("titulo pequeno #1 32x32 mips=6 arr=1 fmt=80"));
+    fm6_td_report(1);
+    CHECK(log_has("1 criados, 1 nunca com refresh; estado da memoria 0:0 1:0 2:1"));
+    fm6_title_refresh(NULL, td_res[1]);                         /* fora do registro: so repassa */
+    fm6_title_refresh(NULL, td_res[0]);
+    fm6_title_refresh(NULL, td_res[0]);
+    CHECK(td_refreshes == 3 && e->refreshes == 2 && e->first_state == 2);
+    CHECK(log_has("1o refresh, estado da memoria 2"));
+    memset(fm6_tds, 0, sizeof fm6_tds);
+    fm6_td_n = fm6_td_calls = fm6_td_logged = 0;
+    orig_fm6_placement_tex2d = NULL;
+    orig_title_refresh = NULL;
+    az_title_mem_state = NULL;
+}
+
 /* SOSetTargets do FM6 (0x26 = Azimuth 0x25, stub fatal): desligar (0, NULL, NULL) = no-op; buffer -> Azimuth */
 static int so_calls;
 static UINT so_n;

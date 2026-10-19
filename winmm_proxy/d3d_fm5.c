@@ -1389,9 +1389,121 @@ static __attribute__((noinline)) uintptr_t fm6_game_caller(void)
     return 0;
 }
 
+/* Diagnostico das texturas pequenas zeradas (17_fm6.txt PASSO 46): as placement textures pelo layout do XG viram
+   recurso reservado (title_storage); as <= 32x32 com mips cabem inteiras na cauda de mips, que no RenderDoc nunca
+   foi mapeada (conteudo 0). O Azimuth so mapeia/envia uma title texture no refresh_title_texture (0x14014aef0,
+   ExecuteCommandList e mais 5 pontos), e so a faixa cuja memoria do jogo esta no estado 1 do rastreador
+   (0x140114a80). Cada uma e registrada na criacao (endereco e tamanho do layout do XG em [res+0x128]) e o hook do
+   refresh conta as chamadas; resumo periodico com as que nunca tiveram refresh ou com a memoria em outro estado. */
+extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
+extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
+#define RVA_TITLE_REFRESH   0x14aef0
+#define RVA_TITLE_MEM_STATE 0x114a80
+#define AZ_RES_TITLE        0x128      /* [0] endereco no jogo, [1] layout do XG (+0x10 tamanho total) */
+#define FM6_TD_SLOTS        16384
+typedef struct {
+    uint8_t *volatile res;
+    uint8_t *addr;
+    uint64_t size;
+    UINT w, h, mips, arr, fmt;
+    uintptr_t caller;
+    volatile LONG refreshes;
+    int first_state;
+} fm6_td;
+static fm6_td fm6_tds[FM6_TD_SLOTS];
+static volatile LONG fm6_td_n, fm6_td_calls, fm6_td_logged;
+static void (*orig_title_refresh)(void *ctx, uint8_t *res);
+static int (*az_title_mem_state)(uintptr_t addr, uint64_t size);
+
+static int fm6_td_small(const UINT *d) { return d[0] <= 32 && d[1] <= 32 && d[2] > 1; }
+
+static fm6_td *fm6_td_find(const uint8_t *res)
+{
+    unsigned i = (unsigned)((uintptr_t)res >> 4 ^ (uintptr_t)res >> 18) & (FM6_TD_SLOTS - 1), k;
+    for (k = 0; k < FM6_TD_SLOTS; k++, i = (i + 1) & (FM6_TD_SLOTS - 1)) {
+        uint8_t *r = fm6_tds[i].res;
+        if (r == res) return &fm6_tds[i];
+        if (!r) return NULL;
+    }
+    return NULL;
+}
+
+/* res recem criado (o mesmo ponteiro reaproveitado zera o registro) */
+static void fm6_td_note(uint8_t *res, const UINT *d, void *addr, uintptr_t caller)
+{
+    unsigned i = (unsigned)((uintptr_t)res >> 4 ^ (uintptr_t)res >> 18) & (FM6_TD_SLOTS - 1), k;
+    uint8_t **title = *(uint8_t ***)(res + AZ_RES_TITLE);
+    fm6_td *e = NULL;
+    for (k = 0; k < FM6_TD_SLOTS && !e; k++, i = (i + 1) & (FM6_TD_SLOTS - 1)) {
+        uint8_t *r = InterlockedCompareExchangePointer((void *volatile *)&fm6_tds[i].res, res, NULL);
+        if (!r || r == res) e = &fm6_tds[i];
+    }
+    if (!e) return;
+    e->addr = addr;
+    e->size = title && title[1] ? *(uint64_t *)(title[1] + 0x10) : 0;
+    e->w = d[0]; e->h = d[1]; e->mips = d[2]; e->arr = d[3]; e->fmt = d[4];
+    e->caller = caller;
+    e->refreshes = 0;
+    e->first_state = -1;
+    k = InterlockedIncrement(&fm6_td_n);
+    if (k <= 32)
+        wlog("d3d: titulo pequeno #%u %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx res=%p, chamador game+%#zx", k,
+             e->w, e->h, e->mips, e->arr, e->fmt, addr, (unsigned long long)e->size, (void *)res, caller);
+}
+
+static void fm6_td_report(LONG calls)
+{
+    int hist[6] = { 0 }, never = 0, shown_never = 0, shown_state = 0;
+    unsigned i;
+    for (i = 0; i < FM6_TD_SLOTS; i++) {
+        fm6_td *e = &fm6_tds[i];
+        int st;
+        if (!e->res) continue;
+        st = az_title_mem_state && e->size ? az_title_mem_state((uintptr_t)e->addr, e->size) : -1;
+        hist[st >= 0 && st <= 4 ? st : 5]++;
+        if (!e->refreshes) never++;
+        if ((!e->refreshes && shown_never++ < 6) || (e->refreshes && st != 1 && shown_state++ < 6))
+            wlog("d3d: titulo pequeno %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx: %ld refresh, estado %d (no 1o %d), "
+                 "chamador game+%#zx", e->w, e->h, e->mips, e->arr, e->fmt, (void *)e->addr,
+                 (unsigned long long)e->size, e->refreshes, st, e->first_state, e->caller);
+    }
+    wlog("d3d: titulos pequenos apos %ld refresh: %ld criados, %d nunca com refresh; estado da memoria 0:%d 1:%d 2:%d "
+         "3:%d 4:%d outro:%d", calls, fm6_td_n, never, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]);
+}
+
+static void fm6_title_refresh(void *ctx, uint8_t *res)
+{
+    fm6_td *e = fm6_td_n ? fm6_td_find(res) : NULL;
+    LONG calls;
+    orig_title_refresh(ctx, res);
+    if (e && InterlockedIncrement(&e->refreshes) == 1) {
+        e->first_state = az_title_mem_state && e->size ? az_title_mem_state((uintptr_t)e->addr, e->size) : -1;
+        if (InterlockedIncrement(&fm6_td_logged) <= 32)
+            wlog("d3d: titulo pequeno %ux%u mips=%u fmt=%u addr=%p: 1o refresh, estado da memoria %d", e->w, e->h,
+                 e->mips, e->fmt, (void *)e->addr, e->first_state);
+    }
+    calls = InterlockedIncrement(&fm6_td_calls);
+    if ((calls & 0x7fff) == 0 && fm6_td_n) fm6_td_report(calls);
+}
+
+int fm6_title_diag_install(void)
+{
+    if (!bytes_match(g_base + RVA_TITLE_MEM_STATE, "48895c24184889742420574883ec30", 15)) {
+        wlog("d3d: rastreador de memoria do Azimuth (%#x) nao confere; diagnostico de titulos desligado",
+             RVA_TITLE_MEM_STATE);
+        return 0;
+    }
+    if (!hook_function(RVA_TITLE_REFRESH, "48895c24185556574154415541564157", 16, (void *)fm6_title_refresh,
+                       (void **)&orig_title_refresh))
+        return 0;
+    az_title_mem_state = (void *)(g_base + RVA_TITLE_MEM_STATE);
+    return 1;
+}
+
 static ptex2d_fn orig_fm6_placement_tex2d;
 static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
 {
+    long hr;
     if (desc && !az_placement_tex2d_ok(desc) && fm6_placement_uav_only(desc)) {
         static volatile LONG n;
         LONG k = InterlockedIncrement(&n);
@@ -1407,7 +1519,10 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
              "usage=%u bind=%#x cpu=%#x misc=%#x tile=%u pitch=%u addr=%p, chamador game+%#zx", desc[0], desc[1], desc[2],
              desc[3], desc[4], desc[5], desc[6], desc[7], desc[8], desc[9], desc[10], tile, pitch, addr,
              fm6_game_caller());
-    return orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
+    hr = orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
+    if (hr >= 0 && desc && out && *out && orig_title_refresh && desc[8] == 8 && fm6_td_small(desc))
+        fm6_td_note(*out, desc, addr, fm6_game_caller());
+    return hr;
 }
 
 /* Heranca do OM no aninhado (17_fm6.txt PASSO 40/41): as listas dos workers sao DRAW BUNDLES do Azimuth (lista sem
