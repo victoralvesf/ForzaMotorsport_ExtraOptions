@@ -15,7 +15,7 @@ modified on disk**, and FH2 keeps working as before.
 - A clean Azimuth install. The mod expects this exact `azimuth.exe`:
   `SHA-256 579ed8d8b0b16cbf7890380cb7b925c972b837631ede367eada55eae4afc39bc`.
   If your `azimuth.exe` is different, the mod changes nothing and shows a warning
-  ("azimuth.exe diferente do esperado..."). Details go to `azimuth_fm5.log`.
+  ("azimuth.exe diferente do esperado..."). Details go to `azimuth_motorsport.log`.
 - Your own dump of **Forza Motorsport 5, package version 1.0.0.20**. It is a game folder
   containing `Mount\` (with `Mount\AppxManifest.xml`) and `EmbeddedXvd\`, the same layout
   Azimuth uses for FH2.
@@ -48,7 +48,7 @@ The launcher's graphics settings (resolution, frame rate, etc.) also apply to FM
 
 ## Logs and troubleshooting
 
-- `azimuth_fm5.log` (next to `azimuth.exe`) is the mod's log. It is recreated on every run.
+- `azimuth_motorsport.log` (next to `azimuth.exe`) is the mod's log. It is recreated on every run.
 - `data\logs\azimuth.log` is Azimuth's own log. Errors show up as `STOPPED ...` lines.
 
 Include both files when you report a problem.

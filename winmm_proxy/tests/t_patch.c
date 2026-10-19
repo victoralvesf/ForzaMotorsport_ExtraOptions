@@ -75,7 +75,7 @@ uint8_t *fake_azimuth(int game)
 /* imprime o log se o teste falhou (diagnostico) */
 static void dump_log_on_fail(void)
 {
-    if (t_failed) printf("    --- azimuth_fm5.log do teste ---\n%s    ---\n", log_text());
+    if (t_failed) printf("    --- azimuth_motorsport.log do teste ---\n%s    ---\n", log_text());
 }
 
 /* ------------------------------------------------------------------------ */

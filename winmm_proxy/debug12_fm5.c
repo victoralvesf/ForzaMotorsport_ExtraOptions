@@ -4,7 +4,7 @@
  * call [rip] em 0x567df. O hook troca o disp32 desse call por um ponteiro nosso perto da imagem (a IAT fica como
  * esta: o RenderDoc reescreve as IATs depois de nos e apagava um hook ali) e chama o que estiver na IAT. Ele liga a
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
- * validacao no azimuth_fm5.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
+ * validacao no azimuth_motorsport.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
  * D3D12Debug=3 (4 = + experimento do gpuguard_fm6.c: pula a compute interna k12 + [SRV, UAV]; 5 = + placement textures
  * do FM6 committed em vez de reservadas, fm5_patch.c; 6 = + recursos/views nunca destruidos, fm5_patch.c; 7 = + nenhum CopyTextureRegion; 8 = + nenhum draw; 9 = + nenhum Dispatch fora da compute interna, gpuguard_fm6.c): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
  * UINT64_MAX) e grava no log as ultimas listas com a contagem de operacoes e, de cada uma, os pontos de chamada de

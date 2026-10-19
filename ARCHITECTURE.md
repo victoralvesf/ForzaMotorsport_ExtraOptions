@@ -50,7 +50,7 @@ Every change is made in memory, after Azimuth (and later the game) has been mapp
 ## Startup sequence
 
 1. **`DllMain` of the proxy.** It loads the real `winmm.dll`, reads `azimuth_fm5.ini`, opens
-   `azimuth_fm5.log`, and checks that `azimuth.exe` is the expected build.
+   `azimuth_motorsport.log`, and checks that `azimuth.exe` is the expected build.
 2. **Make Azimuth accept FM5.** The proxy builds a description of FM5 in memory, in the same
    format Azimuth uses for its own games (title, expected files and hashes, languages, options).
    It then adds that description to the list of games Azimuth accepts. A few checks that assume
@@ -112,7 +112,7 @@ Kinect speech recognizer. Speech cannot be emulated, so the proxy activates a st
 ### Diagnostics (`debug12_fm5.c`)
 
 With `D3D12Debug=1` (or `2`) in `debug.ini` (section `[Debug]`), the proxy enables the Direct3D 12
-debug layer under Azimuth and writes every validation message to `azimuth_fm5.log` as it happens.
+debug layer under Azimuth and writes every validation message to `azimuth_motorsport.log` as it happens.
 `debug.ini` holds development-only diagnostics (`D3D12Debug`, `DrawSkip`, `DrawSkipHashes`), applies
 to every game the proxy handles and is not shipped in the release.
 

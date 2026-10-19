@@ -29,7 +29,7 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
   (`tools\gen_d3d_thunks.py`, `tools\gen_winmm_stubs.py`).
 - `winmm.dll` (root) = installed proxy (delete it = original Azimuth).
 - `azimuth_fm5.ini` section `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`), `azimuth_fm6.ini` `[FM6]`, `debug.ini` `[Debug]` (`D3D12Debug`, `DrawSkip`, `DrawSkipHashes`;
-  dev only, in git but not in the release zip) and `azimuth_fm5.log` (proxy log).
+  dev only, in git but not in the release zip) and `azimuth_motorsport.log` (proxy log).
 - `game_binaries\FM5\`, `FM6\`, `FH2\` — copied exes/manifest/xg_x.dll per game. Game folders: `E:\Xbox One Games\Forza Motorsport 5`,
   FM6 `E:\Xbox One Games\Monument_1.0.0.44_x64__8wekyb3d8bbwe`.
 - `tools\` — Python RE scripts (capstone) and `dec.ps1` (Ghidra headless). `ghidra\` — already analyzed Ghidra projects.
@@ -44,7 +44,7 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
   proxy, adjust/add the test along with it (expected bytes written in the test, not copied from the table). See `02_ferramentas.txt`.
 - In-game test: `./azimuth.exe "--game=E:\\Xbox One Games\\Forza Motorsport 5" --skip-launcher` from Bash (closes by itself on
   error) or via `System.Diagnostics.Process` in PowerShell to get the full exit code (`Start-Process` hung).
-- Errors show up as `STOPPED ...` in `data\logs\azimuth.log`; see also `azimuth_fm5.log`.
+- Errors show up as `STOPPED ...` in `data\logs\azimuth.log`; see also `azimuth_motorsport.log`.
 - Decompile: `tools\dec.ps1 <gproj|gproj_fh2|gproj_fm5|gproj_xg> <azimuth|fh2|fm5|xg> <program> <out.c> 0xVA ... [x:0xVA]`.
 - Python scripts: `pip install --user capstone` (and `minidump` for `dmp_*.py`); run without `-I`.
 
