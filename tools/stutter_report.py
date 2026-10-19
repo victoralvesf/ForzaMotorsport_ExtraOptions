@@ -26,7 +26,7 @@ by_stack = defaultdict(list)
 rows = []
 with open(path, encoding="utf-8", errors="replace") as f:
     for line in f:
-        if line.startswith("stutter: amostras") or line.startswith("stutter:   tid"):
+        if line.startswith(("stutter: amostras", "stutter:   tid", "stutter:   bloqueada")):
             rows.append(("amostra", line.strip()[9:]))
             continue
         if line.startswith("stutter: 10 s"):

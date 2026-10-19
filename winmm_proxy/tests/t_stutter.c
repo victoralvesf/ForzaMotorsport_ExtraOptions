@@ -22,6 +22,20 @@ TEST(stutter_stall_threshold)
     CHECK(st_stall_ms(33.3) > 49.9 && st_stall_ms(33.3) < 50.0);
 }
 
+/* threads bloqueadas: so as que comecam no jogo (FM6 tem prioridade sobre o FM5) */
+TEST(stutter_blocked_only_game_threads)
+{
+    static uint8_t game[64];
+    uint8_t *old5 = g_game, *old6 = g_fm6_game;
+    g_game = NULL; g_fm6_game = NULL;
+    CHECK(!st_in_game((uintptr_t)game));
+    g_fm6_game = game;
+    CHECK(st_in_game((uintptr_t)game + 0x10));
+    CHECK(!st_in_game((uintptr_t)game - 1));
+    CHECK(!st_in_game((uintptr_t)game + 0x8000000));
+    g_game = old5; g_fm6_game = old6;
+}
+
 TEST(stutter_moving_average)
 {
     static st_avg a;

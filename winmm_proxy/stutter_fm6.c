@@ -461,7 +461,8 @@ void stutter_device(IUnknown *obj)
 
 /* ---- amostrador (PASSO 58): quadro parado ha >= st_stall_ms(media) sem Present -> a cada ~2 ms o tempo de CPU de cada
  * thread (QueryThreadCycleTime) e, nas que rodaram desde a ultima volta, o RIP (SuspendThread/GetThreadContext) e
- * os valores da pilha que caem em codigo do jogo/azimuth/proxy (retornos provaveis; o jogo nao tem unwind). Com a
+ * os valores da pilha que caem em codigo do jogo/azimuth/proxy (retornos provaveis; o jogo nao tem unwind); a cada
+ * ST_BLOCKED_EVERY voltas tambem as threads do jogo que nao rodaram ("bloqueada": onde esperam). Com a
  * thread suspensa nada que pegue lock e chamado (so GetThreadContext e a copia da pilha). No Present seguinte:
  * "stutter: amostras do quadro #N" com as threads de mais CPU e os RIPs mais frequentes (so paradas de
  * >= ST_REPORT_MIN_MS alem do limiar; ST_REPORTS primeiros, depois potencias de 2). ---- */
@@ -469,8 +470,9 @@ void stutter_device(IUnknown *obj)
 #define ST_REPORT_MIN_MS 8    /* paradas mais curtas que isso alem do limiar nao viram relatorio */
 #define ST_REPORTS 1000       /* relatorios completos; depois potencias de 2 */
 #define ST_THREADS 256
-#define ST_SAMPLES 8192
-#define ST_RETS 3
+#define ST_SAMPLES 32768
+#define ST_BLOCKED_EVERY 5   /* a cada 5 voltas (~10 ms) tambem as threads do jogo que nao rodaram (onde estao bloqueadas) */
+#define ST_RETS 4
 #define ST_BUCKET 0x10        /* RIPs agrupados de 16 em 16 bytes */
 
 typedef struct { uintptr_t key; uint32_t n; } st_bin;
@@ -516,12 +518,12 @@ typedef struct {
     ULONG64 c0, cprev;        /* ciclos no inicio da parada / na ultima volta */
 } st_thread;
 
-typedef struct { uint32_t t; uintptr_t rip, ret[ST_RETS]; } st_sample;
+typedef struct { uint32_t t; uint8_t blocked; uintptr_t rip, ret[ST_RETS]; } st_sample;
 
 static st_thread thr[ST_THREADS];
 static uint32_t nthr;
 static st_sample samples[ST_SAMPLES];
-static uint32_t nsamples;
+static uint32_t nsamples, nblocked_ticks;
 static double tsc_per_ms;
 static HMODULE self_mod;
 static uintptr_t code_ranges[3][2];
@@ -585,33 +587,50 @@ static void st_label_any(char *out, uintptr_t a)
     sprintf(out, " %#llx", (unsigned long long)a);
 }
 
-static void st_sample_tick(void)
+static int st_in_game(uintptr_t a)
+{
+    uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+    return game && a >= (uintptr_t)game && a < (uintptr_t)game + 0x8000000;
+}
+
+/* RIP + pilha da thread i (suspensa so durante GetThreadContext e a copia) */
+static void st_capture(uint32_t i, uint8_t blocked)
+{
+    st_thread *t = &thr[i];
+    CONTEXT ctx;
+    uint64_t stack[64];
+    SIZE_T got = 0;
+    int have;
+    if (SuspendThread(t->h) == (DWORD)-1) return;
+    ctx.ContextFlags = CONTEXT_CONTROL;
+    have = GetThreadContext(t->h, &ctx) &&
+           ReadProcessMemory(GetCurrentProcess(), (void *)ctx.Rsp, stack, sizeof stack, &got) && got == sizeof stack;
+    ResumeThread(t->h);
+    if (!have) return;
+    {
+        st_sample *s = &samples[nsamples++];
+        s->t = i;
+        s->blocked = blocked;
+        s->rip = (uintptr_t)ctx.Rip;
+        memset(s->ret, 0, sizeof s->ret);
+        st_scan_returns(stack, 64, (const uintptr_t (*)[2])code_ranges, ncode_ranges, s->ret, ST_RETS);
+    }
+}
+
+static void st_sample_tick(int with_blocked)
 {
     uint32_t i;
     double tick_cycles = tsc_per_ms * 2;
+    if (with_blocked) nblocked_ticks++;
     for (i = 0; i < nthr && nsamples < ST_SAMPLES; i++) {
         st_thread *t = &thr[i];
         ULONG64 c = 0;
-        CONTEXT ctx;
-        uint64_t stack[64];
-        SIZE_T got = 0;
-        int have;
+        int ran;
         if (!QueryThreadCycleTime(t->h, &c)) continue;
-        if ((double)(c - t->cprev) < tick_cycles * 0.3) { t->cprev = c; continue; }   /* quase nao rodou */
+        ran = (double)(c - t->cprev) >= tick_cycles * 0.3;   /* senao quase nao rodou */
         t->cprev = c;
-        if (SuspendThread(t->h) == (DWORD)-1) continue;
-        ctx.ContextFlags = CONTEXT_CONTROL;
-        have = GetThreadContext(t->h, &ctx) &&
-               ReadProcessMemory(GetCurrentProcess(), (void *)ctx.Rsp, stack, sizeof stack, &got) && got == sizeof stack;
-        ResumeThread(t->h);
-        if (!have) continue;
-        {
-            st_sample *s = &samples[nsamples++];
-            s->t = i;
-            s->rip = (uintptr_t)ctx.Rip;
-            memset(s->ret, 0, sizeof s->ret);
-            st_scan_returns(stack, 64, (const uintptr_t (*)[2])code_ranges, ncode_ranges, s->ret, ST_RETS);
-        }
+        if (ran) st_capture(i, 0);
+        else if (with_blocked && st_in_game(t->start)) st_capture(i, 1);
     }
 }
 
@@ -620,6 +639,41 @@ static int cmp_cycles(const void *a, const void *b)
     const st_thread *x = a, *y = b;
     ULONG64 dx = x->cprev - x->c0, dy = y->cprev - y->c0;
     return dx < dy ? 1 : dx > dy ? -1 : 0;
+}
+
+/* threads do jogo bloqueadas na maior parte da parada: onde (1o retorno em game/azimuth/proxy; RIP = syscall) */
+static void st_report_blocked(void)
+{
+    static st_bin hist[ST_THREADS], sites[256];
+    char buf[2000], one[96];
+    uint32_t i, j, used = 0, top, shown = 0;
+    int len;
+    if (!nblocked_ticks) return;
+    for (i = 0; i < nsamples; i++) if (samples[i].blocked) st_hist_add(hist, ST_THREADS, &used, samples[i].t);
+    st_hist_sort(hist, used);
+    for (top = 0; top < used && shown < 12; top++) {
+        uint32_t ns = 0, tidx = (uint32_t)hist[top].key;
+        if (hist[top].n * 2 < nblocked_ticks) break;          /* bloqueada menos da metade da parada */
+        for (i = 0; i < nsamples; i++)
+            if (samples[i].t == tidx && samples[i].blocked) st_hist_add(sites, 256, &ns, samples[i].ret[0] ? samples[i].ret[0] : samples[i].rip);
+        st_hist_sort(sites, ns);
+        st_label_any(one, thr[tidx].start);
+        len = sprintf(buf, "stutter:   bloqueada tid %lu inicio%s (%u de %u):", thr[tidx].tid, one, hist[top].n, nblocked_ticks);
+        for (j = 0; j < ns && j < 3 && len < 1700; j++) {
+            uint32_t q;
+            for (i = 0; i < nsamples; i++)
+                if (samples[i].t == tidx && samples[i].blocked && (samples[i].ret[0] ? samples[i].ret[0] : samples[i].rip) == sites[j].key) break;
+            st_label_any(one, samples[i].rip);
+            len += sprintf(buf + len, "%s x%u <", one, sites[j].n);
+            for (q = 0; q < ST_RETS && samples[i].ret[q]; q++) {
+                st_label_any(one, samples[i].ret[q]);
+                len += sprintf(buf + len, "%s", one);
+            }
+            len += sprintf(buf + len, " >;");
+        }
+        wlog("%s", buf);
+        shown++;
+    }
 }
 
 static void st_report(LONG frame, double stalled_ms, double limit_ms)
@@ -647,19 +701,19 @@ static void st_report(LONG frame, double stalled_ms, double limit_ms)
                        sorted[i].name, sorted[i].name[0] ? "'" : "", ms, one);
     }
     wlog("%s", buf);
-    for (i = 0; i < nsamples; i++) st_hist_add(hist, ST_THREADS, &used, samples[i].t);
+    for (i = 0; i < nsamples; i++) if (!samples[i].blocked) st_hist_add(hist, ST_THREADS, &used, samples[i].t);
     st_hist_sort(hist, used);
     for (top = 0; top < used && top < 4; top++) {
         uint32_t nr = 0, tidx = (uint32_t)hist[top].key;
         for (i = 0; i < nsamples; i++)
-            if (samples[i].t == tidx) st_hist_add(rips, 512, &nr, samples[i].rip & ~(uintptr_t)(ST_BUCKET - 1));
+            if (samples[i].t == tidx && !samples[i].blocked) st_hist_add(rips, 512, &nr, samples[i].rip & ~(uintptr_t)(ST_BUCKET - 1));
         st_hist_sort(rips, nr);
         len = sprintf(buf, "stutter:   tid %lu (%u amostras):", thr[tidx].tid, hist[top].n);
         for (j = 0; j < nr && j < 10 && len < 1700; j++) {
             st_label_any(one, rips[j].key);
             len += sprintf(buf + len, "%s x%u", one, rips[j].n);
             for (i = 0; i < nsamples; i++)          /* retornos provaveis da 1a amostra desse RIP */
-                if (samples[i].t == tidx && (samples[i].rip & ~(uintptr_t)(ST_BUCKET - 1)) == rips[j].key) break;
+                if (samples[i].t == tidx && !samples[i].blocked && (samples[i].rip & ~(uintptr_t)(ST_BUCKET - 1)) == rips[j].key) break;
             if (i < nsamples && samples[i].ret[0]) {
                 uint32_t q;
                 len += sprintf(buf + len, " <");
@@ -673,6 +727,7 @@ static void st_report(LONG frame, double stalled_ms, double limit_ms)
         }
         wlog("%s", buf);
     }
+    st_report_blocked();
 }
 
 static DWORD WINAPI st_sampler(void *arg)
@@ -682,6 +737,7 @@ static DWORD WINAPI st_sampler(void *arg)
     LONG stall_frame = 0;
     int stalled = 0;
     double limit = ST_STALL_MS;
+    uint32_t ticks = 0;
     (void)arg;
     {   /* ciclos do TSC por ms (QueryThreadCycleTime conta ciclos do TSC) */
         LONG64 q0 = qpc();
@@ -713,7 +769,7 @@ static DWORD WINAPI st_sampler(void *arg)
                 st_report(stall_frame, ms_of(now - stall_frame_start) - limit, limit);
                 stalled = 0;
             } else {
-                st_sample_tick();
+                st_sample_tick(++ticks % ST_BLOCKED_EVERY == 0);
             }
             continue;
         }
@@ -724,6 +780,8 @@ static DWORD WINAPI st_sampler(void *arg)
             stall_frame_start = fs;
             stall_frame = frame_no + 1;
             nsamples = 0;
+            nblocked_ticks = 0;
+            ticks = 0;
             for (i = 0; i < nthr; i++) { QueryThreadCycleTime(thr[i].h, &thr[i].c0); thr[i].cprev = thr[i].c0; }
             continue;
         }
