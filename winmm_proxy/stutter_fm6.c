@@ -8,7 +8,7 @@
  *  - ExecuteCommandLists (chamadas, listas, tempo);
  *  - esperas longas (>= 4 ms) do azimuth.exe (WaitFor*, SleepConditionVariableSRW, WaitOnAddress, Sleep*) que
  *    terminaram no intervalo, as maiores com thread e pilha (game+/azimuth+); "P" = thread do Present.
- * A cada 10 s um resumo (media, p99, maximo, picos).
+ * A cada 10 s um resumo (media, p99, maximo, picos). Amostrador de CPU/RIP nos quadros parados: ver st_sampler.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -16,6 +16,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <d3d12.h>
+#include <tlhelp32.h>
+#include <intrin.h>
 #include <dxgi1_2.h>
 
 extern uint8_t *g_base;
@@ -192,13 +194,13 @@ static void vt_swap(void **slot, void *hook, void **orig)
 }
 
 /* ---- quadro (Present do host) ---- */
-static LONG64 frame_start;
+static volatile LONG64 frame_start;
 static DWORD present_tid;
 static st_avg avg;
 static float sum_frames[ST_SUM_FRAMES];
 static uint32_t sum_n, sum_spikes;
 static LONG64 sum_t0;
-static LONG frame_no, spikes;
+static volatile LONG frame_no, spikes;
 static float sum_max;
 
 static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 t0, LONG64 t1)
@@ -457,6 +459,266 @@ void stutter_device(IUnknown *obj)
     wlog("stutter: device D3D12 com medicao (PSOs, recursos, ExecuteCommandLists)");
 }
 
+/* ---- amostrador (PASSO 58): quadro parado ha >= ST_STALL_MS sem Present -> a cada ~2 ms o tempo de CPU de cada
+ * thread (QueryThreadCycleTime) e, nas que rodaram desde a ultima volta, o RIP (SuspendThread/GetThreadContext) e
+ * os valores da pilha que caem em codigo do jogo/azimuth/proxy (retornos provaveis; o jogo nao tem unwind). Com a
+ * thread suspensa nada que pegue lock e chamado (so GetThreadContext e a copia da pilha). No Present seguinte:
+ * "stutter: amostras do quadro #N" com as threads de mais CPU e os RIPs mais frequentes. ---- */
+#define ST_STALL_MS 30
+#define ST_THREADS 256
+#define ST_SAMPLES 8192
+#define ST_RETS 3
+#define ST_BUCKET 0x10        /* RIPs agrupados de 16 em 16 bytes */
+
+typedef struct { uintptr_t key; uint32_t n; } st_bin;
+
+/* histograma pequeno: incrementa a chave (ou entra se houver lugar); devolve 0 se cheio */
+int st_hist_add(st_bin *h, uint32_t cap, uint32_t *used, uintptr_t key)
+{
+    uint32_t i;
+    for (i = 0; i < *used; i++) if (h[i].key == key) { h[i].n++; return 1; }
+    if (*used >= cap) return 0;
+    h[*used].key = key; h[*used].n = 1; (*used)++;
+    return 1;
+}
+
+static int cmp_bin(const void *a, const void *b)
+{
+    const st_bin *x = a, *y = b;
+    return x->n < y->n ? 1 : x->n > y->n ? -1 : 0;
+}
+void st_hist_sort(st_bin *h, uint32_t used) { qsort(h, used, sizeof *h, cmp_bin); }
+
+/* valores de uma copia da pilha que caem em algum intervalo [lo, hi) (retornos provaveis), ate max */
+uint32_t st_scan_returns(const uint64_t *stack, uint32_t n, const uintptr_t (*ranges)[2], uint32_t nranges, uintptr_t *out, uint32_t max)
+{
+    uint32_t i, j, k = 0;
+    for (i = 0; i < n && k < max; i++)
+        for (j = 0; j < nranges; j++)
+            if (stack[i] >= ranges[j][0] && stack[i] < ranges[j][1]) { out[k++] = (uintptr_t)stack[i]; break; }
+    return k;
+}
+
+typedef struct {
+    DWORD tid;
+    HANDLE h;
+    uintptr_t start;
+    char name[32];
+    ULONG64 c0, cprev;        /* ciclos no inicio da parada / na ultima volta */
+} st_thread;
+
+typedef struct { uint32_t t; uintptr_t rip, ret[ST_RETS]; } st_sample;
+
+static st_thread thr[ST_THREADS];
+static uint32_t nthr;
+static st_sample samples[ST_SAMPLES];
+static uint32_t nsamples;
+static double tsc_per_ms;
+static HMODULE self_mod;
+static uintptr_t code_ranges[3][2];
+static uint32_t ncode_ranges;
+
+typedef LONG (WINAPI *nqit_fn)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+typedef HRESULT (WINAPI *gtd_fn)(HANDLE, PWSTR *);
+
+static void st_refresh_threads(void)
+{
+    static nqit_fn nqit;
+    static gtd_fn gtd;
+    HANDLE snap;
+    THREADENTRY32 te;
+    BOOL ok;
+    DWORD pid = GetCurrentProcessId(), me = GetCurrentThreadId();
+    uint32_t i;
+    if (!nqit) nqit = (nqit_fn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread");
+    if (!gtd) gtd = (gtd_fn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
+    for (i = 0; i < nthr; i++) CloseHandle(thr[i].h);
+    nthr = 0;
+    snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    te.dwSize = sizeof te;
+    for (ok = Thread32First(snap, &te); ok && nthr < ST_THREADS; ok = Thread32Next(snap, &te)) {
+        st_thread *t = &thr[nthr];
+        PWSTR desc = NULL;
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
+        t->h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+        if (!t->h) continue;
+        t->tid = te.th32ThreadID;
+        t->start = 0;
+        if (nqit) nqit(t->h, 9 /* ThreadQuerySetWin32StartAddress */, &t->start, sizeof t->start, NULL);
+        t->name[0] = 0;
+        if (gtd && SUCCEEDED(gtd(t->h, &desc)) && desc) {
+            int k;
+            for (k = 0; desc[k] && k < 31; k++) t->name[k] = desc[k] < 128 ? (char)desc[k] : '?';
+            t->name[k] = 0;
+            LocalFree(desc);
+        }
+        nthr++;
+    }
+    CloseHandle(snap);
+}
+
+/* rotulo de qualquer endereco: game+/azimuth+/winmm+ ou <modulo>+ (so fora da amostragem: pega o loader lock) */
+static void st_label_any(char *out, uintptr_t a)
+{
+    HMODULE m = NULL;
+    char path[MAX_PATH], *base;
+    st_label(out, (void *)a);
+    if (out[0]) return;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)a, &m) && m) {
+        if (m == self_mod) { wsprintfA(out, " winmm+%#x", (unsigned)(a - (uintptr_t)m)); return; }
+        GetModuleFileNameA(m, path, sizeof path);
+        base = strrchr(path, '\\');
+        wsprintfA(out, " %s+%#x", base ? base + 1 : path, (unsigned)(a - (uintptr_t)m));
+        return;
+    }
+    sprintf(out, " %#llx", (unsigned long long)a);
+}
+
+static void st_sample_tick(void)
+{
+    uint32_t i;
+    double tick_cycles = tsc_per_ms * 2;
+    for (i = 0; i < nthr && nsamples < ST_SAMPLES; i++) {
+        st_thread *t = &thr[i];
+        ULONG64 c = 0;
+        CONTEXT ctx;
+        uint64_t stack[64];
+        SIZE_T got = 0;
+        int have;
+        if (!QueryThreadCycleTime(t->h, &c)) continue;
+        if ((double)(c - t->cprev) < tick_cycles * 0.3) { t->cprev = c; continue; }   /* quase nao rodou */
+        t->cprev = c;
+        if (SuspendThread(t->h) == (DWORD)-1) continue;
+        ctx.ContextFlags = CONTEXT_CONTROL;
+        have = GetThreadContext(t->h, &ctx) &&
+               ReadProcessMemory(GetCurrentProcess(), (void *)ctx.Rsp, stack, sizeof stack, &got) && got == sizeof stack;
+        ResumeThread(t->h);
+        if (!have) continue;
+        {
+            st_sample *s = &samples[nsamples++];
+            s->t = i;
+            s->rip = (uintptr_t)ctx.Rip;
+            memset(s->ret, 0, sizeof s->ret);
+            st_scan_returns(stack, 64, (const uintptr_t (*)[2])code_ranges, ncode_ranges, s->ret, ST_RETS);
+        }
+    }
+}
+
+static int cmp_cycles(const void *a, const void *b)
+{
+    const st_thread *x = a, *y = b;
+    ULONG64 dx = x->cprev - x->c0, dy = y->cprev - y->c0;
+    return dx < dy ? 1 : dx > dy ? -1 : 0;
+}
+
+static void st_report(LONG frame, double stalled_ms)
+{
+    static volatile LONG reports;
+    static st_bin hist[ST_THREADS], rips[512];
+    static st_thread sorted[ST_THREADS];
+    char buf[2000], one[96];
+    uint32_t i, j, used = 0, top;
+    int len;
+    LONG k = InterlockedIncrement(&reports);
+    if (k > 300 && (k & (k - 1))) return;
+    for (i = 0; i < nthr; i++) QueryThreadCycleTime(thr[i].h, &thr[i].cprev);
+    memcpy(sorted, thr, nthr * sizeof *thr);   /* as amostras guardam o indice em thr: ordenar uma copia */
+    qsort(sorted, nthr, sizeof *sorted, cmp_cycles);
+    len = sprintf(buf, "stutter: amostras do quadro #%ld: %.1f ms parado (apos %d ms), %u amostras; CPU:", frame, stalled_ms,
+                  ST_STALL_MS, nsamples);
+    for (i = 0; i < nthr && i < 8 && len < 1700; i++) {
+        double ms = (sorted[i].cprev - sorted[i].c0) / tsc_per_ms;
+        if (ms < 1) break;
+        st_label_any(one, sorted[i].start);
+        len += sprintf(buf + len, " [tid %lu%s%s%s %.1f ms inicio%s]", sorted[i].tid, sorted[i].name[0] ? " '" : "",
+                       sorted[i].name, sorted[i].name[0] ? "'" : "", ms, one);
+    }
+    wlog("%s", buf);
+    for (i = 0; i < nsamples; i++) st_hist_add(hist, ST_THREADS, &used, samples[i].t);
+    st_hist_sort(hist, used);
+    for (top = 0; top < used && top < 4; top++) {
+        uint32_t nr = 0, tidx = (uint32_t)hist[top].key;
+        for (i = 0; i < nsamples; i++)
+            if (samples[i].t == tidx) st_hist_add(rips, 512, &nr, samples[i].rip & ~(uintptr_t)(ST_BUCKET - 1));
+        st_hist_sort(rips, nr);
+        len = sprintf(buf, "stutter:   tid %lu (%u amostras):", thr[tidx].tid, hist[top].n);
+        for (j = 0; j < nr && j < 10 && len < 1700; j++) {
+            st_label_any(one, rips[j].key);
+            len += sprintf(buf + len, "%s x%u", one, rips[j].n);
+            for (i = 0; i < nsamples; i++)          /* retornos provaveis da 1a amostra desse RIP */
+                if (samples[i].t == tidx && (samples[i].rip & ~(uintptr_t)(ST_BUCKET - 1)) == rips[j].key) break;
+            if (i < nsamples && samples[i].ret[0]) {
+                uint32_t q;
+                len += sprintf(buf + len, " <");
+                for (q = 0; q < ST_RETS && samples[i].ret[q]; q++) {
+                    st_label_any(one, samples[i].ret[q]);
+                    len += sprintf(buf + len, "%s", one);
+                }
+                len += sprintf(buf + len, " >");
+            }
+            len += sprintf(buf + len, ";");
+        }
+        wlog("%s", buf);
+    }
+}
+
+static DWORD WINAPI st_sampler(void *arg)
+{
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 2 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    LONG64 last_refresh = 0, stall_frame_start = 0;
+    LONG stall_frame = 0;
+    int stalled = 0;
+    (void)arg;
+    {   /* ciclos do TSC por ms (QueryThreadCycleTime conta ciclos do TSC) */
+        LONG64 q0 = qpc();
+        unsigned long long c0 = __rdtsc();
+        Sleep(50);
+        tsc_per_ms = (double)(__rdtsc() - c0) / ms_of(qpc() - q0);
+    }
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       (LPCWSTR)(void *)st_sampler, &self_mod);
+    wlog("stutter: amostrador ligado (TSC %.0f MHz; quadro parado >= %d ms -> CPU por thread e RIPs a cada ~2 ms)",
+         tsc_per_ms / 1000, ST_STALL_MS);
+    for (;;) {
+        LARGE_INTEGER due;
+        LONG64 now, fs;
+        due.QuadPart = -20000;   /* 2 ms */
+        if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
+        else Sleep(2);
+        now = qpc();
+        fs = frame_start;
+        if (!fs) continue;
+        if (!ncode_ranges) {   /* depois do 1o Present o jogo ja esta carregado */
+            uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+            if (game) { code_ranges[ncode_ranges][0] = (uintptr_t)game; code_ranges[ncode_ranges++][1] = (uintptr_t)game + 0x8000000; }
+            code_ranges[ncode_ranges][0] = (uintptr_t)g_base; code_ranges[ncode_ranges++][1] = (uintptr_t)g_base + 0x1000000;
+            code_ranges[ncode_ranges][0] = (uintptr_t)self_mod; code_ranges[ncode_ranges++][1] = (uintptr_t)self_mod + 0x200000;
+        }
+        if (stalled) {
+            if (fs != stall_frame_start) {   /* Present chegou: fim da parada */
+                st_report(stall_frame, ms_of(now - stall_frame_start) - ST_STALL_MS);
+                stalled = 0;
+            } else {
+                st_sample_tick();
+            }
+            continue;
+        }
+        if (ms_of(now - fs) >= ST_STALL_MS && nthr) {
+            uint32_t i;
+            stalled = 1;
+            stall_frame_start = fs;
+            stall_frame = frame_no + 1;
+            nsamples = 0;
+            for (i = 0; i < nthr; i++) { QueryThreadCycleTime(thr[i].h, &thr[i].c0); thr[i].cprev = thr[i].c0; }
+            continue;
+        }
+        if (ms_of(now - last_refresh) >= 1000) { st_refresh_threads(); last_refresh = qpc(); }
+    }
+    return 0;
+}
+
 /* DllMain (fm5_patch.c install): fabrica DXGI e esperas pela IAT do azimuth.exe */
 void stutter_install(void)
 {
@@ -480,5 +742,6 @@ void stutter_install(void)
         }
     }
     for (i = 0; i < 7; i++) n += iat_swap(wait_iat[i], wait_names[i], wait_hooks[i], &wait_real[i]);
+    CloseHandle(CreateThread(NULL, 0, st_sampler, NULL, 0, NULL));
     wlog("stutter: ligado (picos >= 25 ms e >= 1,8x a media; %d de 7 esperas do azimuth.exe medidas)", n);
 }

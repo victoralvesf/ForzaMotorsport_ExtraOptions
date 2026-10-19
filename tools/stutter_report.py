@@ -2,7 +2,7 @@
 
 uso: python tools/stutter_report.py [azimuth_motorsport.log] [--min MS]
 Por pico: quadro, ms, media, tempo no Present, PSO/recursos/ECL e a espera da thread do Present (P);
-no fim: picos agrupados pela pilha da espera mais longa fora das threads ociosas.
+as linhas do amostrador (CPU por thread, RIPs) logo abaixo; no fim: picos agrupados pela pilha da espera mais longa fora das threads ociosas.
 """
 import re
 import sys
@@ -26,6 +26,9 @@ by_stack = defaultdict(list)
 rows = []
 with open(path, encoding="utf-8", errors="replace") as f:
     for line in f:
+        if line.startswith("stutter: amostras") or line.startswith("stutter:   tid"):
+            rows.append(("amostra", line.strip()[9:]))
+            continue
         if line.startswith("stutter: 10 s"):
             rows.append(("resumo", line.strip()[9:]))
             continue
@@ -44,7 +47,7 @@ with open(path, encoding="utf-8", errors="replace") as f:
             by_stack[p[0][0] + p[0][4]].append(float(ms))
 
 for kind, text in rows:
-    print(("  " if kind == "pico" else "-- ") + text)
+    print({"pico": "  ", "amostra": "      "}.get(kind, "-- ") + text)
 print()
 print("espera da thread do Present nos picos (pilha -> picos, soma ms):")
 for k, v in sorted(by_stack.items(), key=lambda kv: -sum(kv[1])):

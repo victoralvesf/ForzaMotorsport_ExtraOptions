@@ -100,3 +100,35 @@ TEST(stutter_install_checks_iat)
     st_on = 0;
     dbgini_set(NULL);
 }
+
+/* amostrador: histograma de RIPs (cheio = recusa chave nova) e ordem por contagem */
+TEST(stutter_rip_histogram)
+{
+    st_bin h[3];
+    uint32_t used = 0;
+    CHECK(st_hist_add(h, 3, &used, 0x100));
+    CHECK(st_hist_add(h, 3, &used, 0x200));
+    CHECK(st_hist_add(h, 3, &used, 0x200));
+    CHECK(st_hist_add(h, 3, &used, 0x300));
+    CHECK(st_hist_add(h, 3, &used, 0x300));
+    CHECK(st_hist_add(h, 3, &used, 0x300));
+    CHECK(!st_hist_add(h, 3, &used, 0x400));   /* cheio */
+    CHECK(st_hist_add(h, 3, &used, 0x100));    /* existente ainda conta */
+    st_hist_sort(h, used);
+    CHECK_EQ(used, 3);
+    CHECK_EQ(h[0].key, 0x300); CHECK_EQ(h[0].n, 3);
+    CHECK_EQ(h[1].n, 2); CHECK_EQ(h[2].n, 2);
+}
+
+/* retornos provaveis: valores da pilha dentro dos intervalos de codigo, na ordem da pilha, ate o limite */
+TEST(stutter_stack_returns)
+{
+    const uintptr_t ranges[2][2] = { { 0x140000000ull, 0x148000000ull }, { 0x7ff600000000ull, 0x7ff601000000ull } };
+    const uint64_t stack[6] = { 0x1234, 0x140123456ull, 0x148000000ull, 0x7ff600abcdefull, 0x140000010ull, 0x140000020ull };
+    uintptr_t out[3] = { 0 };
+    CHECK_EQ(st_scan_returns(stack, 6, ranges, 2, out, 3), 3);
+    CHECK_EQ(out[0], 0x140123456ull);
+    CHECK_EQ(out[1], 0x7ff600abcdefull);       /* 0x148000000 = fim exclusivo */
+    CHECK_EQ(out[2], 0x140000010ull);
+    CHECK_EQ(st_scan_returns(stack, 1, ranges, 2, out, 3), 0);
+}
