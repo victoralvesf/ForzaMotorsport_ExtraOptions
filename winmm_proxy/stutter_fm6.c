@@ -459,12 +459,15 @@ void stutter_device(IUnknown *obj)
     wlog("stutter: device D3D12 com medicao (PSOs, recursos, ExecuteCommandLists)");
 }
 
-/* ---- amostrador (PASSO 58): quadro parado ha >= ST_STALL_MS sem Present -> a cada ~2 ms o tempo de CPU de cada
+/* ---- amostrador (PASSO 58): quadro parado ha >= st_stall_ms(media) sem Present -> a cada ~2 ms o tempo de CPU de cada
  * thread (QueryThreadCycleTime) e, nas que rodaram desde a ultima volta, o RIP (SuspendThread/GetThreadContext) e
  * os valores da pilha que caem em codigo do jogo/azimuth/proxy (retornos provaveis; o jogo nao tem unwind). Com a
  * thread suspensa nada que pegue lock e chamado (so GetThreadContext e a copia da pilha). No Present seguinte:
- * "stutter: amostras do quadro #N" com as threads de mais CPU e os RIPs mais frequentes. ---- */
+ * "stutter: amostras do quadro #N" com as threads de mais CPU e os RIPs mais frequentes (so paradas de
+ * >= ST_REPORT_MIN_MS alem do limiar; ST_REPORTS primeiros, depois potencias de 2). ---- */
 #define ST_STALL_MS 30
+#define ST_REPORT_MIN_MS 8    /* paradas mais curtas que isso alem do limiar nao viram relatorio */
+#define ST_REPORTS 1000       /* relatorios completos; depois potencias de 2 */
 #define ST_THREADS 256
 #define ST_SAMPLES 8192
 #define ST_RETS 3
@@ -488,6 +491,12 @@ static int cmp_bin(const void *a, const void *b)
     return x->n < y->n ? 1 : x->n > y->n ? -1 : 0;
 }
 void st_hist_sort(st_bin *h, uint32_t used) { qsort(h, used, sizeof *h, cmp_bin); }
+
+/* limiar da parada: 30 ms ou 1,5x a media (a 30 fps todo quadro passava de 30 ms e gastava os relatorios no menu) */
+double st_stall_ms(double avg_ms)
+{
+    return avg_ms * 1.5 > ST_STALL_MS ? avg_ms * 1.5 : ST_STALL_MS;
+}
 
 /* valores de uma copia da pilha que caem em algum intervalo [lo, hi) (retornos provaveis), ate max */
 uint32_t st_scan_returns(const uint64_t *stack, uint32_t n, const uintptr_t (*ranges)[2], uint32_t nranges, uintptr_t *out, uint32_t max)
@@ -613,21 +622,23 @@ static int cmp_cycles(const void *a, const void *b)
     return dx < dy ? 1 : dx > dy ? -1 : 0;
 }
 
-static void st_report(LONG frame, double stalled_ms)
+static void st_report(LONG frame, double stalled_ms, double limit_ms)
 {
-    static volatile LONG reports;
+    static LONG reports;
     static st_bin hist[ST_THREADS], rips[512];
     static st_thread sorted[ST_THREADS];
     char buf[2000], one[96];
     uint32_t i, j, used = 0, top;
     int len;
-    LONG k = InterlockedIncrement(&reports);
-    if (k > 300 && (k & (k - 1))) return;
+    LONG k;
+    if (stalled_ms < ST_REPORT_MIN_MS) return;
+    k = ++reports;
+    if (k > ST_REPORTS && (k & (k - 1))) return;
     for (i = 0; i < nthr; i++) QueryThreadCycleTime(thr[i].h, &thr[i].cprev);
     memcpy(sorted, thr, nthr * sizeof *thr);   /* as amostras guardam o indice em thr: ordenar uma copia */
     qsort(sorted, nthr, sizeof *sorted, cmp_cycles);
-    len = sprintf(buf, "stutter: amostras do quadro #%ld: %.1f ms parado (apos %d ms), %u amostras; CPU:", frame, stalled_ms,
-                  ST_STALL_MS, nsamples);
+    len = sprintf(buf, "stutter: amostras do quadro #%ld: %.1f ms parado (apos %.0f ms), %u amostras; CPU:", frame, stalled_ms,
+                  limit_ms, nsamples);
     for (i = 0; i < nthr && i < 8 && len < 1700; i++) {
         double ms = (sorted[i].cprev - sorted[i].c0) / tsc_per_ms;
         if (ms < 1) break;
@@ -670,6 +681,7 @@ static DWORD WINAPI st_sampler(void *arg)
     LONG64 last_refresh = 0, stall_frame_start = 0;
     LONG stall_frame = 0;
     int stalled = 0;
+    double limit = ST_STALL_MS;
     (void)arg;
     {   /* ciclos do TSC por ms (QueryThreadCycleTime conta ciclos do TSC) */
         LONG64 q0 = qpc();
@@ -698,14 +710,15 @@ static DWORD WINAPI st_sampler(void *arg)
         }
         if (stalled) {
             if (fs != stall_frame_start) {   /* Present chegou: fim da parada */
-                st_report(stall_frame, ms_of(now - stall_frame_start) - ST_STALL_MS);
+                st_report(stall_frame, ms_of(now - stall_frame_start) - limit, limit);
                 stalled = 0;
             } else {
                 st_sample_tick();
             }
             continue;
         }
-        if (ms_of(now - fs) >= ST_STALL_MS && nthr) {
+        limit = st_stall_ms(st_avg_get(&avg));
+        if (ms_of(now - fs) >= limit && nthr) {
             uint32_t i;
             stalled = 1;
             stall_frame_start = fs;

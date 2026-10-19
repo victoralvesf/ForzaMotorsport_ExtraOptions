@@ -14,6 +14,14 @@ TEST(stutter_spike_rule)
     CHECK(st_is_spike(90, 33.3));
 }
 
+/* limiar da parada do amostrador: 30 ms ou 1,5x a media */
+TEST(stutter_stall_threshold)
+{
+    CHECK(st_stall_ms(0) == 30);
+    CHECK(st_stall_ms(16.7) == 30);
+    CHECK(st_stall_ms(33.3) > 49.9 && st_stall_ms(33.3) < 50.0);
+}
+
 TEST(stutter_moving_average)
 {
     static st_avg a;
