@@ -948,15 +948,20 @@ TEST(fm6_small_title_texture_diag)
     CHECK(e && e->size == 0x10000 && e->w == 32 && e->mips == 6 && e->fmt == 80 && e->refreshes == 0);
     CHECK(fm6_td_find(td_res[1]) == NULL);
     CHECK(log_has("titulo pequeno #1 32x32 mips=6 arr=1 fmt=80"));
+    CHECK(log_has("titulo pequeno fora do rastreador 32x32 fmt=80"));   /* estado 2; memoria livre: -1 bytes */
+    CHECK(log_has(", -1 bytes != 0; pilha"));
+    CHECK(fm6_td_created[1][2] == 1 && fm6_td_created[0][5] == 1);
     fm6_td_report(1);
     CHECK(log_has("1 criados, 1 nunca com refresh; estado da memoria 0:0 1:0 2:1"));
+    CHECK(log_has("placement pelo XG pequenas criadas por estado da memoria: 0:0 1:0 2:1"));
     fm6_title_refresh(NULL, td_res[1]);                         /* fora do registro: so repassa */
     fm6_title_refresh(NULL, td_res[0]);
     fm6_title_refresh(NULL, td_res[0]);
     CHECK(td_refreshes == 3 && e->refreshes == 2 && e->first_state == 2);
     CHECK(log_has("1o refresh, estado da memoria 2"));
     memset(fm6_tds, 0, sizeof fm6_tds);
-    fm6_td_n = fm6_td_calls = fm6_td_logged = 0;
+    fm6_td_n = fm6_td_calls = fm6_td_logged = fm6_td_untracked_logged = 0;
+    memset((void *)fm6_td_created, 0, sizeof fm6_td_created);
     orig_fm6_placement_tex2d = NULL;
     orig_title_refresh = NULL;
     az_title_mem_state = NULL;

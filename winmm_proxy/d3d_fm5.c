@@ -1415,7 +1415,36 @@ static volatile LONG fm6_td_n, fm6_td_calls, fm6_td_logged;
 static void (*orig_title_refresh)(void *ctx, uint8_t *res);
 static int (*az_title_mem_state)(uintptr_t addr, uint64_t size);
 
+static volatile LONG fm6_td_untracked_logged, fm6_td_created[2][6];
+
 static int fm6_td_small(const UINT *d) { return d[0] <= 32 && d[1] <= 32 && d[2] > 1; }
+
+/* bytes != 0 em [p, p + n) se a faixa toda estiver committed e legivel; -1 senao */
+static long fm6_td_nonzero(const uint8_t *p, uint64_t n)
+{
+    const uint8_t *q = p, *end = p + n;
+    long nz = 0;
+    while (q < end) {
+        MEMORY_BASIC_INFORMATION mi;
+        const uint8_t *stop;
+        if (!VirtualQuery(q, &mi, sizeof mi) || mi.State != MEM_COMMIT || (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) ||
+            !(mi.Protect & 0xee))
+            return -1;
+        stop = (const uint8_t *)mi.BaseAddress + mi.RegionSize;
+        if (stop > end) stop = end;
+        for (; q < stop; q++) nz += *q != 0;
+    }
+    return nz;
+}
+
+/* ate n retornos na imagem do jogo na pilha, depois do 1o (o do proprio wrapper, game+0x214d79/0x214e3d) */
+static __attribute__((noinline)) void fm6_game_stack(uintptr_t *out, int n)
+{
+    uint8_t **sp = __builtin_frame_address(0), **top = ((NT_TIB *)NtCurrentTeb())->StackBase;
+    int k = 0;
+    for (; g_fm6_game && sp < top && sp < (uint8_t **)__builtin_frame_address(0) + 0x400 && k <= n; sp++)
+        if (*sp > g_fm6_game && *sp < g_fm6_game + 0x1800000 && k++ > 0) out[k - 2] = (uintptr_t)(*sp - g_fm6_game);
+}
 
 static fm6_td *fm6_td_find(const uint8_t *res)
 {
@@ -1449,6 +1478,26 @@ static void fm6_td_note(uint8_t *res, const UINT *d, void *addr, uintptr_t calle
     if (k <= 32)
         wlog("d3d: titulo pequeno #%u %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx res=%p, chamador game+%#zx", k,
              e->w, e->h, e->mips, e->arr, e->fmt, addr, (unsigned long long)e->size, (void *)res, caller);
+    if (az_title_mem_state && e->size && az_title_mem_state((uintptr_t)addr, e->size) != 1 &&
+        InterlockedIncrement(&fm6_td_untracked_logged) <= 24) {
+        MEMORY_BASIC_INFORMATION mi = { 0 };
+        uintptr_t st[4] = { 0 };
+        VirtualQuery(addr, &mi, sizeof mi);
+        fm6_game_stack(st, 4);
+        wlog("d3d: titulo pequeno fora do rastreador %ux%u fmt=%u addr=%p tam=%#llx: regiao %p+%#zx alocacao %p estado %#lx "
+             "protecao %#lx tipo %#lx, %ld bytes != 0; pilha game+%#zx game+%#zx game+%#zx game+%#zx", e->w, e->h,
+             e->fmt, addr, (unsigned long long)e->size, mi.BaseAddress, mi.RegionSize, mi.AllocationBase, mi.State,
+             mi.Protect, mi.Type, fm6_td_nonzero(addr, e->size), st[0], st[1], st[2], st[3]);
+    }
+}
+
+/* estado da memoria (rastreador do Azimuth) de toda placement texture pelo XG na criacao: [pequena][estado] */
+static void fm6_td_count(const UINT *d, uint8_t *res, const void *addr)
+{
+    uint8_t **title = *(uint8_t ***)(res + AZ_RES_TITLE);
+    uint64_t size = title && title[1] ? *(uint64_t *)(title[1] + 0x10) : 0;
+    int st = az_title_mem_state && size ? az_title_mem_state((uintptr_t)addr, size) : -1;
+    InterlockedIncrement(&fm6_td_created[fm6_td_small(d)][st >= 0 && st <= 4 ? st : 5]);
 }
 
 static void fm6_td_report(LONG calls)
@@ -1464,11 +1513,16 @@ static void fm6_td_report(LONG calls)
         if (!e->refreshes) never++;
         if ((!e->refreshes && shown_never++ < 6) || (e->refreshes && st != 1 && shown_state++ < 6))
             wlog("d3d: titulo pequeno %ux%u mips=%u arr=%u fmt=%u addr=%p tam=%#llx: %ld refresh, estado %d (no 1o %d), "
-                 "chamador game+%#zx", e->w, e->h, e->mips, e->arr, e->fmt, (void *)e->addr,
-                 (unsigned long long)e->size, e->refreshes, st, e->first_state, e->caller);
+                 "%ld bytes != 0 agora, chamador game+%#zx", e->w, e->h, e->mips, e->arr, e->fmt, (void *)e->addr,
+                 (unsigned long long)e->size, e->refreshes, st, e->first_state, fm6_td_nonzero(e->addr, e->size),
+                 e->caller);
     }
     wlog("d3d: titulos pequenos apos %ld refresh: %ld criados, %d nunca com refresh; estado da memoria 0:%d 1:%d 2:%d "
          "3:%d 4:%d outro:%d", calls, fm6_td_n, never, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5]);
+    for (i = 0; i < 2; i++)
+        wlog("d3d: placement pelo XG %s criadas por estado da memoria: 0:%ld 1:%ld 2:%ld 3:%ld 4:%ld outro:%ld",
+             i ? "pequenas" : "maiores", fm6_td_created[i][0], fm6_td_created[i][1], fm6_td_created[i][2],
+             fm6_td_created[i][3], fm6_td_created[i][4], fm6_td_created[i][5]);
 }
 
 static void fm6_title_refresh(void *ctx, uint8_t *res)
@@ -1520,8 +1574,10 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
              desc[3], desc[4], desc[5], desc[6], desc[7], desc[8], desc[9], desc[10], tile, pitch, addr,
              fm6_game_caller());
     hr = orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
-    if (hr >= 0 && desc && out && *out && orig_title_refresh && desc[8] == 8 && fm6_td_small(desc))
-        fm6_td_note(*out, desc, addr, fm6_game_caller());
+    if (hr >= 0 && desc && out && *out && orig_title_refresh && desc[8] == 8) {
+        fm6_td_count(desc, *out, addr);
+        if (fm6_td_small(desc)) fm6_td_note(*out, desc, addr, fm6_game_caller());
+    }
     return hr;
 }
 
