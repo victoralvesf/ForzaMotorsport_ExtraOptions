@@ -1693,6 +1693,7 @@ typedef struct {
     /* CB/SRV estacionados pelo SetFastResourcesFromBatch (n = ultimo slot ligado + 1, por estagio do driver) */
     uint8_t ncb[6], nsrv[6];
     void *cb[6][14], *srv[6][128];
+    uint64_t cbset[6][1], srvset[6][2];   /* slots gravados (objeto ou NULL): so esses vao para o imediato */
     /* estados de pipeline ligados (FM6_HAS_*: NULL ligado = padrao, tambem herdado) */
     UINT has, stencil_ref, sample_mask;
     void *blend, *depth, *rs;
@@ -1913,8 +1914,9 @@ static void fm6_res_note(void *ctx, int srv, UINT stage, UINT start, UINT n, voi
     if (n > max - start) n = max - start;
     for (i = 0; i < n; i++) {
         void *o = objs ? objs[i] : NULL;
-        if (srv) d->st.srv[stage][start + i] = o;
-        else d->st.cb[stage][start + i] = o;
+        UINT k = start + i;
+        if (srv) d->st.srv[stage][k] = o, d->st.srvset[stage][k >> 6] |= 1ull << (k & 63);
+        else d->st.cb[stage][k] = o, d->st.cbset[stage][0] |= 1ull << k;
     }
     if (srv && start + n > d->st.nsrv[stage]) d->st.nsrv[stage] = (uint8_t)(start + n);
     if (!srv && start + n > d->st.ncb[stage]) d->st.ncb[stage] = (uint8_t)(start + n);
@@ -1932,9 +1934,9 @@ static void fm6_res_note(void *ctx, int srv, UINT stage, UINT start, UINT n, voi
 #define AZ_BUF_PLACEMENT  0x88
 #define AZ_BUF_MEMORY     0x168
 #define AZ_BUF_VA         0x148
-enum { CB4_DEF, CB4_DEF_FAST, CB4_IMM, CB4_IMM_FAST, CB4_APPLY, CB4_KINDS };
+enum { CB4_DEF, CB4_DEF_FAST, CB4_IMM, CB4_IMM_FAST, CB4_APPLY, CB4_FASTRES, CB4_KINDS };
 static const char *const cb4_kinds[CB4_KINDS] = { "diferido", "diferido Fast", "imediato", "imediato Fast",
-                                                  "copia da heranca" };
+                                                  "copia da heranca", "SetFastResources" };
 static volatile LONG cb4_n[CB4_KINDS][2][2];   /* [origem][PS][com objeto] */
 static volatile LONG cb4_total, cb4_nseen;
 static void *cb4_seen[64];
@@ -2024,6 +2026,21 @@ static fm6_om_item *fm6_om_snapshot(void *ctx)
     return o;
 }
 
+/* Set* (start, n, objs) de cada faixa contigua de slots gravados em mask entre 0 e n-1; devolve quantos */
+static UINT fm6_set_runs(void *ctx, set_fn fn, void *const *objs, const uint64_t *mask, UINT n, int cb4_stage)
+{
+    UINT i = 0, j, total = 0;
+    while (i < n) {
+        if (!(mask[i >> 6] >> (i & 63) & 1)) { i++; continue; }
+        for (j = i; j < n && mask[j >> 6] >> (j & 63) & 1; j++) {}
+        if (cb4_stage >= 0) fm6_cb4_note(ctx, CB4_APPLY, (UINT)cb4_stage, i, j - i, objs + i);
+        fn(ctx, i, j - i, objs + i);
+        total += j - i;
+        i = j;
+    }
+    return total;
+}
+
 /* no imediato: aplica o estado herdado antes do bundle seguinte */
 static void fm6_om_apply(void *ctx, const fm6_om_item *o)
 {
@@ -2040,13 +2057,11 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
     if (o->st.has & FM6_HAS_DEPTH)
         ((void (*)(void *, void *, UINT))az[AZ_SLOT_DEPTH])(ctx, o->st.depth, o->st.stencil_ref);
     if (o->st.has & FM6_HAS_RS) ((void (*)(void *, void *))az[AZ_SLOT_RS])(ctx, o->st.rs);
-    /* os remaps do bundle resolvem a origem no estado do imediato (pacote 0xc, 0x140111820) */
+    /* os remaps do bundle resolvem a origem no estado do imediato (pacote 0xc, 0x140111820); so os slots que o
+       juntador gravou: o resto fica como o imediato tem (PASSO 50: a faixa 0..n-1 gravava NULL no b4) */
     for (s = 0; s < 6; s++) {
-        if (o->st.ncb[s]) fm6_cb4_note(ctx, CB4_APPLY, s, 0, o->st.ncb[s], o->st.cb[s]);
-        if (o->st.ncb[s]) ((set_fn)az[fm6_stage_cb[s]])(ctx, 0, o->st.ncb[s], o->st.cb[s]);
-        if (o->st.nsrv[s]) ((set_fn)az[fm6_stage_srv[s]])(ctx, 0, o->st.nsrv[s], o->st.srv[s]);
-        ncb += o->st.ncb[s];
-        nsrv += o->st.nsrv[s];
+        ncb += fm6_set_runs(ctx, (set_fn)az[fm6_stage_cb[s]], o->st.cb[s], o->st.cbset[s], o->st.ncb[s], (int)s);
+        nsrv += fm6_set_runs(ctx, (set_fn)az[fm6_stage_srv[s]], o->st.srv[s], o->st.srvset[s], o->st.nsrv[s], -1);
     }
     if (InterlockedIncrement(&logged) <= 4)
         wlog("d3d: heranca: bundle aninhado executa com o OM do juntador (%u RTs, DS %p, %u viewports, %u scissors, "
@@ -2054,16 +2069,18 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
              o->st.nvp, o->st.nsc, ncb, nsrv, o->st.has & FM6_HAS_BLEND ? "" : "(nao ligado) ", o->st.blend,
              o->st.has & FM6_HAS_DEPTH ? "" : "(nao ligado) ", o->st.depth, o->st.stencil_ref,
              o->st.has & FM6_HAS_RS ? "" : "(nao ligado) ", o->st.rs);
-    if (InterlockedIncrement(&logged_cb) <= 16) {   /* PASSO 49: quais slots de CB a copia liga (. = NULL) */
+    if (InterlockedIncrement(&logged_cb) <= 16) {   /* PASSO 49: quais slots de CB a copia liga */
         char buf[256];
         int len = 0;
         UINT i;
         for (s = 0; s < 6; s++) {
             if (!o->st.ncb[s]) continue;
             len += wsprintfA(buf + len, " estagio %u:", s);
-            for (i = 0; i < o->st.ncb[s]; i++) len += wsprintfA(buf + len, "%c", o->st.cb[s][i] ? 'x' : '.');
+            for (i = 0; i < o->st.ncb[s]; i++)
+                len += wsprintfA(buf + len, "%c", !(o->st.cbset[s][0] >> i & 1) ? '-' : o->st.cb[s][i] ? 'x' : '.');
         }
-        wlog("d3d: heranca: CBs da copia no imediato %p (x = objeto, . = NULL):%s", ctx, len ? buf : " nenhum");
+        wlog("d3d: heranca: CBs da copia no imediato %p (x = objeto, . = NULL, - = nao gravado):%s", ctx,
+             len ? buf : " nenhum");
     }
 }
 
@@ -2413,6 +2430,36 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
         fm6_res_note(ctx, !!(hdr & FM6_BATCH_SRV_FLAG), stage, slot, 1, &obj);
         p += n;
     }
+}
+
+/* SetFastResources_Debug (FM6 0xd4 = Azimuth 0xd1, implementado no Azimuth: 0x140111cd0 imediato, 0x1401b8110
+   diferido): o SetFastResources inline do XDK monta (inicio, fim) com pacotes [cabecalho: bit 31 | tipo << 28 |
+   estagio << 16 | slot << 8 | n] + n x {objeto, metadados} de 16 bytes; tipo 0 SRV, 1 CB, 2 sampler (1 com
+   0x106xxxx = vertex buffer). O FM6 liga por aqui o b4 de VS/PS (game+0x954dad/0x954de6, 0x996c8c/0x996d08) e o
+   Azimuth aplica direto, sem passar pelos Set* -> a heranca nao via (PASSO 50: carros pretos). Anota CB/SRV como os
+   Set* e repassa. */
+#define FM6_SLOT_FASTRES 0xd4
+typedef void (*fastres_fn)(void *ctx, const uint8_t *p, const uint8_t *end, void *a4);
+static void fm6_SetFastResources(void *ctx, const uint8_t *p, const uint8_t *end, void *a4)
+{
+    const uint8_t *q = p;
+    while (q && end && q + 4 <= end) {
+        uint32_t h, type, stage, slot, n, i;
+        void *objs[32];
+        memcpy(&h, q, 4);
+        n = h & 0xff;
+        type = h >> 28 & 7;
+        stage = h >> 16 & 0xf;
+        slot = h >> 8 & 0xff;
+        if (!(h >> 31) || n > 32 || q + 4 + (size_t)n * 16 > end) break;
+        if (type <= 1 && stage < 6 && (h & 0xff00000) == 0) {
+            for (i = 0; i < n; i++) memcpy(&objs[i], q + 4 + i * 16, 8);
+            fm6_res_note(ctx, type == 0, stage, slot, n, objs);
+            if (type == 1) fm6_cb4_note(ctx, CB4_FASTRES, stage, slot, n, objs);
+        }
+        q += 4 + (size_t)n * 16;
+    }
+    ((fastres_fn)fm6_az_fn(ctx, fm6_ctx_slot(FM6_SLOT_FASTRES)))(ctx, p, end, a4);
 }
 
 /* Listas aninhadas do FM6: game+0xf973d junta as listas dos workers num diferido (ExecuteCommandList(cl, FALSE),
@@ -2788,6 +2835,8 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
         dst[0x73] = (void *)fm6_FinishCommandList;
     if (src[fm6_ctx_slot(0xd7)] == g_base + RVA_STUB_SLOT(fm6_ctx_slot(0xd7)))
         dst[0xd7] = (void *)fm6_SetFastResourcesFromBatch;
+    if (src[fm6_ctx_slot(FM6_SLOT_FASTRES)] != g_base + RVA_STUB_SLOT(fm6_ctx_slot(FM6_SLOT_FASTRES)))
+        dst[FM6_SLOT_FASTRES] = (void *)fm6_SetFastResources;
     for (s = 0; s < FM6_CTX_SLOTS; s++)
         if (!dst[s]) dst[s] = g_base + RVA_STUB_SLOT(s);       /* novo sem comportamento: nao acontece hoje */
     return n;

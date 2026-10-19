@@ -1342,6 +1342,15 @@ static void inh_res(void *c, UINT s, UINT n, void *const *v, UINT slot)
 static void inh_res_47(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x47); }
 static void inh_res_43(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x43); }
 static void inh_res_09(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x09); }
+static void inh_res_11(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x11); }
+static const uint8_t *fr_p, *fr_end;
+static void *fr_ctx;
+static int fr_n;
+static void fake_fastres(void *c, const uint8_t *p, const uint8_t *end, void *a4)
+{
+    (void)a4;
+    fr_ctx = c; fr_p = p; fr_end = end; fr_n++;
+}
 static void inh_remap(void *c, UINT ds, UINT dslot, UINT ss, UINT sslot)
 {
     (void)c;
@@ -1376,6 +1385,7 @@ TEST(fm6_nested_bundle_inherits_om)
     typedef HRESULT (*fin_fn)(void *, BOOL, void **);
     static inh_view rtv = { inh_view_vt, 1 }, dsv = { inh_view_vt, 1 }, cbv = { inh_view_vt, 1 }, srvv = { inh_view_vt, 1 };
     static inh_view bsv = { inh_view_vt, 1 }, dssv = { inh_view_vt, 1 }, rsv = { inh_view_vt, 1 };
+    static inh_view fcb = { inh_view_vt, 1 };
     static uint8_t bcb[14 * 20], bsrv[4 * 36];
     fm6_batch bt = { bcb, bsrv, sizeof bcb, sizeof bsrv };
     void *j = NULL, *w = NULL, *out = NULL, *rtvs[1] = { &rtv };
@@ -1451,6 +1461,24 @@ TEST(fm6_nested_bundle_inherits_om)
     ((void (*)(void *, UINT, UINT, UINT, UINT))def[0xa0])(w, 4, 0, 5, 3);
     CHECK_EQ(inh_remap_n, 1);
     CHECK(log_has("RemapShaderResourceInheritance #1 no diferido d"));
+    /* SetFastResources do XDK (FM6 0xd4, PASSO 50): CB do PS slot 4 (tipo 1) e sampler (tipo 2) -> anota so o CB e
+       repassa (inicio, fim) ao Azimuth 0xd1 */
+    {
+        static uint8_t pk[2 * 20];
+        uint32_t h1 = 0x90040401u, h2 = 0xa0040001u;
+        void *fo = &fcb, *smp = (void *)0x5a3;
+        memset(pk, 0, sizeof pk);
+        memcpy(pk, &h1, 4); memcpy(pk + 4, &fo, 8);
+        memcpy(pk + 20, &h2, 4); memcpy(pk + 24, &smp, 8);
+        CHECK(def[0xd4] == (void *)fm6_SetFastResources && imm[0xd4] == (void *)fm6_SetFastResources);
+        az_tab[0xd1] = (void *)fake_fastres;
+        az_tab[0x11] = (void *)inh_res_11;                               /* PS CB */
+        ((void (*)(void *, const uint8_t *, const uint8_t *, void *))def[0xd4])(j, pk, pk + sizeof pk, NULL);
+        CHECK(fr_n == 1 && fr_ctx == j && fr_p == pk && fr_end == pk + sizeof pk);
+        CHECK(fm6_dctx_find(j)->st.cb[4][4] == &fcb && fm6_dctx_find(j)->st.ncb[4] == 5);
+        CHECK(fm6_dctx_find(j)->st.cbset[4][0] == 1u << 4 && fm6_dctx_find(j)->st.nsrv[4] == 0);
+        CHECK(log_has("b4: objeto novo") && log_has("no PS SetFastResources"));
+    }
     /* bundle do worker (sem estado do D3D12) aninhado: parte + copia do estado + bundle */
     b = new_cl();
     b->state = NULL;
@@ -1458,7 +1486,7 @@ TEST(fm6_nested_bundle_inherits_om)
     exec_n = 0;
     ((exec_fn)def[0x3b])(j, b, FALSE);
     part = &cl_pool[cl_used - 1];
-    CHECK(rtv.ref == 2 && dsv.ref == 2 && cbv.ref == 2 && srvv.ref == 2);   /* views seguras pela copia */
+    CHECK(rtv.ref == 2 && dsv.ref == 2 && cbv.ref == 2 && srvv.ref == 2 && fcb.ref == 2);   /* views seguras */
     CHECK(bsv.ref == 2 && dssv.ref == 2 && rsv.ref == 2);
     CHECK(log_has("<- bundle"));
     CHECK(fm6_dctx_find(j)->st.nrtv == 1 && fm6_dctx_find(j)->st.nsrv[5] == 4);   /* restore FALSE: juntador mantem */
@@ -1479,10 +1507,12 @@ TEST(fm6_nested_bundle_inherits_om)
     f = out;
     inh_om_n = inh_vp_n = inh_sc_n = inh_res_n = 0;
     ((exec_fn)imm[0x3b])(inh_ctx[2], f, FALSE);
-    /* no imediato: CB e SRV de 0 ate o ultimo slot ligado, antes de cada bundle (o 2o tambem com o PS) */
-    CHECK(inh_res_n == 2 + 3 && inh_res_ctx == inh_ctx[2] && inh_res_slot == 0x43 && inh_res_start == 0);
-    CHECK(inh_res_cnt == 4 && inh_res_last == &srvv);
-    CHECK(log_has("1 viewports, 1 scissors, 3 slots de CB e 4 de SRV estacionados"));
+    /* no imediato: so os slots gravados pelo juntador (PS CB 4, CS CB 2, CS SRV 3; o 2o tambem PS SRV 2), em faixas;
+       os nao gravados ficam como o imediato tem (PASSO 50) */
+    CHECK(inh_res_n == 3 + 4 && inh_res_ctx == inh_ctx[2] && inh_res_slot == 0x43 && inh_res_start == 3);
+    CHECK(inh_res_cnt == 1 && inh_res_last == &srvv);
+    CHECK(log_has("1 viewports, 1 scissors, 2 slots de CB e 1 de SRV estacionados"));
+    CHECK(log_has("estagio 4:----x estagio 5:--x"));
     CHECK_EQ(exec_n, 4);
     CHECK(exec_cl[0] == part && exec_cl[1] == b && exec_cl[2] == b2 && exec_cl[3] == f);
     CHECK(inh_om_n == 2 && inh_om_ctx == inh_ctx[2] && inh_om_rts == 1 && inh_om_rtv0 == &rtv && inh_om_dsv == &dsv);
@@ -1490,12 +1520,12 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(inh_bs_n == 2 && inh_bs_ctx == inh_ctx[2] && inh_bs == &bsv && inh_bs_mask == 0xffffffffu && inh_bs_f0 == 1.0f);
     CHECK(inh_ds_n == 2 && inh_ds == &dssv && inh_ds_ref == 3 && inh_rs_n == 2 && inh_rs == &rsv);
     CHECK(log_has("bundle aninhado executa com o OM do juntador (1 RTs"));
-    CHECK(log_has("CBs da copia no imediato") && log_has(" estagio 5:..x"));   /* PASSO 49 */
+    CHECK(log_has("CBs da copia no imediato"));   /* PASSO 49 */
     CHECK(log_has("remap distinto #1 SRV no diferido d") && log_has("estagio 4 slot 0 <- estagio 5 slot 3"));
     CHECK(log_has("depth ") && log_has(" ref 3, rs "));
     CHECK(rtv.ref == 3);                                                 /* f ainda segura as copias */
     CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);
-    CHECK(rtv.ref == 1 && dsv.ref == 1 && cbv.ref == 1 && srvv.ref == 1);
+    CHECK(rtv.ref == 1 && dsv.ref == 1 && cbv.ref == 1 && srvv.ref == 1 && fcb.ref == 1);
     CHECK(bsv.ref == 1 && dssv.ref == 1 && rsv.ref == 1);
     /* ClearState do jogo no juntador zera o acompanhado */
     ((om_fn)def[0x22])(j, 1, rtvs, NULL);
