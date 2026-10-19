@@ -28,7 +28,8 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
   `winrt_fm5.c`, `shape_fm5.c`, `debug12_fm5.c`, `gfx_fm5.c`, `shader_fm6.c` (FM6 console DXBC opcodes); `tests\` = proxy tests; `d3d_thunks.S` and `winmm_stubs.S` are **generated**
   (`tools\gen_d3d_thunks.py`, `tools\gen_winmm_stubs.py`).
 - `winmm.dll` (root) = installed proxy (delete it = original Azimuth).
-- `azimuth_fm5.ini` section `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`, `D3D12Debug`) and `azimuth_fm5.log` (proxy log).
+- `azimuth_fm5.ini` section `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`), `azimuth_fm6.ini` `[FM6]`, `debug.ini` `[Debug]` (`D3D12Debug`, `DrawSkip`, `DrawSkipHashes`;
+  dev only, in git but not in the release zip) and `azimuth_fm5.log` (proxy log).
 - `game_binaries\FM5\`, `FM6\`, `FH2\` — copied exes/manifest/xg_x.dll per game. Game folders: `E:\Xbox One Games\Forza Motorsport 5`,
   FM6 `E:\Xbox One Games\Monument_1.0.0.44_x64__8wekyb3d8bbwe`.
 - `tools\` — Python RE scripts (capstone) and `dec.ps1` (Ghidra headless). `ghidra\` — already analyzed Ghidra projects.

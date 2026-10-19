@@ -53,6 +53,15 @@ void ini6_set(const char *body)
     MultiByteToWideChar(CP_ACP, 0, path, -1, g_ini6, MAX_PATH);
 }
 
+void dbgini_set(const char *body)
+{
+    char path[MAX_PATH];
+    snprintf(path, sizeof path, "%s\\winmm_proxy\\build\\test_debug.ini", t_root());
+    DeleteFileA(path);
+    if (body) { FILE *f = fopen(path, "w"); fputs(body, f); fclose(f); }
+    MultiByteToWideChar(CP_ACP, 0, path, -1, g_ini_dbg, MAX_PATH);
+}
+
 uint8_t *fake_azimuth(int game)
 {
     static uint8_t *img;
@@ -300,12 +309,34 @@ TEST(fm6_tls_slot0_sites_match_exe)
 
 TEST(cfg_int_reads_ini)
 {
-    ini_set("[FM5]\nSkipIntro=1\nD3D12Debug=2\n");
+    ini_set("[FM5]\nSkipIntro=1\nUnlockDLC=1\n");
     CHECK_EQ(cfg_int(L"SkipIntro", 0), 1);
-    CHECK_EQ(cfg_int(L"D3D12Debug", 0), 2);
-    CHECK_EQ(cfg_int(L"UnlockDLC", 5), 5);       /* ausente -> padrao */
+    CHECK_EQ(cfg_int(L"UnlockDLC", 0), 1);
+    CHECK_EQ(cfg_int(L"EnableMarketplace", 5), 5);       /* ausente -> padrao */
     ini_set(NULL);
     CHECK_EQ(cfg_int(L"SkipIntro", 0), 0);
+}
+
+/* debug.ini: so a secao [Debug] vale (D3D12Debug, DrawSkip, DrawSkipHashes); o azimuth_fm5.ini nao conta */
+TEST(dbg_reads_debug_ini)
+{
+    char s[64];
+    ini_set("[FM5]\nD3D12Debug=1\n");
+    dbgini_set(NULL);
+    CHECK_EQ(dbg_int(L"D3D12Debug", 0), 0);
+    dbgini_set("[Debug]\nD3D12Debug=2\nDrawSkip=7\nDrawSkipHashes=1a2b3c4d, ff\n");
+    CHECK_EQ(dbg_int(L"D3D12Debug", 0), 2);
+    CHECK_EQ(dbg_int(L"DrawSkip", 0), 7);
+    CHECK_EQ(dbg_str(L"DrawSkipHashes", s, sizeof s), 12);
+    CHECK(strcmp(s, "1a2b3c4d, ff") == 0);
+    CHECK_EQ(dbg_str(L"DrawSkip", s, 2), 1);              /* corta no tamanho do buffer */
+    CHECK(strcmp(s, "7") == 0);
+    CHECK_EQ(dbg_str(L"Ausente", s, sizeof s), 0);
+    CHECK(s[0] == 0);
+    dbgini_set("[FM5]\nD3D12Debug=2\n");
+    CHECK_EQ(dbg_int(L"D3D12Debug", 0), 0);
+    dbgini_set(NULL);
+    ini_set(NULL);
 }
 
 /* azimuth_fm6.ini e separado: so a secao [FM6] dele vale para o FM6 */
@@ -382,17 +413,17 @@ TEST(fm6_debug5_committed_placement)
     g_base = az;
     log_capture();
     ini6_set(NULL);
-    ini_set("[FM5]\nD3D12Debug=3\n");
+    dbgini_set("[Debug]\nD3D12Debug=3\n");
     fm6_patches(game);
     CHECK_HEX(az + 0x13bae0, "48895c241055565748");
-    ini_set("[FM5]\nD3D12Debug=5\n");
+    dbgini_set("[Debug]\nD3D12Debug=5\n");
     fm6_patches(game);
     CHECK_HEX(az + 0x13bae0, "31c0c324105556574881");
     CHECK(log_has("FM6: D3D12Debug=5: placement textures como recurso committed"));
     fm6_patches(game);                            /* bytes ja trocados -> nada muda */
     CHECK(log_has("FM6: D3D12Debug=5: site 0x13bae0 nao confere, ignorado"));
     CHECK_HEX(az + 0x13bae0, "31c0c3");
-    ini_set(NULL);
+    dbgini_set(NULL);
     pe_unmap(game);
     pe_unmap(az);
     dump_log_on_fail();
@@ -412,10 +443,10 @@ TEST(fm6_debug6_leak_gfx_objects)
     g_base = az;
     log_capture();
     ini6_set(NULL);
-    ini_set("[FM5]\nD3D12Debug=5\n");
+    dbgini_set("[Debug]\nD3D12Debug=5\n");
     fm6_patches(game);
     CHECK_HEX(az + 0xda270, "48895c241855565741564157488bec");
-    ini_set("[FM5]\nD3D12Debug=6\n");
+    dbgini_set("[Debug]\nD3D12Debug=6\n");
     fm6_patches(game);
     CHECK_HEX(az + 0xda270, "ff2500000000");
     CHECK(log_has("FM6: D3D12Debug=6: recursos/views nunca destruidos"));
@@ -435,7 +466,7 @@ TEST(fm6_debug6_leak_gfx_objects)
     }
     fm6_patches(game);                            /* bytes ja trocados -> nada muda */
     CHECK(log_has("FM6: D3D12Debug=6: site 0xda270 nao confere, ignorado"));
-    ini_set(NULL);
+    dbgini_set(NULL);
     pe_unmap(game);
     pe_unmap(az);
     dump_log_on_fail();

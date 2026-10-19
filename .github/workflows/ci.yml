@@ -1,4 +1,5 @@
 # Testes do proxy em todo pull request; release (winmm.dll + azimuth_fm5.ini + README.txt) no push de tag v*.
+# debug.ini (diagnostico) fica so no repositorio, fora do zip.
 # No GitHub os testes que precisam do azimuth.exe/game_binaries sao pulados (ficam fora do git).
 name: CI
 

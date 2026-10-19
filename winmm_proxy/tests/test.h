@@ -47,6 +47,7 @@ const char *log_text(void);
 int log_has(const char *s);
 void ini_set(const char *body);                 /* "[FM5]\nSkipIntro=1\n..." ; NULL = sem ini */
 void ini6_set(const char *body);                /* azimuth_fm6.ini: "[FM6]\nSkipIntro=1\n" ; NULL = sem ini */
+void dbgini_set(const char *body);              /* debug.ini: "[Debug]\nD3D12Debug=1\n" ; NULL = sem ini */
 uint8_t *fake_azimuth(int game);                /* g_base falso (zerado), opcionalmente com o registro do FM5 (1) ou FM6 (2) */
 
 /* binarios usados nos testes de assinatura (pulam se nao existirem) */

@@ -79,23 +79,32 @@ int cfg_int(const wchar_t *key, int def)
     return (int)GetPrivateProfileIntW(L"FM5", key, def, g_ini);
 }
 
-/* texto ASCII da chave (vazio se nao existe); devolve o tamanho */
-int cfg_str(const wchar_t *key, char *out, int len)
-{
-    wchar_t w[1024];
-    DWORD n = GetPrivateProfileStringW(L"FM5", key, L"", w, 1024, g_ini);
-    int i;
-    for (i = 0; i < (int)n && i < len - 1; i++) out[i] = w[i] < 128 ? (char)w[i] : '?';
-    out[i] = 0;
-    return i;
-}
-
 /* ---- azimuth_fm6.ini (mesma pasta), secao [FM6] ---- */
 static wchar_t g_ini6[MAX_PATH];
 
 int cfg6_int(const wchar_t *key, int def)
 {
     return (int)GetPrivateProfileIntW(L"FM6", key, def, g_ini6);
+}
+
+/* ---- debug.ini (mesma pasta), secao [Debug]: diagnostico (D3D12Debug, DrawSkip...), vale para FM5 e FM6;
+   fica no repositorio mas fora do zip do release ---- */
+static wchar_t g_ini_dbg[MAX_PATH];
+
+int dbg_int(const wchar_t *key, int def)
+{
+    return (int)GetPrivateProfileIntW(L"Debug", key, def, g_ini_dbg);
+}
+
+/* texto ASCII da chave (vazio se nao existe); devolve o tamanho */
+int dbg_str(const wchar_t *key, char *out, int len)
+{
+    wchar_t w[1024];
+    DWORD n = GetPrivateProfileStringW(L"Debug", key, L"", w, 1024, g_ini_dbg);
+    int i;
+    for (i = 0; i < (int)n && i < len - 1; i++) out[i] = w[i] < 128 ? (char)w[i] : '?';
+    out[i] = 0;
+    return i;
 }
 
 void wlog(const char *fmt, ...)
@@ -942,8 +951,8 @@ static int fm6_graphics_protect_install(void)
 /* opcoes do azimuth_fm6.ini */
 static void fm6_patches(uint8_t *game)
 {
-    if (cfg_int(L"D3D12Debug", 0) == 5) fm6_committed_placement_textures();
-    if (cfg_int(L"D3D12Debug", 0) == 6) fm6_leak_gfx_objects();
+    if (dbg_int(L"D3D12Debug", 0) == 5) fm6_committed_placement_textures();
+    if (dbg_int(L"D3D12Debug", 0) == 6) fm6_leak_gfx_objects();
     if (cfg6_int(L"SkipIntro", 0)) {
         static const uint8_t nop2[2] = { 0x66, 0x90 }, jmp8 = 0xeb;
         size_t i, n = sizeof fm6_splash_intro_cmps / sizeof *fm6_splash_intro_cmps;
@@ -1185,7 +1194,7 @@ static int install(void)
     if (!shape_install()) return 0;
     audio_fm6_install();   /* diagnostico do WASAPI do FM6 (audio_fm6.c); se o vtable nao conferir, so loga */
 
-    /* 10) diagnostico opcional: debug layer do D3D12 (D3D12Debug no .ini, debug12_fm5.c) */
+    /* 10) diagnostico opcional: debug layer do D3D12 (D3D12Debug no debug.ini, debug12_fm5.c) */
     debug12_install();
     return 1;
 }
@@ -1226,6 +1235,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         wcscpy(g_ini6, path);
         wlog("config: %ls (SkipIntro=%d SkipPresentationVideo=%d)", g_ini6, cfg6_int(L"SkipIntro", 0),
              cfg6_int(L"SkipPresentationVideo", 0));
+        wcscpy(slash ? slash + 1 : path, L"debug.ini");
+        wcscpy(g_ini_dbg, path);
+        wlog("config: %ls (D3D12Debug=%d DrawSkip=%d)", g_ini_dbg, dbg_int(L"D3D12Debug", 0), dbg_int(L"DrawSkip", 0));
         load_real_winmm();
         g_base = (uint8_t *)GetModuleHandleW(NULL);
         GetModuleFileNameW(NULL, path, MAX_PATH);

@@ -1,5 +1,5 @@
 /*
- * Diagnostico: debug layer do D3D12 (azimuth_fm5.ini [FM5] D3D12Debug=1; =2 tambem GPU-based validation).
+ * Diagnostico: debug layer do D3D12 (debug.ini [Debug] D3D12Debug=1; =2 tambem GPU-based validation).
  * O azimuth.exe importa d3d12.dll!D3D12CreateDevice por ordinal (101) no slot da IAT 0x26f868, usado so pelo
  * call [rip] em 0x567df. O hook troca o disp32 desse call por um ponteiro nosso perto da imagem (a IAT fica como
  * esta: o RenderDoc reescreve as IATs depois de nos e apagava um hook ali) e chama o que estiver na IAT. Ele liga a
@@ -25,14 +25,14 @@
 extern uint8_t *g_base;
 extern uint8_t *alloc_near(uint8_t *mod, size_t size);
 extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
-extern int cfg_int(const wchar_t *key, int def);
+extern int dbg_int(const wchar_t *key, int def);
 extern void wlog(const char *fmt, ...);
 extern void gpuguard_install(IUnknown *dev);
 extern void gg_trace_dump(void *cl);
 extern void gg_ring_dump(void);
 extern int gg_trace_on, gg_draw_skip;
 extern void gg_parse_hashes(const char *str);
-extern int cfg_str(const wchar_t *key, char *out, int len);
+extern int dbg_str(const wchar_t *key, char *out, int len);
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
 static volatile LONG msg_count;
@@ -199,12 +199,12 @@ int debug12_install(void)
     int32_t disp;
     DWORD old;
 
-    g_mode = cfg_int(L"D3D12Debug", 0);
+    g_mode = dbg_int(L"D3D12Debug", 0);
     gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm5_patch.c); 8/9/10: gpuguard_fm6.c */
-    gg_draw_skip = cfg_int(L"DrawSkip", 0);      /* com D3D12Debug=8: 0 todos, 1 diretos, 2 replayer, 3-5 tipo, 6 IA, 7 hashes, 8 DS/HS/GS/SO */
+    gg_draw_skip = dbg_int(L"DrawSkip", 0);      /* com D3D12Debug=8: 0 todos, 1 diretos, 2 replayer, 3-5 tipo, 6 IA, 7 hashes, 8 DS/HS/GS/SO */
     {
         char hashes[1024];
-        if (cfg_str(L"DrawSkipHashes", hashes, sizeof hashes)) gg_parse_hashes(hashes);
+        if (dbg_str(L"DrawSkipHashes", hashes, sizeof hashes)) gg_parse_hashes(hashes);
     }
     /* call qword [rip+0x219083] (-> IAT 0x26f868) */
     if (!bytes_match(call, "ff1583902100", 6)) {

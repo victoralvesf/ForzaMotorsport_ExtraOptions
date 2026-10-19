@@ -111,8 +111,10 @@ Kinect speech recognizer. Speech cannot be emulated, so the proxy activates a st
 
 ### Diagnostics (`debug12_fm5.c`)
 
-With `D3D12Debug=1` (or `2`) in the ini, the proxy enables the Direct3D 12 debug layer under
-Azimuth and writes every validation message to `azimuth_fm5.log` as it happens.
+With `D3D12Debug=1` (or `2`) in `debug.ini` (section `[Debug]`), the proxy enables the Direct3D 12
+debug layer under Azimuth and writes every validation message to `azimuth_fm5.log` as it happens.
+`debug.ini` holds development-only diagnostics (`D3D12Debug`, `DrawSkip`, `DrawSkipHashes`), applies
+to every game the proxy handles and is not shipped in the release.
 
 ## Options
 
@@ -125,7 +127,6 @@ game image or by hooks:
 | `SkipPresentationVideo` | Skips the presentation video shown before the first race. |
 | `UnlockDLC` | Treats the DLC content already included in the game as owned. |
 | `EnableMarketplace` | Enables the Marketplace menu without Xbox Live (shows the DLC packs). |
-| `D3D12Debug` | D3D12 debug layer (1) and GPU-based validation (2). |
 
 The Azimuth launcher's graphics settings also apply to FM5. Resolution and frame rate are passed
 through. Car detail, shadows and reflections are mapped onto FM5's own render settings
