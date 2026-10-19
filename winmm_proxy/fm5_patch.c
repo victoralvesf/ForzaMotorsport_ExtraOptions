@@ -1248,8 +1248,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         }
         if (!install()) {
             wlog("NADA FOI ALTERADO");
-            MessageBoxW(NULL, L"azimuth.exe diferente do esperado; patches do FM5 nao aplicados.\n"
-                              L"Veja azimuth_motorsport.log.", L"winmm FM5", MB_ICONWARNING);
+            MessageBoxW(NULL, L"azimuth.exe is not the expected version; the mod's patches were not applied.\n"
+                              L"See azimuth_motorsport.log.", L"winmm FM5", MB_ICONWARNING);
         }
     }
     return TRUE;

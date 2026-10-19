@@ -15,7 +15,7 @@ modified on disk**, and FH2 keeps working as before.
 - A clean Azimuth install. The mod expects this exact `azimuth.exe`:
   `SHA-256 579ed8d8b0b16cbf7890380cb7b925c972b837631ede367eada55eae4afc39bc`.
   If your `azimuth.exe` is different, the mod changes nothing and shows a warning
-  ("azimuth.exe diferente do esperado..."). Details go to `azimuth_motorsport.log`.
+  ("azimuth.exe is not the expected version..."). Details go to `azimuth_motorsport.log`.
 - Your own dump of **Forza Motorsport 5, package version 1.0.0.20**. It is a game folder
   containing `Mount\` (with `Mount\AppxManifest.xml`) and `EmbeddedXvd\`, the same layout
   Azimuth uses for FH2.
