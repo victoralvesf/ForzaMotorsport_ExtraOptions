@@ -907,6 +907,82 @@ TEST(fm6_deferred_update_placement_buffer)
     }
 }
 
+/* juntador registrado (PASSO 51): UpdateSubresource de placement vai para a sombra do diferido (memoria do jogo
+   intacta), a copia da heranca leva o conteudo daquele ponto e o imediato o aplica pelo UpdateSubresource do
+   Azimuth (0x30, buffer inteiro) antes do bundle; versao igual a ultima aplicada = pulada */
+static int shd_ref, shd_upd_n;
+static void *shd_upd_ctx, *shd_upd_res;
+static const UINT *shd_upd_box;
+static uint8_t shd_upd_data[64];
+static ULONG shd_addref(void *o) { (void)o; return (ULONG)++shd_ref; }
+static ULONG shd_release(void *o) { (void)o; return (ULONG)--shd_ref; }
+static void *shd_vt[3] = { NULL, (void *)shd_addref, (void *)shd_release };
+static void shd_update(void *ctx, void *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp)
+{
+    (void)sub; (void)rp; (void)dp;
+    shd_upd_n++; shd_upd_ctx = ctx; shd_upd_res = res; shd_upd_box = box;
+    memcpy(shd_upd_data, src, sizeof shd_upd_data);
+}
+
+TEST(fm6_deferred_placement_update_shadow_to_immediate)
+{
+    static void *az_tab[0x10e];
+    static uint8_t jctx[0xd00], ictx[0xd00], res[0x200], mem[64];
+    static const UINT box[6] = { 8, 0, 0, 12, 1, 1 };
+    uint8_t d1[4] = { 1, 2, 3, 4 }, d2[64];
+    fm6_om_item *o1, *o2;
+    fm6_dctx_info *d;
+    LONG i = InterlockedIncrement(&fm6_dctx_n) - 1;
+    REQUIRE(i < 128);
+    fake_azimuth(0);
+    memset(&fm6_dctx[i], 0, sizeof fm6_dctx[i]);
+    fm6_dctx[i].ctx = jctx;
+    fm6_dctx[i].idx = (int)i;
+    d = &fm6_dctx[i];
+    for (i = 0; i < 64; i++) mem[i] = 0xee, d2[i] = (uint8_t)(0x40 + i);
+    *(void ***)jctx = az_tab;
+    *(void ***)ictx = az_tab;
+    jctx[0xc48] = 1;
+    *(void ***)res = shd_vt;
+    *(int *)(res + 0x38) = 5;
+    *(UINT *)(res + 0x70) = 64;
+    res[0x88] = 1;
+    *(uint8_t **)(res + 0x168) = mem;
+    az_tab[0x30] = (void *)shd_update;
+    log_capture();
+    fm6_UpdateSubresource(jctx, res, 0, box, d1, 0, 0);       /* [8, 12) */
+    CHECK(mem[8] == 0xee && mem[11] == 0xee);                  /* memoria do jogo intacta */
+    CHECK(d->upd[0].buf == res && d->upd[0].size == 64 && d->upd[0].dirty == 1 && shd_ref == 1);
+    CHECK(d->upd[0].data[7] == 0xee && d->upd[0].data[8] == 1 && d->upd[0].data[11] == 4 && d->upd[0].data[12] == 0xee);
+    CHECK(log_has("sombra de buf") && log_has("-> sombra"));
+    o1 = fm6_om_snapshot(jctx);                                /* so a sombra suja ja gera a copia */
+    REQUIRE(o1 != NULL);
+    CHECK(o1->nupd == 1 && o1->upd[0].buf == res && o1->upd[0].size == 64 && o1->upd[0].data[8] == 1);
+    CHECK_EQ(shd_ref, 2);
+    fm6_UpdateSubresource(jctx, res, 0, NULL, d2, 0, 0);      /* buffer inteiro */
+    CHECK(o1->upd[0].data[8] == 1 && d->upd[0].data[8] == 0x48);
+    o2 = fm6_om_snapshot(jctx);
+    REQUIRE(o2 != NULL);
+    CHECK(o2->upd[0].data[0] == 0x40 && o2->upd[0].data[63] == 0x7f);
+    /* imediato (fm6_om_apply): cada copia vira um UpdateSubresource do buffer inteiro; a repetida e pulada */
+    fm6_upd_apply(ictx, o1);
+    CHECK(shd_upd_n == 1 && shd_upd_ctx == ictx && shd_upd_res == res && shd_upd_box == NULL);
+    CHECK(shd_upd_data[7] == 0xee && shd_upd_data[8] == 1 && shd_upd_data[12] == 0xee);
+    fm6_upd_apply(ictx, o1);
+    CHECK_EQ(shd_upd_n, 1);
+    fm6_upd_apply(ictx, o2);
+    CHECK(shd_upd_n == 2 && shd_upd_data[0] == 0x40 && shd_upd_data[8] == 0x48);
+    fm6_upd_apply(ictx, o1);                                    /* lista reexecutada: volta a versao dela */
+    CHECK(shd_upd_n == 3 && shd_upd_data[8] == 1);
+    CHECK(log_has("versoes de placement buffer aplicadas no imediato"));
+    fm6_om_item_release(o1);
+    fm6_om_item_release(o2);
+    CHECK_EQ(shd_ref, 1);                                      /* so a sombra segura o buffer */
+    d->upd[0].dirty = 0;                                       /* FinishCommandList: lista nova */
+    CHECK(fm6_om_snapshot(jctx) == NULL);
+    d->ctx = NULL;
+}
+
 /* criterio do CreatePlacementTexture2D do Azimuth (0x140121c40), espelhado p/ registrar as recusadas do FM6 */
 TEST(fm6_placement_tex2d_azimuth_criteria)
 {

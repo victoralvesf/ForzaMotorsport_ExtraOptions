@@ -1702,7 +1702,12 @@ typedef struct {
 #define FM6_HAS_BLEND 1u
 #define FM6_HAS_DEPTH 2u
 #define FM6_HAS_RS    4u
-typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; fm6_om st; } fm6_dctx_info;
+/* sombra, por diferido, de um placement buffer que ele atualiza pelo UpdateSubresource (dirty = na lista atual) */
+#define FM6_UPD_MAX   4
+#define FM6_UPD_BYTES 0x10000u
+typedef struct { void *buf; UINT size, dirty; uint8_t *data; } fm6_upd;
+typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; fm6_om st;
+                 fm6_upd upd[FM6_UPD_MAX]; } fm6_dctx_info;
 static fm6_dctx_info fm6_dctx[128];
 static volatile LONG fm6_dctx_n;
 static defctx_fn orig_fm6_defctx[3];
@@ -1882,7 +1887,7 @@ static void fm6_def_ClearState(void *ctx)
 }
 
 /* copia do estado do juntador na cadeia: objeto com AddRef/Release (slots 1/2) como as pecas */
-typedef struct { void **vt; volatile LONG ref; fm6_om st; } fm6_om_item;
+typedef struct { void **vt; volatile LONG ref; fm6_om st; UINT nupd; struct { void *buf; UINT size; uint8_t *data; } upd[FM6_UPD_MAX]; } fm6_om_item;
 static ULONG fm6_om_item_addref(fm6_om_item *o) { return (ULONG)InterlockedIncrement(&o->ref); }
 static ULONG fm6_om_item_release(fm6_om_item *o);
 static void *fm6_om_item_vt[3] = { NULL, (void *)fm6_om_item_addref, (void *)fm6_om_item_release };
@@ -2003,7 +2008,9 @@ static ULONG fm6_om_item_release(fm6_om_item *o)
 {
     LONG r = InterlockedDecrement(&o->ref);
     if (r == 0) {
+        UINT i;
         fm6_om_views(&o->st, 0);
+        for (i = 0; i < o->nupd; i++) fm6_obj_ref(o->upd[i].buf, 0);
         free(o);
     }
     return (ULONG)r;
@@ -2017,13 +2024,79 @@ static fm6_om_item *fm6_om_snapshot(void *ctx)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
     fm6_om_item *o;
-    if (!d || (!d->st.nrtv && !d->st.dsv && !d->st.nvp && !d->st.has && !fm6_om_has_res(&d->st))) return NULL;
-    if (!(o = malloc(sizeof *o))) return NULL;
+    size_t extra = 0;
+    uint8_t *p;
+    UINT i, nupd = 0;
+    if (!d) return NULL;
+    for (i = 0; i < FM6_UPD_MAX; i++)
+        if (d->upd[i].dirty) extra += d->upd[i].size, nupd++;
+    if (!nupd && !d->st.nrtv && !d->st.dsv && !d->st.nvp && !d->st.has && !fm6_om_has_res(&d->st)) return NULL;
+    if (!(o = malloc(sizeof *o + extra))) return NULL;
     o->vt = fm6_om_item_vt;
     o->ref = 1;
     o->st = d->st;
     fm6_om_views(&o->st, 1);
+    /* conteudo dos placement buffers que o juntador atualizou: o que o bundle le neste ponto da lista */
+    p = (uint8_t *)(o + 1);
+    o->nupd = 0;
+    for (i = 0; i < FM6_UPD_MAX; i++) {
+        const fm6_upd *u = &d->upd[i];
+        if (!u->dirty) continue;
+        o->upd[o->nupd].buf = u->buf;
+        o->upd[o->nupd].size = u->size;
+        o->upd[o->nupd].data = p;
+        memcpy(p, u->data, u->size);
+        fm6_obj_ref(u->buf, 1);
+        p += u->size;
+        o->nupd++;
+    }
     return o;
+}
+
+/* versao de cada placement buffer aplicada por ultimo no imediato pela heranca (igual = nada a fazer) */
+static struct { void *buf; UINT size; uint8_t *data; } fm6_upd_imm[8];
+static SRWLOCK fm6_upd_imm_lock = SRWLOCK_INIT;
+static volatile LONG fm6_upd_applied, fm6_upd_same;
+
+/* UpdateSubresource (Azimuth 0x30) no imediato com o conteudo do juntador: o Azimuth renomeia o placement buffer
+   (copia nova na GPU, 0x1400e9a00 -> 0x1400e95c0), entao os draws do bundle seguinte leem esta versao e os de antes
+   ficam com a deles */
+#define AZ_SLOT_UPDATE_SUB 0x30
+static void fm6_upd_apply(void *ctx, const fm6_om_item *o)
+{
+    typedef void (*upd_fn)(void *, void *, UINT, const UINT *, const void *, UINT, UINT);
+    UINT i, k;
+    for (i = 0; i < o->nupd; i++) {
+        int same = 0, slot = -1;
+        LONG n;
+        AcquireSRWLockExclusive(&fm6_upd_imm_lock);
+        for (k = 0; k < 8; k++)
+            if (fm6_upd_imm[k].buf == o->upd[i].buf || (slot < 0 && !fm6_upd_imm[k].buf)) {
+                slot = (int)k;
+                if (fm6_upd_imm[k].buf == o->upd[i].buf) break;
+            }
+        if (slot >= 0 && fm6_upd_imm[slot].buf == o->upd[i].buf && fm6_upd_imm[slot].size == o->upd[i].size)
+            same = !memcmp(fm6_upd_imm[slot].data, o->upd[i].data, o->upd[i].size);
+        if (!same && slot >= 0) {
+            if (fm6_upd_imm[slot].size != o->upd[i].size) {
+                free(fm6_upd_imm[slot].data);
+                fm6_upd_imm[slot].data = malloc(o->upd[i].size);
+                fm6_upd_imm[slot].size = fm6_upd_imm[slot].data ? o->upd[i].size : 0;
+            }
+            if (fm6_upd_imm[slot].data) memcpy(fm6_upd_imm[slot].data, o->upd[i].data, o->upd[i].size);
+            fm6_upd_imm[slot].buf = fm6_upd_imm[slot].data ? o->upd[i].buf : NULL;
+        }
+        ReleaseSRWLockExclusive(&fm6_upd_imm_lock);
+        if (same) {
+            InterlockedIncrement(&fm6_upd_same);
+            continue;
+        }
+        ((upd_fn)(*(void ***)ctx)[AZ_SLOT_UPDATE_SUB])(ctx, o->upd[i].buf, 0, NULL, o->upd[i].data, 0, 0);
+        n = InterlockedIncrement(&fm6_upd_applied);
+        if ((n & (n - 1)) == 0)
+            wlog("d3d: heranca: %ld versoes de placement buffer aplicadas no imediato (%ld iguais puladas); ultima buf "
+                 "%p (%u bytes)", n, fm6_upd_same, o->upd[i].buf, o->upd[i].size);
+    }
 }
 
 /* Set* (start, n, objs) de cada faixa contigua de slots gravados em mask entre 0 e n-1; devolve quantos */
@@ -2063,6 +2136,7 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
         ncb += fm6_set_runs(ctx, (set_fn)az[fm6_stage_cb[s]], o->st.cb[s], o->st.cbset[s], o->st.ncb[s], (int)s);
         nsrv += fm6_set_runs(ctx, (set_fn)az[fm6_stage_srv[s]], o->st.srv[s], o->st.srvset[s], o->st.nsrv[s], -1);
     }
+    fm6_upd_apply(ctx, o);
     if (InterlockedIncrement(&logged) <= 4)
         wlog("d3d: heranca: bundle aninhado executa com o OM do juntador (%u RTs, DS %p, %u viewports, %u scissors, "
              "%u slots de CB e %u de SRV estacionados; blend %s%p, depth %s%p ref %u, rs %s%p)", o->st.nrtv, o->st.dsv,
@@ -2318,9 +2392,32 @@ static void fm6_imm_VSSetFastConstantBuffer(void *ctx, UINT slot, void *obj)
    Azimuth para ("... on a deferred context", validador 0x1401a6fc0). Placement buffer do Azimuth (CreatePlacementBuffer
    0x140121870, so constantes): +0x38 tipo 5, +0x70 ByteWidth, +0x88 placement, +0x168 memoria do jogo (0 = liberada);
    o conteudo e a memoria do jogo, copiada por lista diferida no ExecuteCommandList (0x14011bd40). No console o
-   driver escreveria essa memoria; aqui a copia vai para a memoria na gravacao (= o jogo escrevendo o buffer).
-   Diferenca: varias atualizacoes do mesmo buffer na mesma lista ficam so com a ultima (log das primeiras). */
+   driver copia os dados na GPU, na ordem dos draws. Os juntadores d4/d5 do FM6 atualizam assim 2 buffers (1712 e
+   2048 bytes, constantes por objeto do carro) antes de cada bundle aninhado, ~1000x por quadro e em 2 threads; os
+   bundles desenham no imediato, que le o buffer no submit -> todas as pecas com o ultimo valor (rodas atrasadas,
+   interior piscando, 17_fm6.txt PASSO 51). Agora: a atualizacao vai para a sombra do diferido (fm6_upd), a copia
+   da heranca leva o conteudo e o imediato o aplica antes do bundle (fm6_upd_apply). Sem sombra (diferido sem
+   registro, buffer grande, mais de FM6_UPD_MAX): memoria do jogo, como antes. */
 typedef void (*update_sub_fn)(void *ctx, void *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp);
+static fm6_upd *fm6_upd_get(void *ctx, uint8_t *res, UINT w)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    int i, free_i = -1;
+    if (!d) return NULL;
+    for (i = 0; i < FM6_UPD_MAX; i++) {
+        if (d->upd[i].buf == res && d->upd[i].size == w) return &d->upd[i];
+        if (!d->upd[i].buf && free_i < 0) free_i = i;
+    }
+    if (free_i < 0 || w > FM6_UPD_BYTES || !(d->upd[free_i].data = malloc(w))) return NULL;
+    memcpy(d->upd[free_i].data, *(uint8_t **)(res + AZ_BUF_MEMORY), w);
+    fm6_obj_ref(res, 1);                                       /* a sombra vive com o diferido */
+    d->upd[free_i].buf = res;
+    d->upd[free_i].size = w;
+    wlog("d3d: UpdateSubresource de placement buffer no diferido d%d %p: sombra de buf %p (%u bytes, memoria %p)",
+         d->idx, ctx, (void *)res, w, *(void **)(res + AZ_BUF_MEMORY));
+    return &d->upd[free_i];
+}
+
 static void fm6_UpdateSubresource(void *ctx, uint8_t *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp)
 {
     if (res && src && sub == 0 && ((uint8_t *)ctx)[AZ_CTX_DEFERRED] && *(int *)(res + AZ_RES_TYPE) == 5 &&
@@ -2329,11 +2426,16 @@ static void fm6_UpdateSubresource(void *ctx, uint8_t *res, UINT sub, const UINT 
         if (lo < hi && hi <= w) {
             static volatile LONG n;
             LONG k = InterlockedIncrement(&n);
-            memcpy(*(uint8_t **)(res + AZ_BUF_MEMORY) + lo, src, hi - lo);
+            fm6_upd *u = fm6_upd_get(ctx, res, w);
+            if (u) {
+                memcpy(u->data + lo, src, hi - lo);
+                u->dirty = 1;
+            } else
+                memcpy(*(uint8_t **)(res + AZ_BUF_MEMORY) + lo, src, hi - lo);
             if (k <= 8 || (k & (k - 1)) == 0)
                 wlog("d3d: UpdateSubresource #%ld de placement buffer no diferido %p: buf %p (%u bytes) [%u, %u) "
-                     "-> memoria %p, chamador %p", k, ctx, (void *)res, w, lo, hi,
-                     *(void **)(res + AZ_BUF_MEMORY), __builtin_return_address(0));   /* g_game e so do FM5 */
+                     "-> %s %p, chamador %p", k, ctx, (void *)res, w, lo, hi, u ? "sombra" : "memoria",
+                     u ? (void *)u->data : *(void **)(res + AZ_BUF_MEMORY), __builtin_return_address(0));
             return;
         }
     }
@@ -2682,6 +2784,12 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
     if (hr < 0 || !out || !*out) return hr;
     fm6_cl_owner_note(*out, ctx);
     if (!restore) fm6_om_reset(ctx);
+    {   /* lista nova: o bundle so herda o conteudo que o juntador atualizar nela */
+        fm6_dctx_info *d = fm6_dctx_find(ctx);
+        int i;
+        if (d)
+            for (i = 0; i < FM6_UPD_MAX; i++) d->upd[i].dirty = 0;
+    }
     AcquireSRWLockExclusive(&fm6_cl_lock);
     p = fm6_chain_take(&fm6_pending, ctx);
     stale = fm6_chain_take(&fm6_lists, *out);              /* endereco reaproveitado sem passar pelo Release */
