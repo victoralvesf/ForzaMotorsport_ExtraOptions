@@ -845,6 +845,7 @@ extern int d3d_install(void);
 extern int winrt_install(void);
 extern int shape_install(void);
 extern int audio_fm6_install(void);
+extern void audio_fm6_game_hooks(uint8_t *game);
 extern int debug12_install(void);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
@@ -987,6 +988,7 @@ static void hook_apply_patches(void *image, const void *options)
         fm6_batch_install(game);
         fm6_reexec_install();
         fm6_graphics_protect_install();
+        audio_fm6_game_hooks(game);   /* diagnostico: init do som / ACP (audio_fm6.c) */
         fm6_patches(game);
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;

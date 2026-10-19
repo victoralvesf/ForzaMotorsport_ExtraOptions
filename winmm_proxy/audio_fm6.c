@@ -13,6 +13,7 @@ extern uint8_t *g_base;
 extern void wlog(const char *fmt, ...);
 extern int is_fm6(void);
 extern void write_mem(void *dst, const void *src, size_t len);
+extern int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp_out);
 
 #define RVA_FMOD_CLIENT_VT 0x2a1da0
 
@@ -214,6 +215,74 @@ static long ac_get_service(void *self, const GUID *iid, void **out)
     return hr;
 }
 
+/* ---- caminho que cria o ACP no FM6 (PASSO 53, parte 2) ----
+   game+0x79e0b0 (init do som; chama 0x64d6b0 2x) -> 0x64d6b0 -> 0x666470 -> 0x656000 -> 0x646780 -> 0x6553b0
+   (AllocateShapeContexts + AcpHalCreate). Mesma cadeia no FM5: 0xe0c710 -> 0xcb8510 -> ... -> 0xcba8d0.
+   Mensagens ACP chegam ao Azimuth em 0x1400b0150(proc, msg): tipo = msg[0]. */
+#define FM6_SOUND_INIT  0x79e0b0
+#define FM6_SOUND_SUB   0x64d6b0
+#define FM6_ACP_SETUP   0x6553b0
+#define RVA_ACP_MESSAGE 0xb0150
+
+typedef uint64_t (*fn8)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+static fn8 orig_sound_init, orig_sound_sub, orig_acp_setup;
+static void (*orig_acp_message)(uint8_t *proc, uint32_t *msg);
+static volatile LONG acp_types[0x20];
+
+/* repassa 8 argumentos inteiros (os de pilha nas mesmas posicoes) e so loga depois da chamada */
+static void log_ret(const char *what, LONG n, uint64_t ret, void *caller)
+{
+    if (log_point(n)) wlog("audio FM6: %s #%ld -> %#llx (chamador %p)", what, n, (unsigned long long)ret, caller);
+}
+
+static uint64_t fm6_sound_init(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g,
+                               uint64_t h)
+{
+    static volatile LONG n;
+    uint64_t r = orig_sound_init(a, b, c, d, e, f, g, h);
+    log_ret("init do som (game+0x79e0b0)", InterlockedIncrement(&n), r, __builtin_return_address(0));
+    return r;
+}
+
+static uint64_t fm6_sound_sub(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g,
+                              uint64_t h)
+{
+    static volatile LONG n;
+    uint64_t r = orig_sound_sub(a, b, c, d, e, f, g, h);
+    log_ret("game+0x64d6b0", InterlockedIncrement(&n), r, __builtin_return_address(0));
+    return r;
+}
+
+static uint64_t fm6_acp_setup(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g,
+                              uint64_t h)
+{
+    static volatile LONG n;
+    uint64_t r = orig_acp_setup(a, b, c, d, e, f, g, h);
+    log_ret("ACP criado (game+0x6553b0)", InterlockedIncrement(&n), r, __builtin_return_address(0));
+    return r;
+}
+
+static void acp_message(uint8_t *proc, uint32_t *msg)
+{
+    if (is_fm6()) {
+        uint32_t t = msg[0] < 0x1f ? msg[0] : 0x1f;
+        LONG k = InterlockedIncrement(&acp_types[t]);
+        if (log_point(k)) wlog("audio FM6: mensagem ACP tipo %u #%ld", msg[0], k);
+    }
+    orig_acp_message(proc, msg);
+}
+
+void audio_fm6_game_hooks(uint8_t *game)
+{
+    int ok = hook_at(game + FM6_SOUND_INIT, "4489442418895424105556574154", 14, (void *)fm6_sound_init,
+                     (void **)&orig_sound_init);
+    ok &= hook_at(game + FM6_SOUND_SUB, "40535556415641574881ec60010000", 15, (void *)fm6_sound_sub,
+                  (void **)&orig_sound_sub);
+    ok &= hook_at(game + FM6_ACP_SETUP, "40534881ecc0000000488bd933d2", 14, (void *)fm6_acp_setup,
+                  (void **)&orig_acp_setup);
+    wlog("audio FM6: hooks do init do som / ACP %s", ok ? "instalados" : "INCOMPLETOS (bytes nao conferem)");
+}
+
 int audio_fm6_install(void)
 {
     void **vt = (void **)(g_base + RVA_FMOD_CLIENT_VT);
@@ -228,6 +297,9 @@ int audio_fm6_install(void)
                  client_slots[i].slot, vt[client_slots[i].slot], client_slots[i].rva);
             return 0;
         }
+    if (!hook_at(g_base + RVA_ACP_MESSAGE, "48895c241856574154415641574881ecd0000000", 20, (void *)acp_message,
+                 (void **)&orig_acp_message))
+        wlog("audio: processamento de mensagens ACP (%#x) nao confere, sem contagem", RVA_ACP_MESSAGE);
     for (i = 0; i < n; i++) swap_slot(vt, client_slots[i].slot, hooks[i], origs[i]);
     wlog("audio: FmodAudioClient (vtable %#x) com diagnostico do FM6", RVA_FMOD_CLIENT_VT);
     return 1;

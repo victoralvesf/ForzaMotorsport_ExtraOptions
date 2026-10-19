@@ -95,3 +95,20 @@ TEST(audio_fm6_render_client_counts_game_frames)
     rc_get_buffer(&fake_rc, 4, &d); rc_release_buffer(&fake_rc, 4, 0);
     CHECK_EQ(st.release_calls, 3);
 }
+
+TEST(audio_fm6_game_hooks_on_real_exe)
+{
+    uint8_t *game = pe_map(FM6_EXE, NULL);
+    if (!game) { test_skip("exe do FM6 ausente"); return; }
+    log_capture();
+    audio_fm6_game_hooks(game);
+    CHECK(log_has("hooks do init do som / ACP instalados"));
+    /* jmp absoluto (ff 25 00000000 + destino) nos 3 sites */
+    CHECK_HEX(game + 0x79e0b0, "ff2500000000");
+    CHECK(*(void **)(game + 0x79e0b6) == (void *)fm6_sound_init);
+    CHECK(*(void **)(game + 0x64d6b6) == (void *)fm6_sound_sub);
+    CHECK(*(void **)(game + 0x6553b6) == (void *)fm6_acp_setup);
+    /* trampolins com os bytes originais */
+    CHECK_HEX(orig_sound_init, "4489442418895424105556574154ff25");
+    CHECK_HEX(orig_acp_setup, "40534881ecc0000000488bd933d2ff25");
+}
