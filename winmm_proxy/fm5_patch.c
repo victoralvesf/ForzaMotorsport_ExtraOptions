@@ -988,7 +988,7 @@ static void hook_apply_patches(void *image, const void *options)
         fm6_batch_install(game);
         fm6_reexec_install();
         fm6_graphics_protect_install();
-        audio_fm6_game_hooks(game);   /* diagnostico: init do som / ACP (audio_fm6.c) */
+        /* audio_fm6_game_hooks(game): desligado - suspeito de travar o carregamento (17_fm6.txt PASSO 53) */
         fm6_patches(game);
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;
