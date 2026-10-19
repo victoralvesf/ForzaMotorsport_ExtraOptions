@@ -575,11 +575,6 @@ TEST(gpuguard_null_uavs_without_trace)
     CHECK(lite_vt.ExecuteIndirect == hook_exec_indirect_uav && lite_vt.Reset == hook_reset_uav);
     CHECK(lite_vt.SetPipelineState == hook_set_pso);
     CHECK(lite_vt.CopyTextureRegion == NULL);                  /* rastreio continua desligado */
-    CHECK(lite_vt.SetGraphicsRootSignature == hook_grs && lite_vt.SetGraphicsRootDescriptorTable == hook_gtab);
-    /* defesas com custo por chamada (enderecos envenenados, tabelas de compute, IA/SO): so com o rastreio */
-    CHECK(lite_vt.SetGraphicsRootConstantBufferView == NULL && lite_vt.SetComputeRootShaderResourceView == NULL);
-    CHECK(lite_vt.IASetVertexBuffers == NULL && lite_vt.IASetIndexBuffer == NULL && lite_vt.SOSetTargets == NULL);
-    CHECK(lite_vt.SetComputeRootSignature == NULL && lite_vt.SetComputeRootDescriptorTable == NULL);
     gg_rs_add(&rs, size, 3);
     gg_rs_set_uav(&rs, 1ull << 2);
     gg_rs_add(&rs1, size, 1);                                  /* 1 parametro, sem tabela de UAV */
@@ -759,41 +754,4 @@ TEST(gpuguard_gfx_state)
     CHECK(gg_gfx_get(&cl, &g));
     CHECK_EQ(g.tab[3], 0);
     CHECK_EQ(g.ib.BufferLocation, 0);
-}
-
-/* sem rastreio o device so ganha o que os UAVs nulos precisam: heap (+64 slots), root signatures, PSOs e command lists;
-   Create*View / CopyDescriptors* / CreateCommandAllocator (bitmap e espelho dos descritores) ficam como estao */
-static ID3D12DeviceVtbl lite_dev_vt;
-static struct { ID3D12DeviceVtbl *lpVtbl; } lite_dev = { &lite_dev_vt };
-static HRESULT STDMETHODCALLTYPE lite_dev_qi(ID3D12Device *d, REFIID iid, void **out)
-{
-    if (!IsEqualGUID(iid, &IID_ID3D12Device)) { *out = NULL; return E_NOINTERFACE; }
-    *out = d;
-    return S_OK;
-}
-static ULONG STDMETHODCALLTYPE lite_dev_release(ID3D12Device *d) { (void)d; return 1; }
-static UINT STDMETHODCALLTYPE lite_dev_inc(ID3D12Device *d, D3D12_DESCRIPTOR_HEAP_TYPE t) { (void)d; (void)t; return 32; }
-static void STDMETHODCALLTYPE lite_dev_srv(ID3D12Device *d, ID3D12Resource *r, const D3D12_SHADER_RESOURCE_VIEW_DESC *v,
-                                           D3D12_CPU_DESCRIPTOR_HANDLE h)
-{
-    (void)d; (void)r; (void)v; (void)h;
-}
-
-TEST(gpuguard_install_without_trace)
-{
-    int saved = gg_trace_on;
-    lite_dev_vt.QueryInterface = lite_dev_qi;
-    lite_dev_vt.Release = lite_dev_release;
-    lite_dev_vt.GetDescriptorHandleIncrementSize = lite_dev_inc;
-    lite_dev_vt.CreateShaderResourceView = lite_dev_srv;
-    gg_trace_on = 0;
-    gpuguard_install((IUnknown *)&lite_dev);
-    CHECK(lite_dev_vt.CreateDescriptorHeap == hook_heap && lite_dev_vt.CreateRootSignature == hook_rootsig);
-    CHECK(lite_dev_vt.CreateCommandList == hook_list && lite_dev_vt.CreateGraphicsPipelineState == hook_gpso);
-    CHECK(lite_dev_vt.CreateShaderResourceView == lite_dev_srv);
-    CHECK(lite_dev_vt.CreateConstantBufferView == NULL && lite_dev_vt.CreateUnorderedAccessView == NULL);
-    CHECK(lite_dev_vt.CopyDescriptors == NULL && lite_dev_vt.CopyDescriptorsSimple == NULL);
-    CHECK(lite_dev_vt.CreateCommandAllocator == NULL && lite_dev_vt.MakeResident == NULL);
-    CHECK(log_has("gpuguard: ligada no device D3D12 (descritor CBV/SRV/UAV de 32 bytes, so UAVs nulos)"));
-    gg_trace_on = saved;
 }

@@ -3,9 +3,7 @@
  * descritor com bytes 0xdeadbeef (V# da AMD -> endereco 0xbeefdeadb000); cada page fault e um TDR, e uma sequencia
  * deles chegou a derrubar o driver de video (BSOD 0x3b, 2026-10-18). A trava fica no device D3D12 do Azimuth
  * (ligada pelo hook do D3D12CreateDevice em debug12_fm5.c; o device nasce antes de o jogo ser conhecido, entao vale
- * para todos, mas so muda algo onde a GPU daria page fault) e age antes de a GPU ver o dado.
- * Sempre ligado so o ultimo item (UAVs nulos, a correcao da causa); os outros sao defesas/diagnostico com custo de CPU
- * por draw/tabela e ficam so com o rastreio (D3D12Debug>=3):
+ * para todos, mas so muda algo onde a GPU daria page fault) e age antes de a GPU ver o dado:
  *  - heaps CBV/SRV/UAV: bitmap de slots gravados (Create*View / destino de CopyDescriptors*); copiar um slot de
  *    origem nunca gravado loga a pilha e grava um SRV nulo nele antes (o handle de CPU na AMD nao aponta para os
  *    bytes do descritor: o conteudo nao da para conferir, so o bitmap);
@@ -988,7 +986,7 @@ static HRESULT STDMETHODCALLTYPE hook_heap(ID3D12Device *dev, const D3D12_DESCRI
         heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(heap, &s);
         if (d->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(heap, &g);
         heap->lpVtbl->Release(heap);
-        if (gg_trace_on) gg_heap_add(s.ptr, d->NumDescriptors, res_inc, g.ptr);   /* bitmap + espelho: so o rastreio le */
+        gg_heap_add(s.ptr, d->NumDescriptors, res_inc, g.ptr);
         if (extra) null_uavs_fill(dev, s.ptr + (uintptr_t)d->NumDescriptors * res_inc, g.ptr + (uint64_t)d->NumDescriptors * res_inc);
         if (InterlockedIncrement(&shown) <= 4)
             wlog("gpuguard: heap CBV/SRV/UAV cpu %p gpu %#llx x%u (flags %u)", (void *)s.ptr, (unsigned long long)g.ptr,
@@ -1007,10 +1005,8 @@ static void STDMETHODCALLTYPE hook_grs(ID3D12GraphicsCommandList *l, ID3D12RootS
 static void STDMETHODCALLTYPE hook_ctab(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE g) { check_table(l, 1, i, g); real_ctab(l, i, g); }
 static void STDMETHODCALLTYPE hook_gtab(ID3D12GraphicsCommandList *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE g)
 {
-    if (gg_trace_on) {
-        check_table(l, 0, i, g);
-        gg_gfx_set(l, 0, i, g.ptr, NULL, 0);
-    }
+    check_table(l, 0, i, g);
+    if (gg_trace_on) gg_gfx_set(l, 0, i, g.ptr, NULL, 0);
     if (i < 64) gg_cl_gtab(l, 1, 1ull << i);
     real_gtab(l, i, g);
 }
@@ -1872,7 +1868,7 @@ static void list_created(void *obj)
 {
     LONG k = InterlockedIncrement(&lists_made), live = InterlockedIncrement(&lists_live);
     gg_cl_forget(obj);
-    if (gg_trace_on) note_make_site(0);
+    note_make_site(0);
     if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command lists criadas, %ld vivas", k, live);
 }
 
@@ -1895,23 +1891,21 @@ static void hook_list_vtable(void *obj)
     static volatile LONG done;
     if (InterlockedCompareExchange(&done, 1, 0)) return;
     if (FAILED(((IUnknown *)obj)->lpVtbl->QueryInterface(obj, &IID_ID3D12GraphicsCommandList, (void **)&l))) { done = 0; return; }
-    /* sempre: o que os UAVs nulos precisam (root signature grafica e tabelas definidas por lista, registro solto no
-       Release); o resto (enderecos envenenados, slots nunca gravados, estado do draw) so com o rastreio */
+    swap((void **)&l->lpVtbl->SetComputeRootConstantBufferView, hook_ccbv, (void **)&real_ccbv);
+    swap((void **)&l->lpVtbl->SetGraphicsRootConstantBufferView, hook_gcbv, (void **)&real_gcbv);
+    swap((void **)&l->lpVtbl->SetComputeRootShaderResourceView, hook_csrv, (void **)&real_csrv);
+    swap((void **)&l->lpVtbl->SetGraphicsRootShaderResourceView, hook_gsrv, (void **)&real_gsrv);
+    swap((void **)&l->lpVtbl->SetComputeRootUnorderedAccessView, hook_cuav, (void **)&real_cuav);
+    swap((void **)&l->lpVtbl->SetGraphicsRootUnorderedAccessView, hook_guav, (void **)&real_guav);
+    swap((void **)&l->lpVtbl->IASetIndexBuffer, hook_ib, (void **)&real_ib);
+    swap((void **)&l->lpVtbl->IASetVertexBuffers, hook_vb, (void **)&real_vb);
+    swap((void **)&l->lpVtbl->SOSetTargets, hook_so, (void **)&real_so);
+    swap((void **)&l->lpVtbl->SetComputeRootSignature, hook_crs, (void **)&real_crs);
     swap((void **)&l->lpVtbl->SetGraphicsRootSignature, hook_grs, (void **)&real_grs);
+    swap((void **)&l->lpVtbl->SetComputeRootDescriptorTable, hook_ctab, (void **)&real_ctab);
     swap((void **)&l->lpVtbl->SetGraphicsRootDescriptorTable, hook_gtab, (void **)&real_gtab);
     swap((void **)&l->lpVtbl->Release, hook_list_release, (void **)&real_list_release);
     if (gg_trace_on) {
-        swap((void **)&l->lpVtbl->SetComputeRootConstantBufferView, hook_ccbv, (void **)&real_ccbv);
-        swap((void **)&l->lpVtbl->SetGraphicsRootConstantBufferView, hook_gcbv, (void **)&real_gcbv);
-        swap((void **)&l->lpVtbl->SetComputeRootShaderResourceView, hook_csrv, (void **)&real_csrv);
-        swap((void **)&l->lpVtbl->SetGraphicsRootShaderResourceView, hook_gsrv, (void **)&real_gsrv);
-        swap((void **)&l->lpVtbl->SetComputeRootUnorderedAccessView, hook_cuav, (void **)&real_cuav);
-        swap((void **)&l->lpVtbl->SetGraphicsRootUnorderedAccessView, hook_guav, (void **)&real_guav);
-        swap((void **)&l->lpVtbl->IASetIndexBuffer, hook_ib, (void **)&real_ib);
-        swap((void **)&l->lpVtbl->IASetVertexBuffers, hook_vb, (void **)&real_vb);
-        swap((void **)&l->lpVtbl->SOSetTargets, hook_so, (void **)&real_so);
-        swap((void **)&l->lpVtbl->SetComputeRootSignature, hook_crs, (void **)&real_crs);
-        swap((void **)&l->lpVtbl->SetComputeRootDescriptorTable, hook_ctab, (void **)&real_ctab);
         swap((void **)&l->lpVtbl->Dispatch, hook_dispatch, (void **)&real_dispatch);
         swap((void **)&l->lpVtbl->CopyTextureRegion, hook_copytex, (void **)&real_copytex);
         swap((void **)&l->lpVtbl->Reset, hook_reset, (void **)&real_reset);
@@ -1928,8 +1922,8 @@ static void hook_list_vtable(void *obj)
         swap((void **)&l->lpVtbl->SetPipelineState, hook_set_pso, (void **)&real_set_pso);
     }
     l->lpVtbl->Release(l);
-    wlog("gpuguard: vtable da command list trocada (UAVs nulos nos draws%s)",
-         gg_trace_on ? "; rastreio: root views, IA, SO, tabelas, Dispatch/CopyTextureRegion/draws/ClearRTV/PSO" : "");
+    wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO, UAVs nulos nos draws%s)",
+         gg_trace_on ? ", rastreio de Dispatch/CopyTextureRegion/draws/ClearRTV/PSO" : "");
 }
 
 static HRESULT STDMETHODCALLTYPE hook_list(ID3D12Device *dev, UINT mask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *a,
@@ -2020,15 +2014,13 @@ void gpuguard_install(IUnknown *obj)
     res_inc = dev->lpVtbl->GetDescriptorHandleIncrementSize(dev, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     swap((void **)&dev->lpVtbl->CreateRootSignature, hook_rootsig, (void **)&real_rootsig);
     swap((void **)&dev->lpVtbl->CreateDescriptorHeap, hook_heap, (void **)&real_heap);
+    swap((void **)&dev->lpVtbl->CreateConstantBufferView, hook_cbv, (void **)&real_cbv);
+    swap((void **)&dev->lpVtbl->CreateShaderResourceView, hook_srv, (void **)&real_srv);
+    swap((void **)&dev->lpVtbl->CreateUnorderedAccessView, hook_uav, (void **)&real_uav);
+    swap((void **)&dev->lpVtbl->CopyDescriptors, hook_copy, (void **)&real_copy);
+    swap((void **)&dev->lpVtbl->CopyDescriptorsSimple, hook_copy1, (void **)&real_copy1);
     swap((void **)&dev->lpVtbl->CreateCommandList, hook_list, (void **)&real_list);
-    if (gg_trace_on) {   /* bitmap/espelho dos descritores e pontos de criacao: so diagnostico */
-        swap((void **)&dev->lpVtbl->CreateConstantBufferView, hook_cbv, (void **)&real_cbv);
-        swap((void **)&dev->lpVtbl->CreateShaderResourceView, hook_srv, (void **)&real_srv);
-        swap((void **)&dev->lpVtbl->CreateUnorderedAccessView, hook_uav, (void **)&real_uav);
-        swap((void **)&dev->lpVtbl->CopyDescriptors, hook_copy, (void **)&real_copy);
-        swap((void **)&dev->lpVtbl->CopyDescriptorsSimple, hook_copy1, (void **)&real_copy1);
-        swap((void **)&dev->lpVtbl->CreateCommandAllocator, hook_alloc, (void **)&real_alloc);
-    }
+    swap((void **)&dev->lpVtbl->CreateCommandAllocator, hook_alloc, (void **)&real_alloc);
     swap((void **)&dev->lpVtbl->CreateGraphicsPipelineState, hook_gpso, (void **)&real_gpso);
     dev->lpVtbl->Release(dev);
     {
@@ -2044,6 +2036,5 @@ void gpuguard_install(IUnknown *obj)
         dev4->lpVtbl->Release(dev4);
     }
     if (gg_trace_on) hook_residency(obj);
-    wlog("gpuguard: ligada no device D3D12 (descritor CBV/SRV/UAV de %u bytes%s)", res_inc,
-         gg_trace_on ? ", com as defesas de descritores/enderecos do rastreio" : ", so UAVs nulos");
+    wlog("gpuguard: ligada no device D3D12 (descritor CBV/SRV/UAV de %u bytes)", res_inc);
 }
