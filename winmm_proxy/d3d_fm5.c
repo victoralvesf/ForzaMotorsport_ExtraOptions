@@ -1851,9 +1851,19 @@ static void fm6_def_RSSetState(void *ctx, void *rs)
 #define AZ_SLOT_REMAP_CB 0x9c
 static void fm6_def_remap(int srv, void *ctx, UINT ds, UINT dslot, UINT ss, UINT sslot)
 {
-    static volatile LONG n[2];
+    static volatile LONG n[2], nseen;
+    static UINT seen[128];
     fm6_dctx_info *d = fm6_dctx_find(ctx);
-    LONG k = InterlockedIncrement(&n[srv]);
+    LONG k = InterlockedIncrement(&n[srv]), i, ns = nseen < 128 ? nseen : 128;
+    UINT key = (UINT)srv << 28 | (ds & 7) << 25 | (dslot & 0x7f) << 18 | (ss & 7) << 15 | (sslot & 0x7f) << 8 |
+               (d ? d->idx & 0xff : 0xff);
+    for (i = 0; i < ns && seen[i] != key; i++) {}
+    if (i == ns && (i = InterlockedIncrement(&nseen) - 1) < 128) {   /* PASSO 49: todos os remaps distintos */
+        seen[i] = key;
+        wlog("d3d: heranca: remap distinto #%ld %s no diferido d%d (flags %#x, game+%#zx): estagio %u slot %u <- "
+             "estagio %u slot %u", i + 1, srv ? "SRV" : "CB", d ? d->idx : -1, d ? d->flags : 0, fm6_game_caller(), ds,
+             dslot, ss, sslot);
+    }
     if (k <= 8 || (k & (k - 1)) == 0)
         wlog("d3d: heranca: Remap%sInheritance #%ld no diferido d%d (flags %#x): estagio %u slot %u <- estagio %u "
              "slot %u", srv ? "ShaderResource" : "ConstantBuffer", k, d ? d->idx : -1, d ? d->flags : 0, ds, dslot,
@@ -1910,6 +1920,76 @@ static void fm6_res_note(void *ctx, int srv, UINT stage, UINT start, UINT n, voi
     if (!srv && start + n > d->st.ncb[stage]) d->st.ncb[stage] = (uint8_t)(start + n);
 }
 
+/* Diagnostico do CB b4 de VS/PS (17_fm6.txt PASSO 49): no RenderDoc o PS do carro (e o da pista) le b4 (constantes
+   globais indexadas; o do carro multiplica a cor final por cb4[14].w) e o b4 e o CB dummy zerado do Azimuth
+   ([dev+0x6970], ligado em 0x140127b9c quando o slot foi gravado com objeto NULL) -> carroceria preta. Conta quem
+   grava b4 (diferido padrao/Fast, imediato padrao/Fast, copia da heranca no imediato) com objeto ou NULL e loga os
+   objetos distintos (tipo do Azimuth; buffer: ByteWidth, placement, VA, memoria do jogo) e o chamador. */
+/* objeto de recurso do Azimuth (os do buffer tambem no UpdateSubresource de placement, abaixo) */
+#define AZ_CTX_DEFERRED   0xc48
+#define AZ_RES_TYPE       0x38
+#define AZ_BUF_WIDTH      0x70
+#define AZ_BUF_PLACEMENT  0x88
+#define AZ_BUF_MEMORY     0x168
+#define AZ_BUF_VA         0x148
+enum { CB4_DEF, CB4_DEF_FAST, CB4_IMM, CB4_IMM_FAST, CB4_APPLY, CB4_KINDS };
+static const char *const cb4_kinds[CB4_KINDS] = { "diferido", "diferido Fast", "imediato", "imediato Fast",
+                                                  "copia da heranca" };
+static volatile LONG cb4_n[CB4_KINDS][2][2];   /* [origem][PS][com objeto] */
+static volatile LONG cb4_total, cb4_nseen;
+static void *cb4_seen[64];
+
+static int fm6_az_type(const void *obj)
+{
+    uint8_t *vt = obj ? *(uint8_t *const *)obj : NULL, *tabs = g_base + RVA_VTBL_TABLES;
+    return vt >= tabs && vt < tabs + NTYPES * SLOTS * 8 ? (int)((vt - tabs) / (SLOTS * 8)) : -1;
+}
+
+static void fm6_cb4_summary(LONG t)
+{
+    int k;
+    char buf[640];
+    int len = wsprintfA(buf, "d3d: b4 apos %ld gravacoes:", t);
+    for (k = 0; k < CB4_KINDS; k++)
+        len += wsprintfA(buf + len, " %s VS %ld/%ld PS %ld/%ld;", cb4_kinds[k], cb4_n[k][0][1], cb4_n[k][0][0],
+                         cb4_n[k][1][1], cb4_n[k][1][0]);
+    wlog("%s (objeto/NULL)", buf);
+}
+
+static void fm6_cb4_note(void *ctx, int kind, UINT stage, UINT start, UINT n, void *const *objs)
+{
+    uint8_t *o;
+    LONG k, t, i, ns;
+    int ps = stage == 4;
+    fm6_dctx_info *d;
+    if ((stage != 0 && stage != 4) || start > 4 || n <= 4 - start) return;
+    o = objs ? objs[4 - start] : NULL;
+    k = InterlockedIncrement(&cb4_n[kind][ps][o != NULL]);
+    d = fm6_dctx_find(ctx);
+    if (o) {
+        ns = cb4_nseen < 64 ? cb4_nseen : 64;
+        for (i = 0; i < ns && cb4_seen[i] != o; i++) {}
+        if (i == ns && (i = InterlockedIncrement(&cb4_nseen) - 1) < 64) {
+            int ty = fm6_az_type(o);
+            cb4_seen[i] = o;
+            if (ty == 5)
+                wlog("d3d: b4: objeto novo #%ld no %s %s (ctx %p d%d flags %#x, game+%#zx): buffer %p ByteWidth %u "
+                     "placement %u/%u VA %p memoria %p", i + 1, ps ? "PS" : "VS", cb4_kinds[kind], ctx, d ? d->idx : -1,
+                     d ? d->flags : 0, fm6_game_caller(), o, *(UINT *)(o + AZ_BUF_WIDTH), o[AZ_BUF_PLACEMENT],
+                     o[AZ_BUF_PLACEMENT + 1], *(void **)(o + AZ_BUF_VA), *(void **)(o + AZ_BUF_MEMORY));
+            else
+                wlog("d3d: b4: objeto novo #%ld no %s %s (ctx %p d%d flags %#x, game+%#zx): %p tipo do Azimuth %d",
+                     i + 1, ps ? "PS" : "VS", cb4_kinds[kind], ctx, d ? d->idx : -1, d ? d->flags : 0,
+                     fm6_game_caller(), o, ty);
+        }
+    } else if (k <= 4) {
+        wlog("d3d: b4: %s %s grava NULL #%ld (ctx %p d%d flags %#x, game+%#zx, slots %u..%u)", ps ? "PS" : "VS",
+             cb4_kinds[kind], k, ctx, d ? d->idx : -1, d ? d->flags : 0, fm6_game_caller(), start, start + n - 1);
+    }
+    t = InterlockedIncrement(&cb4_total);
+    if (t >= 1024 && (t & (t - 1)) == 0) fm6_cb4_summary(t);
+}
+
 static int fm6_om_has_res(const fm6_om *st)
 {
     int s;
@@ -1948,7 +2028,7 @@ static fm6_om_item *fm6_om_snapshot(void *ctx)
 static void fm6_om_apply(void *ctx, const fm6_om_item *o)
 {
     void **az = *(void ***)ctx;
-    static volatile LONG logged;
+    static volatile LONG logged, logged_cb;
     UINT s, ncb = 0, nsrv = 0;
     if (o->st.nrtv || o->st.dsv || o->st.nvp)
         ((void (*)(void *, UINT, void *const *, void *))az[AZ_SLOT_OM])(ctx, o->st.nrtv, o->st.rtv, o->st.dsv);
@@ -1962,6 +2042,7 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
     if (o->st.has & FM6_HAS_RS) ((void (*)(void *, void *))az[AZ_SLOT_RS])(ctx, o->st.rs);
     /* os remaps do bundle resolvem a origem no estado do imediato (pacote 0xc, 0x140111820) */
     for (s = 0; s < 6; s++) {
+        if (o->st.ncb[s]) fm6_cb4_note(ctx, CB4_APPLY, s, 0, o->st.ncb[s], o->st.cb[s]);
         if (o->st.ncb[s]) ((set_fn)az[fm6_stage_cb[s]])(ctx, 0, o->st.ncb[s], o->st.cb[s]);
         if (o->st.nsrv[s]) ((set_fn)az[fm6_stage_srv[s]])(ctx, 0, o->st.nsrv[s], o->st.srv[s]);
         ncb += o->st.ncb[s];
@@ -1973,6 +2054,17 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
              o->st.nvp, o->st.nsc, ncb, nsrv, o->st.has & FM6_HAS_BLEND ? "" : "(nao ligado) ", o->st.blend,
              o->st.has & FM6_HAS_DEPTH ? "" : "(nao ligado) ", o->st.depth, o->st.stencil_ref,
              o->st.has & FM6_HAS_RS ? "" : "(nao ligado) ", o->st.rs);
+    if (InterlockedIncrement(&logged_cb) <= 16) {   /* PASSO 49: quais slots de CB a copia liga (. = NULL) */
+        char buf[256];
+        int len = 0;
+        UINT i;
+        for (s = 0; s < 6; s++) {
+            if (!o->st.ncb[s]) continue;
+            len += wsprintfA(buf + len, " estagio %u:", s);
+            for (i = 0; i < o->st.ncb[s]; i++) len += wsprintfA(buf + len, "%c", o->st.cb[s][i] ? 'x' : '.');
+        }
+        wlog("d3d: heranca: CBs da copia no imediato %p (x = objeto, . = NULL):%s", ctx, len ? buf : " nenhum");
+    }
 }
 
 /* lista devolvida pelo FinishCommandList -> diferido que a gravou (anel) */
@@ -2156,6 +2248,7 @@ static void *const fm6_ctx_fast[] = {
     static void fm6_def_set_cbs_##stage(void *ctx, UINT start, UINT n, void *const *cbs) \
     { \
         fm6_res_note(ctx, 0, stage, start, n, cbs); \
+        fm6_cb4_note(ctx, CB4_DEF, stage, start, n, cbs); \
         ((set_fn)fm6_az_fn(ctx, fm6_stage_cb[stage]))(ctx, start, n, cbs); \
     }
 FM6_DEF_CB(0) FM6_DEF_CB(1) FM6_DEF_CB(2) FM6_DEF_CB(3) FM6_DEF_CB(4) FM6_DEF_CB(5)
@@ -2167,6 +2260,7 @@ static void *const fm6_def_cbs[6] = {
     static void fm6_def_##name(void *ctx, UINT slot, void *obj) \
     { \
         fm6_res_note(ctx, srv, stage, slot, 1, &obj); \
+        if (!srv) fm6_cb4_note(ctx, CB4_DEF_FAST, stage, slot, 1, &obj); \
         ctx_##name(ctx, slot, obj); \
     }
 FM6_DEF_FAST(PSSetFastConstantBuffer, 0, 4) FM6_DEF_FAST(PSSetFastShaderResource, 1, 4)
@@ -2184,6 +2278,24 @@ static void *const fm6_def_fast[18] = {
     (void *)fm6_def_HSSetFastConstantBuffer, (void *)fm6_def_HSSetFastShaderResource, NULL,
     (void *)fm6_def_DSSetFastConstantBuffer, (void *)fm6_def_DSSetFastShaderResource, NULL,
 };
+/* imediato: CB de VS/PS (padrao e Fast) so para o diagnostico do b4 (PASSO 49) */
+#define FM6_IMM_CB(stage) \
+    static void fm6_imm_set_cbs_##stage(void *ctx, UINT start, UINT n, void *const *cbs) \
+    { \
+        fm6_cb4_note(ctx, CB4_IMM, stage, start, n, cbs); \
+        ((set_fn)(*(void ***)ctx)[fm6_stage_cb[stage]])(ctx, start, n, cbs); \
+    }
+FM6_IMM_CB(0) FM6_IMM_CB(4)
+static void fm6_imm_PSSetFastConstantBuffer(void *ctx, UINT slot, void *obj)
+{
+    fm6_cb4_note(ctx, CB4_IMM_FAST, 4, slot, 1, &obj);
+    ctx_PSSetFastConstantBuffer(ctx, slot, obj);
+}
+static void fm6_imm_VSSetFastConstantBuffer(void *ctx, UINT slot, void *obj)
+{
+    fm6_cb4_note(ctx, CB4_IMM_FAST, 0, slot, 1, &obj);
+    ctx_VSSetFastConstantBuffer(ctx, slot, obj);
+}
 
 /* UpdateSubresource (FM6 0x31 = Azimuth 0x30) de um placement buffer num contexto diferido (game+0x207247): o
    Azimuth para ("... on a deferred context", validador 0x1401a6fc0). Placement buffer do Azimuth (CreatePlacementBuffer
@@ -2191,11 +2303,6 @@ static void *const fm6_def_fast[18] = {
    o conteudo e a memoria do jogo, copiada por lista diferida no ExecuteCommandList (0x14011bd40). No console o
    driver escreveria essa memoria; aqui a copia vai para a memoria na gravacao (= o jogo escrevendo o buffer).
    Diferenca: varias atualizacoes do mesmo buffer na mesma lista ficam so com a ultima (log das primeiras). */
-#define AZ_CTX_DEFERRED   0xc48
-#define AZ_RES_TYPE       0x38
-#define AZ_BUF_WIDTH      0x70
-#define AZ_BUF_PLACEMENT  0x88
-#define AZ_BUF_MEMORY     0x168
 typedef void (*update_sub_fn)(void *ctx, void *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp);
 static void fm6_UpdateSubresource(void *ctx, uint8_t *res, UINT sub, const UINT *box, const void *src, UINT rp, UINT dp)
 {
@@ -2648,10 +2755,16 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
     for (i = 0; i < sizeof fm6_ctx_fast / sizeof *fm6_ctx_fast; i++) {
         int s = FM6_FAST_FIRST + (int)i, a = fm6_ctx_slot(s);
         if (src[a] == g_base + RVA_STUB_SLOT(a))
-            dst[s] = deferred && i < 18 && fm6_def_fast[i] ? fm6_def_fast[i] : fm6_ctx_fast[i];
+            dst[s] = deferred && i < 18 && fm6_def_fast[i] ? fm6_def_fast[i]
+                   : !deferred && i == 0 ? (void *)fm6_imm_PSSetFastConstantBuffer
+                   : !deferred && i == 3 ? (void *)fm6_imm_VSSetFastConstantBuffer : fm6_ctx_fast[i];
     }
     if (deferred)
         for (i = 0; i < 6; i++) dst[fm6_stage_cb[i] + 1] = fm6_def_cbs[i];   /* Azimuth 8..0x8c = FM6 - 1 */
+    else {
+        dst[fm6_stage_cb[0] + 1] = (void *)fm6_imm_set_cbs_0;
+        dst[fm6_stage_cb[4] + 1] = (void *)fm6_imm_set_cbs_4;
+    }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
     /* aliasing da ESRAM (imediato e diferido) e heranca do OM no aninhado (diferido) */
     dst[0x22] = (void *)fm6_def_OMSetRenderTargets;

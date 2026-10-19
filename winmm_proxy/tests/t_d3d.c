@@ -751,7 +751,9 @@ TEST(fm6_context_table_layout)
     CHECK(site_def(def, src, 0x870) == def);
     CHECK(imm[0] == (void *)0x1000 && imm[7] == (void *)0x1007);
     CHECK_EQ(((long (*)(void))imm[8])(), 0);                    /* slot novo */
-    CHECK(imm[9] == (void *)0x1008 && imm[0x8d] == (void *)0x108c);
+    CHECK(imm[0x8d] == (void *)0x108c);
+    CHECK(imm[9] == (void *)fm6_imm_set_cbs_0 && imm[0x12] == (void *)fm6_imm_set_cbs_4);   /* b4 (PASSO 49) */
+    CHECK(imm[0x18] == (void *)0x1017 && def[9] == (void *)fm6_def_set_cbs_0);
     CHECK_EQ(((long (*)(void))imm[0x8e])(), (long)-1);          /* PIXBeginEventEx */
     CHECK(imm[0x8f] == (void *)0x108d && imm[0x90] == (void *)0x108e);
     CHECK_EQ(((long (*)(void))imm[0x91])(), 0);                 /* PIXSetMarkerEx */
@@ -800,6 +802,57 @@ TEST(fm6_context_table_layout)
         ((void (*)(void *, UINT, void *))imm2[0xa4])(ctx, 4, (void *)0x5a5a);   /* PSSetFastShaderResource */
         CHECK(srvs_slot == 0x09 && srvs_start == 4 && srvs_n == 1 && srvs_views[0] == (void *)0x5a5a);
     }
+}
+
+/* diagnostico do b4 de VS/PS (17_fm6.txt PASSO 49): imediato padrao/Fast repassam ao Azimuth em [ctx] e contam;
+   objeto novo e NULL logados; copia da heranca loga os slots (x/.); remaps distintos */
+static void *cb4_ctx, *const *cb4_cbs;
+static UINT cb4_start, cb4_cnt, cb4_slot, cb4_calls;
+static void fake_cb4(void *ctx, UINT start, UINT n, void *const *cbs, UINT slot)
+{
+    cb4_ctx = ctx; cb4_start = start; cb4_cnt = n; cb4_cbs = cbs; cb4_slot = slot; cb4_calls++;
+}
+static void fake_cb4_08(void *c, UINT s, UINT n, void *const *v) { fake_cb4(c, s, n, v, 0x08); }
+static void fake_cb4_11(void *c, UINT s, UINT n, void *const *v) { fake_cb4(c, s, n, v, 0x11); }
+
+TEST(fm6_cb4_diag)
+{
+    uint8_t *az = fake_azimuth(0);
+    static void *src[0x10e], *imm[0x10e], *az_tab[0x10e], *ctx[1] = { az_tab };
+    static uint8_t buf[0x180];
+    void *cbs[6] = { 0 };
+    int i;
+    for (i = 0; i < 0x10e; i++) src[i] = (void *)(uintptr_t)(0x1000 + i);
+    src[0xa0] = az + 0xf5f30 + 0xa0 * 0x100;                    /* PSSetFastConstantBuffer: stub fatal */
+    fm6_ctx_table(imm, src, 0);
+    CHECK(imm[0xa3] == (void *)fm6_imm_PSSetFastConstantBuffer);
+    az_tab[0x08] = (void *)fake_cb4_08;
+    az_tab[0x11] = (void *)fake_cb4_11;
+    *(uint8_t **)buf = az + RVA_VTBL_TABLES + 5 * SLOTS * 8;    /* buffer do Azimuth (tipo 5) */
+    *(UINT *)(buf + AZ_BUF_WIDTH) = 1712;
+    buf[AZ_BUF_PLACEMENT] = buf[AZ_BUF_PLACEMENT + 1] = 1;
+    log_capture();
+    /* PS slots 3..5 com NULL no b4: repassa e conta NULL */
+    ((void (*)(void *, UINT, UINT, void *const *))imm[0x12])(ctx, 3, 3, cbs);
+    CHECK(cb4_ctx == ctx && cb4_slot == 0x11 && cb4_start == 3 && cb4_cnt == 3 && cb4_cbs == cbs);
+    CHECK(log_has("d3d: b4: PS imediato grava NULL #1"));
+    /* VS slot 4 com o buffer: objeto novo com ByteWidth/placement; de novo = sem log */
+    cbs[0] = buf;
+    ((void (*)(void *, UINT, UINT, void *const *))imm[9])(ctx, 4, 1, cbs);
+    CHECK(cb4_slot == 0x08 && cb4_start == 4 && cb4_cnt == 1);
+    CHECK(log_has("d3d: b4: objeto novo #1 no VS imediato") && log_has("ByteWidth 1712 placement 1/1"));
+    ((void (*)(void *, UINT, UINT, void *const *))imm[9])(ctx, 4, 1, cbs);
+    CHECK(!log_has("objeto novo #2"));
+    /* slots sem o 4: nada */
+    ((void (*)(void *, UINT, UINT, void *const *))imm[0x12])(ctx, 0, 4, cbs);
+    CHECK(cb4_n[CB4_IMM][1][0] == 1 && cb4_n[CB4_IMM][1][1] == 0 && cb4_n[CB4_IMM][0][1] == 2);
+    /* Fast do PS no imediato: conta e chama o Set* padrao do Azimuth (slot 0x11) */
+    ((void (*)(void *, UINT, void *))imm[0xa3])(ctx, 4, NULL);
+    CHECK(cb4_slot == 0x11 && cb4_start == 4 && cb4_cnt == 1);
+    CHECK(log_has("d3d: b4: PS imediato Fast grava NULL #1"));
+    fm6_cb4_summary(3);
+    CHECK(log_has("d3d: b4 apos 3 gravacoes: diferido VS 0/0 PS 0/0; diferido Fast VS 0/0 PS 0/0; imediato VS 2/0 "
+                  "PS 0/1; imediato Fast VS 0/0 PS 0/1;"));
 }
 
 /* UpdateSubresource de placement buffer no contexto diferido do FM6 -> memoria do jogo; resto -> Azimuth 0x30 */
@@ -1437,6 +1490,8 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(inh_bs_n == 2 && inh_bs_ctx == inh_ctx[2] && inh_bs == &bsv && inh_bs_mask == 0xffffffffu && inh_bs_f0 == 1.0f);
     CHECK(inh_ds_n == 2 && inh_ds == &dssv && inh_ds_ref == 3 && inh_rs_n == 2 && inh_rs == &rsv);
     CHECK(log_has("bundle aninhado executa com o OM do juntador (1 RTs"));
+    CHECK(log_has("CBs da copia no imediato") && log_has(" estagio 5:..x"));   /* PASSO 49 */
+    CHECK(log_has("remap distinto #1 SRV no diferido d") && log_has("estagio 4 slot 0 <- estagio 5 slot 3"));
     CHECK(log_has("depth ") && log_has(" ref 3, rs "));
     CHECK(rtv.ref == 3);                                                 /* f ainda segura as copias */
     CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);

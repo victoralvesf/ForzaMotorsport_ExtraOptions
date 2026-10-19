@@ -6,7 +6,7 @@ import renderdoc as rd
 
 cap_path = os.environ['RDOC_CAP']
 out = os.environ['RDOC_OUT']
-eids = [int(x) for x in os.environ.get('RDOC_EIDS', '').split(',') if x.strip()]
+eids = [int(x) if x.strip() != 'last' else -1 for x in os.environ.get('RDOC_EIDS', '').split(',') if x.strip()]   # last = ultimo draw
 os.makedirs(out, exist_ok=True)
 log = open(os.path.join(out, 'actions.txt'), 'w', encoding='utf-8')
 
@@ -37,12 +37,15 @@ try:
     def walk(acts, depth):
         for a in acts:
             n[0] += 1
+            if a.numIndices and a.outputs[0] != rd.ResourceId.Null(): last[0] = a.eventId
             outs = [o for o in a.outputs if o != rd.ResourceId.Null()]
             log.write('%s%d %s idx=%d inst=%d outs=[%s] depth=%s\n' % ('  ' * depth, a.eventId, a.GetName(ctl.GetStructuredFile()),
                       a.numIndices, a.numInstances, '; '.join(tdesc(o) for o in outs),
                       tdesc(a.depthOut) if a.depthOut != rd.ResourceId.Null() else '-'))
             walk(a.children, depth + 1)
+    last = [0]
     walk(ctl.GetRootActions(), 0)
+    eids = [last[0] if e < 0 else e for e in eids]
     log.write('total %d acoes\n' % n[0])
     for r in [x for x in os.environ.get('RDOC_USAGE', '').split(',') if x.strip()]:
         rid = [k for k in texs if str(int(k)) == r.strip() or str(k).endswith('::' + r.strip())]
