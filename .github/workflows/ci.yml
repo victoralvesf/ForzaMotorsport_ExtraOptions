@@ -1,4 +1,4 @@
-# Testes do proxy em todo pull request; release (winmm.dll + azimuth_fm5.ini + README.txt) no push de tag v*.
+# Testes do proxy em todo pull request; release (winmm.dll + azimuth_fm5.ini + azimuth_fm6.ini + README.txt) no push de tag v*.
 # debug.ini (diagnostico) fica so no repositorio, fora do zip.
 # No GitHub os testes que precisam do azimuth.exe/game_binaries sao pulados (ficam fora do git).
 name: CI
@@ -62,9 +62,9 @@ jobs:
       - name: Empacotar
         run: |
           mkdir -p dist
-          cp winmm_proxy/build/winmm.dll azimuth_fm5.ini dist/
+          cp winmm_proxy/build/winmm.dll azimuth_fm5.ini azimuth_fm6.ini dist/
           python tools/md2txt.py README.md dist/README.txt
-          cd dist && 7z a "../azimuth-fm5-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini README.txt
+          cd dist && 7z a "../azimuth-fm5-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini azimuth_fm6.ini README.txt
 
       - name: Publicar release
         env:

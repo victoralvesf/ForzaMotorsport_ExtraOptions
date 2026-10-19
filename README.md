@@ -22,9 +22,10 @@ modified on disk**, and FH2 keeps working as before.
 
 ## Installation
 
-1. Copy these two files into the Azimuth folder, the one that contains `azimuth.exe`:
+1. Copy these files into the Azimuth folder, the one that contains `azimuth.exe`:
    - `winmm.dll`
    - `azimuth_fm5.ini`
+   - `azimuth_fm6.ini`
 
    The result should look like this:
 
@@ -32,11 +33,12 @@ modified on disk**, and FH2 keeps working as before.
    <Azimuth folder>\
        azimuth.exe
        winmm.dll          <- mod
-       azimuth_fm5.ini    <- mod options
+       azimuth_fm5.ini    <- mod options (FM5)
+       azimuth_fm6.ini    <- mod options (FM6)
        data\
    ```
 
-2. (Optional) Edit `azimuth_fm5.ini` to suit your preferences.
+2. (Optional) Edit `azimuth_fm5.ini` / `azimuth_fm6.ini` to suit your preferences.
 3. Start `azimuth.exe` as usual and select the FM5 game folder in the launcher. To skip the
    launcher, run this from a command prompt:
 
@@ -55,7 +57,7 @@ Include both files when you report a problem.
 
 ## Uninstall
 
-Delete `winmm.dll` (and `azimuth_fm5.ini` if you like) from the Azimuth folder. That restores
+Delete `winmm.dll` (and `azimuth_fm5.ini` / `azimuth_fm6.ini` if you like) from the Azimuth folder. That restores
 the original Azimuth. Nothing else was changed.
 
 ## Building from source
@@ -71,7 +73,7 @@ sh winmm_proxy/build.sh
 The output is `winmm_proxy\build\winmm.dll`.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the tests on every pull request and, on a
-`v*` tag push, runs the tests, builds and publishes a release with `winmm.dll` + `azimuth_fm5.ini` + `README.txt`
+`v*` tag push, runs the tests, builds and publishes a release with `winmm.dll` + `azimuth_fm5.ini` + `azimuth_fm6.ini` + `README.txt`
 (this file as plain text, made by `tools\md2txt.py`).
 
 ## License

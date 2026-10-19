@@ -163,7 +163,7 @@ directly, so they can reach its internal functions. They run without starting th
 
 GitHub Actions (`.github/workflows/ci.yml`, Windows runner) runs the tests on every pull request.
 On a `v*` tag push, it runs the tests, then builds and publishes a release zip containing
-`winmm.dll`, `azimuth_fm5.ini` and `README.txt`.
+`winmm.dll`, `azimuth_fm5.ini`, `azimuth_fm6.ini` and `README.txt`.
 
 ## What is not in this repository
 

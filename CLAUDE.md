@@ -34,7 +34,7 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
   FM6 `E:\Xbox One Games\Monument_1.0.0.44_x64__8wekyb3d8bbwe`.
 - `tools\` — Python RE scripts (capstone) and `dec.ps1` (Ghidra headless). `ghidra\` — already analyzed Ghidra projects.
 - `docs\contexto\` — accumulated knowledge (see below). `docs\decomp\` — saved decompilations.
-- `.github\workflows\ci.yml` — tests on pull requests; on a `v*` tag push, tests + build + release (zip with `winmm.dll`, `azimuth_fm5.ini`, `README.txt`).
+- `.github\workflows\ci.yml` — tests on pull requests; on a `v*` tag push, tests + build + release (zip with `winmm.dll`, `azimuth_fm5.ini`, `azimuth_fm6.ini`, `README.txt`).
 
 ## Build, install and test
 - Build: `sh winmm_proxy/build.sh` (mingw gcc in `C:\mingw64\bin`; it already runs the generators) -> `winmm_proxy\build\winmm.dll`;
