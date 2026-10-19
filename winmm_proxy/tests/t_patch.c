@@ -441,6 +441,42 @@ TEST(fm6_debug6_leak_gfx_objects)
     dump_log_on_fail();
 }
 
+/* PASSO 47: protecao Xbox 0x40404 de memoria grafica traduzida p/ PAGE_READWRITE no VirtualAlloc do Azimuth */
+static uint32_t seen_valloc_protect;
+static void *fake_az_valloc(void *addr, size_t size, uint32_t type, uint32_t protect)
+{
+    (void)size; (void)type;
+    seen_valloc_protect = protect;
+    return addr ? addr : (void *)0x1230000;
+}
+
+TEST(fm6_graphics_protect_translated)
+{
+    uint8_t *az = pe_map(AZIMUTH_EXE, NULL);
+    if (!az) { test_skip("azimuth.exe ausente"); return; }
+    g_base = az;
+    log_capture();
+    CHECK_EQ(fm6_graphics_protect(0x30003000, 0x40404), 4);
+    CHECK_EQ(fm6_graphics_protect(0x30001000, 0x40404), 4);
+    CHECK_EQ(fm6_graphics_protect(0x30002000, 0x40404), 4);
+    CHECK_EQ(fm6_graphics_protect(0x20003000, 0x40404), 0x40404);   /* sem MEM_GRAPHICS: intocada */
+    CHECK_EQ(fm6_graphics_protect(0x30003000, 0x10004), 0x10004);   /* as que o Azimuth ja traduz */
+    CHECK_EQ(fm6_graphics_protect(0x30003000, 0x404), 0x404);
+    CHECK(fm6_graphics_protect_install());
+    CHECK_HEX(az + 0xaad30, "ff2500000000");
+    orig_az_valloc = fake_az_valloc;               /* nao roda o VirtualAlloc real do Azimuth */
+    CHECK(fm6_az_valloc(NULL, 0x52000, 0x30003000, 0x40404) == (void *)0x1230000);
+    CHECK_EQ(seen_valloc_protect, 4);
+    CHECK(log_has("FM6: VirtualAlloc grafico #1"));
+    CHECK(log_has("protecao 0x40404 -> 0x4"));
+    fm6_az_valloc(NULL, 0x1000, 0x3000, 0x40404);
+    CHECK_EQ(seen_valloc_protect, 0x40404);
+    CHECK(!fm6_graphics_protect_install());       /* bytes ja trocados -> nada muda */
+    CHECK(log_has("VirtualAlloc do Azimuth (0xaad30) nao confere"));
+    pe_unmap(az);
+    dump_log_on_fail();
+}
+
 /* ------------------------------------------------------------------------ */
 /* Registro do FM5 (PASSO 4)                                                  */
 /* ------------------------------------------------------------------------ */

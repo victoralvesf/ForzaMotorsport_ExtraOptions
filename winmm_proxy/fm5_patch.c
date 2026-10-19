@@ -898,6 +898,46 @@ static void fm6_leak_gfx_objects(void)
     wlog("FM6: D3D12Debug=6: recursos/views nunca destruidos (vazam)");
 }
 
+/* 17_fm6.txt PASSO 47: o VirtualAlloc do Azimuth (0x1400aad30) so traduz as protecoes Xbox 0x10004/0x30004/0x20204
+   de memoria grafica (MEM_GRAPHICS 0x10000000) para PAGE_READWRITE; o FM6 pede 0x40404 (game+0x5f0306 pool das
+   texturas do mundo, game+0xe66322/0xe66492 heap grafico), que vai cru ao Windows, falha com 0x57 e volta NULL sem
+   STOP -> o jogo cria as placement textures na base 0 (offsets puros, fora do rastreador = texturas zeradas).
+   Traduzida para PAGE_READWRITE como as outras (write-combine descartado, igual ao 0x20204). */
+#define RVA_AZ_VIRTUAL_ALLOC 0xaad30
+#define XBOX_MEM_GRAPHICS 0x10000000u
+#define XBOX_PROTECT_GPU_WC 0x40404u
+typedef void *(*az_valloc_fn)(void *addr, size_t size, uint32_t type, uint32_t protect);
+static az_valloc_fn orig_az_valloc;
+
+static uint32_t fm6_graphics_protect(uint32_t type, uint32_t protect)
+{
+    return (type & XBOX_MEM_GRAPHICS) && protect == XBOX_PROTECT_GPU_WC ? PAGE_READWRITE : protect;
+}
+
+static void *fm6_az_valloc(void *addr, size_t size, uint32_t type, uint32_t protect)
+{
+    uint32_t p = fm6_graphics_protect(type, protect);
+    void *r = orig_az_valloc(addr, size, type, p);
+    if (p != protect) {
+        static volatile LONG n;
+        LONG k = InterlockedIncrement(&n);
+        if (k <= 8 || !(k & (k - 1)))
+            wlog("FM6: VirtualAlloc grafico #%ld %p tam=%#zx tipo=%#x protecao %#x -> %#x: %p", k, addr, size, type,
+                 protect, p, r);
+    }
+    return r;
+}
+
+static int fm6_graphics_protect_install(void)
+{
+    if (!hook_function(RVA_AZ_VIRTUAL_ALLOC, "40555356574154415541564157488d6c24e1", 18, (void *)fm6_az_valloc,
+                       (void **)&orig_az_valloc)) {
+        wlog("FM6: VirtualAlloc do Azimuth (%#x) nao confere; protecao 0x40404 sem traducao", RVA_AZ_VIRTUAL_ALLOC);
+        return 0;
+    }
+    return 1;
+}
+
 /* opcoes do azimuth_fm6.ini */
 static void fm6_patches(uint8_t *game)
 {
@@ -947,6 +987,7 @@ static void hook_apply_patches(void *image, const void *options)
         fm6_batch_install(game);
         fm6_reexec_install();
         fm6_title_diag_install();
+        fm6_graphics_protect_install();
         fm6_patches(game);
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;
