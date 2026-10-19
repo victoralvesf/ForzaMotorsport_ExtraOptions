@@ -1,4 +1,4 @@
-# Azimuth Motorsport - Extra Options mod
+# Azimuth Motorsport + Extra Options mod
 
 **Author:** Victor Alves (L0rdDarkside)
 
