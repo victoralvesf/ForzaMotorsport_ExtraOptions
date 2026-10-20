@@ -773,3 +773,19 @@ TEST(gpuguard_gfx_state)
     CHECK_EQ(g.tab[3], 0);
     CHECK_EQ(g.ib.BufferLocation, 0);
 }
+
+TEST(gpuguard_odd_args)
+{
+    const uint32_t ok_disp[3] = { 65535, 1, 1 }, bad_disp[3] = { 1, 65536, 1 };
+    const uint32_t ok_draw[3] = { 3000000, 1, 0 }, big_count[3] = { 16777217, 1, 0 }, big_inst[3] = { 36, 1048577, 0 };
+    const uint32_t ok_ei[3] = { 4096, 0, 1 }, bad_ei[3] = { 0xffffffffu, 0, 0 };
+    CHECK(!gg_odd_args(GG_OP_DISPATCH, ok_disp));
+    CHECK(gg_odd_args(GG_OP_DISPATCH, bad_disp));
+    CHECK(!gg_odd_args(GG_OP_DRAW_INDEXED, ok_draw));
+    CHECK(gg_odd_args(GG_OP_DRAW_INDEXED, big_count));
+    CHECK(gg_odd_args(GG_OP_DRAW, big_inst));
+    CHECK(!gg_odd_args(GG_OP_EXECUTE_INDIRECT, ok_ei));
+    CHECK(gg_odd_args(GG_OP_EXECUTE_INDIRECT, bad_ei));
+    CHECK(!gg_odd_args(GG_OP_COPY_TEXTURE, bad_ei));   /* copia: arg = destino, nunca absurdo aqui */
+    CHECK(!gg_odd_args(GG_OP_CLEAR_RTV, bad_ei));
+}

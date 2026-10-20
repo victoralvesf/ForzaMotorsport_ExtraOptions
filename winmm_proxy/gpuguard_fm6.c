@@ -1557,6 +1557,35 @@ static void *trace_op(ID3D12GraphicsCommandList *l, uint32_t op, int compute, co
     return rs;
 }
 
+/* argumentos absurdos de draw/dispatch (17_fm6.txt, queda no fim da corrida: GPU 47-137 ms num fence e device reset
+   sem TDR = comando mal formado?): Dispatch acima de 65535 grupos num eixo e comando invalido; contagens de lixo
+   prendem a GPU. Sempre ligado; as 1as GG_ODD_REPORTS com a pilha. arg = como no rastreio (draw: contagem,
+   instancias, inicio; ExecuteIndirect: max, offset, com contador) */
+#define GG_ODD_COUNT     (1u << 24)
+#define GG_ODD_INSTANCES (1u << 20)
+#define GG_ODD_REPORTS   32
+int gg_odd_args(uint32_t op, const uint32_t *arg)
+{
+    switch (op) {
+    case GG_OP_DISPATCH: return arg[0] > 65535 || arg[1] > 65535 || arg[2] > 65535;
+    case GG_OP_DRAW: case GG_OP_DRAW_INDEXED: return arg[0] > GG_ODD_COUNT || arg[1] > GG_ODD_INSTANCES;
+    case GG_OP_EXECUTE_INDIRECT: return arg[0] > GG_ODD_INSTANCES;
+    }
+    return 0;
+}
+
+static volatile LONG odd_reports;
+static void check_odd(ID3D12GraphicsCommandList *l, uint32_t op, const uint32_t *arg)
+{
+    char what[160];
+    void *pso;
+    if (!gg_odd_args(op, arg)) return;
+    pso = gg_cl_rs(l, GG_CL_PSO, NULL, 0);
+    wsprintfA(what, "%s com argumentos absurdos (%u,%u,%u) pso %p hash %08lx, lista", gg_op_name[op], arg[0], arg[1],
+              arg[2], pso, (unsigned long)gg_pso_hash(pso));
+    report_to(&odd_reports, GG_ODD_REPORTS, what, (uint64_t)(uintptr_t)l);
+}
+
 /* experimento: a operacao nao chega ao D3D12 (log nas potencias de 2) */
 static void skip_note(volatile LONG *ctr, const char *what)
 {
@@ -1568,6 +1597,7 @@ static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x
 {
     uint32_t arg[3] = { x, y, z };
     void *rs = trace_op(l, GG_OP_DISPATCH, 1, arg, NULL);
+    check_odd(l, GG_OP_DISPATCH, arg);
     if (gg_trace_on == 2 && rs && rs == internal_rs) {
         static volatile LONG skipped;
         LONG k = InterlockedIncrement(&skipped);
@@ -1669,6 +1699,7 @@ static void STDMETHODCALLTYPE hook_draw(ID3D12GraphicsCommandList *l, UINT vc, U
     uint32_t arg[3] = { vc, ic, sv };
     int direct;
     trace_op(l, GG_OP_DRAW, 0, arg, &direct);
+    check_odd(l, GG_OP_DRAW, arg);
     if (gg_skip_draw(direct, GG_OP_DRAW, check_ia(l, GG_OP_DRAW, arg), 0)) return;
     if (gg_skip_stages(gg_pso_info(gg_cl_rs(l, GG_CL_PSO, NULL, 0)))) return;
     st_draw();
@@ -1681,6 +1712,7 @@ static void STDMETHODCALLTYPE hook_draw_indexed(ID3D12GraphicsCommandList *l, UI
     uint32_t arg[3] = { idx, ic, si };
     int direct;
     trace_op(l, GG_OP_DRAW_INDEXED, 0, arg, &direct);
+    check_odd(l, GG_OP_DRAW_INDEXED, arg);
     void *pso = gg_cl_rs(l, GG_CL_PSO, NULL, 0);
     uint32_t h = gg_pso_hash(pso), info = gg_pso_info(pso);
     if (!direct) log_pso_hash(h, arg, bv, info);
@@ -1702,6 +1734,7 @@ static void STDMETHODCALLTYPE hook_exec_indirect(ID3D12GraphicsCommandList *l, I
     uint32_t arg[3] = { max, (uint32_t)off, cnt != NULL };
     int direct;
     trace_op(l, GG_OP_EXECUTE_INDIRECT, 0, arg, &direct);
+    check_odd(l, GG_OP_EXECUTE_INDIRECT, arg);
     if (gg_skip_draw(direct, GG_OP_EXECUTE_INDIRECT, 0, 0)) return;
     if (gg_skip_stages(gg_pso_info(gg_cl_rs(l, GG_CL_PSO, NULL, 0)))) return;
     st_draw();
@@ -1804,12 +1837,16 @@ static HRESULT STDMETHODCALLTYPE hook_reset_uav(ID3D12GraphicsCommandList *l, ID
 }
 static void STDMETHODCALLTYPE hook_draw_uav(ID3D12GraphicsCommandList *l, UINT vc, UINT ic, UINT sv, UINT si)
 {
+    uint32_t arg[3] = { vc, ic, sv };
+    check_odd(l, GG_OP_DRAW, arg);
     st_draw();
     bind_null_uavs(l);
     real_draw(l, vc, ic, sv, si);
 }
 static void STDMETHODCALLTYPE hook_draw_indexed_uav(ID3D12GraphicsCommandList *l, UINT idx, UINT ic, UINT si, INT bv, UINT sinst)
 {
+    uint32_t arg[3] = { idx, ic, si };
+    check_odd(l, GG_OP_DRAW_INDEXED, arg);
     st_draw();
     bind_null_uavs(l);
     real_draw_indexed(l, idx, ic, si, bv, sinst);
@@ -1817,6 +1854,8 @@ static void STDMETHODCALLTYPE hook_draw_indexed_uav(ID3D12GraphicsCommandList *l
 static void STDMETHODCALLTYPE hook_exec_indirect_uav(ID3D12GraphicsCommandList *l, ID3D12CommandSignature *sig, UINT max,
                                                      ID3D12Resource *args, UINT64 off, ID3D12Resource *cnt, UINT64 cnt_off)
 {
+    uint32_t arg[3] = { max, (uint32_t)off, cnt != NULL };
+    check_odd(l, GG_OP_EXECUTE_INDIRECT, arg);
     st_draw();
     bind_null_uavs(l);
     real_exec_indirect(l, sig, max, args, off, cnt, cnt_off);
