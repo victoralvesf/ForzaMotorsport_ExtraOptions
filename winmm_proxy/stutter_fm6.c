@@ -1044,6 +1044,53 @@ static void gt_poll(void)
     }
 }
 
+static int gt_group_str(char *buf, int cap, const gt_group *g)
+{
+    int len = snprintf(buf, cap, "%u listas a partir de %p, %u operacoes:", g->nl, g->cl0, g->nops);
+    uint32_t k;
+    for (k = 0; k < g->ntop && len < cap - 90; k++)
+        len += snprintf(buf + len, cap - len, " [pso %08x x%u %s (%u,%u)]", g->top[k][0], g->top[k][1],
+                        gg_op_str(g->top[k][2]), g->top[k][3], g->top[k][4]);
+    return len;
+}
+
+/* na queda (dred_watch, depois do DRED): os ECLs medidos ainda em voo - ate onde a GPU chegou em cada um. O grupo
+   com o timestamp de inicio e sem o de fim e o que travou; sem nenhum timestamp do 1o ECL pendente, a GPU parou
+   antes dele (espera de fila/fence) */
+void gt_dump(void)
+{
+    uint32_t e0, shown = 0;
+    int locked = TryAcquireSRWLockExclusive(&gt_lock);
+    if (gt_state <= 0) { if (locked) ReleaseSRWLockExclusive(&gt_lock); return; }
+    wlog("stutter: tempo de GPU: %u ECLs medidos em voo na queda (fim do ultimo concluido: tick %llu)", gt_head - gt_tail,
+         (unsigned long long)gt_prev_end);
+    for (e0 = gt_tail; e0 != gt_head && shown < 8; e0++, shown++) {
+        const gt_ent *e = &gt_ring[e0 % GT_ENT];
+        char buf[1024];
+        uint32_t i;
+        UINT64 t0 = gt_rb[e->ts0 % GT_TS];
+        if (!t0) {
+            wlog("stutter:  ECL #%u (%u listas em %u grupos, enviado ha %.0f ms): a GPU NAO COMECOU%s", e->seq, e->n, e->ng,
+                 ms_of(qpc() - e->qpc), e0 == gt_tail ? " -> parou ANTES dele (espera de fila/fence ou o anterior)" : "");
+            if (e0 == gt_tail) {
+                gt_group_str(buf, sizeof buf, &e->g[0]);
+                wlog("stutter:   1o grupo: %s", buf);
+            }
+            continue;
+        }
+        for (i = 0; i < e->ng; i++) {
+            UINT64 a = gt_rb[(e->ts0 + i) % GT_TS], b = gt_rb[(e->ts0 + i + 1) % GT_TS];
+            if (a && b) continue;
+            gt_group_str(buf, sizeof buf, &e->g[i]);
+            wlog("stutter:  ECL #%u (%u listas, enviado ha %.0f ms): grupo %u de %u COMECOU (%.1f ms depois do fim do anterior) "
+                 "E NAO TERMINOU: %s", e->seq, e->n, ms_of(qpc() - e->qpc), i + 1, e->ng, gt_prev_end ? gt_ms(gt_prev_end, a) : 0.0,
+                 buf);
+            break;
+        }
+    }
+    if (locked) ReleaseSRWLockExclusive(&gt_lock);
+}
+
 /* resume as listas [a, b) no grupo: soma das operacoes e os GT_TOP pontos com mais ocorrencias entre elas */
 static void gt_group_fill(gt_group *g, ID3D12CommandList *const *l, UINT a, UINT b)
 {

@@ -364,6 +364,31 @@ TEST(stutter_gpu_time_per_group)
     gt_poll();
     CHECK(log_has("GPU parada 200.0 ms ANTES do ECL #8"));
     CHECK(!log_has("GPU lenta"));
+    /* queda: ECL #9 com o grupo 2 comecado e nao terminado; ECL #10 nao comecou */
+    gt_state = 1;
+    e = &gt_ring[2];
+    e->ts0 = 4; e->ng = 3; e->n = 3; e->seq = 9; e->qpc = qpc();
+    gt_group_fill(&e->g[0], l, 0, 1); gt_group_fill(&e->g[1], l, 1, 2); gt_group_fill(&e->g[2], l, 2, 3);
+    e = &gt_ring[3];
+    e->ts0 = 8; e->ng = 1; e->n = 1; e->seq = 10; e->qpc = qpc();
+    gt_group_fill(&e->g[0], l, 0, 1);
+    gt_head = 4;
+    rb[4] = 1400; rb[5] = 1402;                               /* grupo 1 pronto, grupo 2 comecou em 1402 */
+    log_capture();
+    gt_poll();
+    CHECK_EQ(gt_tail, 2);                                     /* em voo: nada consumido */
+    gt_dump();
+    CHECK(log_has("2 ECLs medidos em voo"));
+    CHECK(log_has("ECL #9 (3 listas, enviado ha"));
+    CHECK(log_has("grupo 2 de 3 COMECOU"));
+    CHECK(log_has("ECL #10 (1 listas em 1 grupos"));
+    CHECK(!log_has("parou ANTES"));                           /* o #10 nao e o 1o pendente */
+    gt_tail = 3;
+    log_capture();
+    gt_dump();
+    CHECK(log_has("parou ANTES dele"));
+    gt_state = 0;
+    gt_head = gt_tail = 0;
 }
 
 /* perfil das UpdateTileMappings (PASSO 68): contagens, recursos distintos, chamadores */

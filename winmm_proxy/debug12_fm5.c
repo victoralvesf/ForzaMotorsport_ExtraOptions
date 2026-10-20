@@ -32,6 +32,7 @@ extern void stutter_device(IUnknown *dev);
 extern void gg_trace_dump(void *cl);
 extern void gg_ring_dump(void);
 extern void cx_dump(void);
+extern void gt_dump(void);
 extern int st_on;
 extern int gg_trace_on, gg_draw_skip;
 extern void gg_parse_hashes(const char *str);
@@ -115,6 +116,7 @@ static DWORD WINAPI dred_watch(void *param)
     }
     wlog("debug12: DRED: %d listas mostradas", shown);
     if (gg_trace_on) gg_ring_dump();
+    if (st_on) gt_dump();
     if (st_on) cx_dump();
     return 0;
 }
