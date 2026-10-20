@@ -1282,10 +1282,36 @@ static DWORD WINAPI st_sampler(void *arg)
     return 0;
 }
 
+/* experimento (debug.ini AllocatorMaxAgeMs, PASSO 66; vale sem StutterLog): o pool de command allocators do Azimuth
+ * (0x1400dea50, em toda abertura de command list) destroi o allocator mais antigo do pool se ele esta ocioso ha mais
+ * de 4000 ms - um por abertura, nas threads do jogo e da fila (DestroyAllocation2 nos picos do PASSO 65). Troca o
+ * imediato de "cmp rax, 0xfa0" (azimuth+0xdeadd) pelo valor do ini (0 = nao mexe; < 0 ou acima de 0x7fffffff =
+ * nunca destroi). Confere os 6 bytes originais antes. */
+#define CA_AGE_RVA 0xdeadd
+int cmdalloc_age_patch(int ms)
+{
+    static const uint8_t orig[6] = { 0x48, 0x3d, 0xa0, 0x0f, 0x00, 0x00 };
+    uint8_t *at = g_base + CA_AGE_RVA;
+    uint32_t v = ms < 0 ? 0x7fffffff : (uint32_t)ms;
+    DWORD old;
+    if (!ms) return 0;
+    if (memcmp(at, orig, sizeof orig)) {
+        wlog("stutter: idade dos command allocators (azimuth+%#x) nao confere -> sem patch", CA_AGE_RVA);
+        return 0;
+    }
+    VirtualProtect(at, sizeof orig, PAGE_EXECUTE_READWRITE, &old);
+    memcpy(at + 2, &v, 4);
+    VirtualProtect(at, sizeof orig, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), at, sizeof orig);
+    wlog("stutter: command allocators ociosos destruidos so depois de %u ms (era 4000)", v);
+    return 1;
+}
+
 /* DllMain (fm5_patch.c install): fabrica DXGI e esperas pela IAT do azimuth.exe */
 void stutter_install(void)
 {
     int i, n = 0;
+    cmdalloc_age_patch(dbg_int(L"AllocatorMaxAgeMs", 0));
     st_on = dbg_int(L"StutterLog", 0) > 0;
     if (!st_on) return;
     dr_on = dbg_int(L"DeferRelease", 0) > 0;

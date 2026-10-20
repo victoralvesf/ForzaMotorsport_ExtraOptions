@@ -277,3 +277,21 @@ TEST(stutter_defer_release)
     dr_on = 0;
     dr_is_reaper = -1;
 }
+
+/* AllocatorMaxAgeMs: troca o imediato de 4000 ms so com os bytes originais; 0 nao mexe; -1 = 0x7fffffff */
+TEST(stutter_cmdalloc_age_patch)
+{
+    static const uint8_t orig[6] = { 0x48, 0x3d, 0xa0, 0x0f, 0x00, 0x00 };
+    uint8_t *az = fake_azimuth(0);
+    log_capture();
+    CHECK(!cmdalloc_age_patch(60000));                         /* bytes zerados: nao confere */
+    CHECK(log_has("idade dos command allocators (azimuth+0xdeadd) nao confere"));
+    memcpy(az + 0xdeadd, orig, sizeof orig);
+    CHECK(!cmdalloc_age_patch(0));
+    CHECK(!memcmp(az + 0xdeadd, orig, sizeof orig));
+    CHECK(cmdalloc_age_patch(60000));
+    CHECK(!memcmp(az + 0xdeadd, "\x48\x3d\x60\xea\x00\x00", 6));
+    memcpy(az + 0xdeadd, orig, sizeof orig);
+    CHECK(cmdalloc_age_patch(-1));
+    CHECK(!memcmp(az + 0xdeadd, "\x48\x3d\xff\xff\xff\x7f", 6));
+}
