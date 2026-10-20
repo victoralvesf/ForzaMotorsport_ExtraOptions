@@ -8,7 +8,8 @@
  *  - ExecuteCommandLists (chamadas, listas, tempo);
  *  - esperas longas (>= 4 ms) do azimuth.exe (WaitFor*, SleepConditionVariableSRW, WaitOnAddress, Sleep*) que
  *    terminaram no intervalo, as maiores com thread e pilha (game+/azimuth+); "P" = thread do Present.
- * A cada 10 s um resumo (media, p99, maximo, picos). Amostrador de CPU/RIP nos quadros parados: ver st_sampler.
+ * A cada 10 s um resumo (media, p99, maximo, picos) e a vazao (vz_poll: GPU ocupada, listas, draws, CPU por thread).
+ * Amostrador de CPU/RIP nos quadros parados: ver st_sampler.
  */
 #include <windows.h>
 #include <stdint.h>
@@ -117,6 +118,20 @@ static volatile LONG64 st_ticks[ST_NCOUNT], st_bytes;
 static void st_count(int which, LONG64 ticks) { InterlockedIncrement(&st_n[which]); InterlockedAdd64(&st_ticks[which], ticks); }
 static LONG64 qpc(void) { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t.QuadPart; }
 static double ms_of(LONG64 ticks) { return ticks * 1000.0 / st_freq.QuadPart; }
+
+/* ---- vazao (PASSO 71): janela de 10 s do amostrador (linha "stutter: vazao 10 s") - quadros, tempo no Present e no
+ * limitador da fila, GPU ocupada por tipo de fila, ECL/listas, listas abertas (Reset/criacao, origem amostrada 1 em
+ * VZ_EVERY), draws e CPU por thread. Contadores zerados pelo amostrador (InterlockedExchange). ---- */
+#define VZ_EVERY 8
+#define VZ_ORIGINS 16
+#define VZ_KEY 3
+#define VZ_TOP_THREADS 8
+static volatile LONG vz_frames, vz_ecl, vz_lists, vz_lists_max, vz_opens, vz_draws;
+static volatile LONG64 vz_frame_ticks, vz_present_ticks, vz_ecl_ticks, vz_lim_ticks;
+static LONG64 vz_gpu[4];                         /* so o amostrador (sg_poll) */
+static struct { uintptr_t k[VZ_KEY]; LONG n; } vz_orig[VZ_ORIGINS];
+static LONG vz_orig_other;
+static SRWLOCK vz_lock = SRWLOCK_INIT;
 
 static void st_label(char *out, void *p)
 {
@@ -448,6 +463,10 @@ static void frame_tick(LONG64 before, LONG64 after)
         ms = ms_of(after - frame_start);
         mean = st_avg_get(&avg);
         if (st_is_spike(ms, mean)) { log_spike(n, ms, mean, in_p, frame_start, after); sum_spikes++; }
+        InterlockedIncrement(&vz_frames);
+        InterlockedAdd64(&vz_frame_ticks, after - frame_start);
+        InterlockedAdd64(&vz_present_ticks, after - before);
+        if (st_lists > vz_lists_max) vz_lists_max = st_lists;
         st_avg_add(&avg, ms);
         if (sum_n < ST_SUM_FRAMES) sum_frames[sum_n++] = (float)ms;
         if (ms > sum_max) sum_max = (float)ms;
@@ -670,10 +689,60 @@ static HRESULT STDMETHODCALLTYPE st_heap(ID3D12Device *d, const D3D12_HEAP_DESC 
 
 static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
 {
-    LONG64 t = qpc();
+    LONG64 t = qpc(), dt;
     real_ecl(q, n, l);
-    st_count(ST_ECL, qpc() - t);
+    dt = qpc() - t;
+    st_count(ST_ECL, dt);
     InterlockedAdd(&st_lists, (LONG)n);
+    InterlockedIncrement(&vz_ecl);
+    InterlockedAdd(&vz_lists, (LONG)n);
+    InterlockedAdd64(&vz_ecl_ticks, dt);
+}
+
+/* frames de codigo (intervalos [lo, hi)) fora de [skip_lo, skip_hi), ate max: a chave da origem de uma lista aberta */
+uint32_t vz_key(void *const *f, uint32_t n, const uintptr_t (*ranges)[2], uint32_t nranges, uintptr_t skip_lo,
+                uintptr_t skip_hi, uintptr_t *out, uint32_t max)
+{
+    uint32_t i, j, k = 0;
+    for (i = 0; i < n && k < max; i++) {
+        uintptr_t a = (uintptr_t)f[i];
+        if (a >= skip_lo && a < skip_hi) continue;
+        for (j = 0; j < nranges; j++)
+            if (a >= ranges[j][0] && a < ranges[j][1]) { out[k++] = a; break; }
+    }
+    for (i = k; i < max; i++) out[i] = 0;
+    return k;
+}
+
+/* gpuguard (Reset e criacao de command list): conta; 1 em VZ_EVERY com a origem (pilha sem o 0x1400dee90 do Azimuth,
+ * que e quem abre todas) */
+#define VZ_OPEN_LO 0xdee90
+#define VZ_OPEN_HI 0xdf220
+void st_list_open(void)
+{
+    void *f[10];
+    uintptr_t key[VZ_KEY], ranges[2][2];
+    uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+    uint32_t n, i, nr = 0;
+    if (!st_on || InterlockedIncrement(&vz_opens) % VZ_EVERY) return;
+    n = RtlCaptureStackBackTrace(2, 10, f, NULL);
+    if (game) { ranges[nr][0] = (uintptr_t)game; ranges[nr++][1] = (uintptr_t)game + 0x8000000; }
+    ranges[nr][0] = (uintptr_t)g_base; ranges[nr++][1] = (uintptr_t)g_base + 0x1000000;
+    vz_key(f, n, (const uintptr_t (*)[2])ranges, nr, (uintptr_t)g_base + VZ_OPEN_LO, (uintptr_t)g_base + VZ_OPEN_HI, key, VZ_KEY);
+    AcquireSRWLockExclusive(&vz_lock);
+    for (i = 0; i < VZ_ORIGINS && vz_orig[i].n && memcmp(vz_orig[i].k, key, sizeof key); i++) {}
+    if (i == VZ_ORIGINS) vz_orig_other++;
+    else { if (!vz_orig[i].n) memcpy(vz_orig[i].k, key, sizeof key); vz_orig[i].n++; }
+    ReleaseSRWLockExclusive(&vz_lock);
+}
+
+/* gpuguard (draws e ExecuteIndirect): contador local da thread, somado de 64 em 64 (sem disputa por draw) */
+void st_draw(void)
+{
+    static __thread LONG local;
+    if (!st_on || ++local < 64) return;
+    InterlockedAdd(&vz_draws, local);
+    local = 0;
 }
 
 static void (STDMETHODCALLTYPE *real_tiles)(ID3D12CommandQueue *, ID3D12Resource *, UINT, const D3D12_TILED_RESOURCE_COORDINATE *,
@@ -808,6 +877,7 @@ static void sg_poll(LONG64 now)
             LONG64 seg = st_gpu_segment(e->t_sig, sig_last_done[e->qt & 3], now);
             sig_last_done[e->qt & 3] = now;
             gpu_sum_ticks += seg;
+            vz_gpu[e->qt & 3] += seg;
             gpu_done++;
             if (seg > gpu_max_ticks) { gpu_max_ticks = seg; gpu_max_val = (LONG64)e->v; gpu_max_qt = e->qt; }
         }
@@ -1257,6 +1327,7 @@ BOOL WINAPI st_switch_c(uintptr_t q, uintptr_t ret)
         fq.spins++;
         r = fq_real();
         fq.last = qpc();
+        InterlockedAdd64(&vz_lim_ticks, fq.last - now);
         return r;
     }
     return fq_real();
@@ -1316,6 +1387,94 @@ static void fq_install(void)
     wlog("stutter: limitador da fila do FM6 medido (SwitchToThread game+%#x)", FQ_IAT);
 }
 
+/* indices dos ate max maiores valores, do maior para o menor (zeros fora); devolve quantos */
+uint32_t vz_top(const uint64_t *v, uint32_t n, uint32_t *idx, uint32_t max)
+{
+    uint32_t k = 0, i, j;
+    for (i = 0; i < n; i++) {
+        if (!v[i]) continue;
+        if (k < max) k++;
+        else if (v[idx[max - 1]] >= v[i]) continue;
+        for (j = k - 1; j > 0 && v[idx[j - 1]] < v[i]; j--) idx[j] = idx[j - 1];
+        idx[j] = i;
+    }
+    return k;
+}
+
+/* thread do amostrador: a cada 10 s as linhas "stutter: vazao" (ciclos por thread desde a janela anterior) */
+static void vz_poll(LONG64 now)
+{
+    static LONG64 t0;
+    static struct { DWORD tid; ULONG64 c; } prev[ST_THREADS];
+    static uint32_t nprev;
+    static const char *const qn[] = { "direct", "bundle", "compute", "copy" };
+    uint64_t cpu[ST_THREADS];
+    ULONG64 cur[ST_THREADS];
+    uint32_t top[VZ_ORIGINS], i, j, k, n = nthr;
+    LONG frames, opens, other;
+    double win, f;
+    char buf[2000], one[96];
+    int len;
+    if (t0 && ms_of(now - t0) < 10000) return;
+    for (i = 0; i < n; i++) {
+        cur[i] = 0;
+        QueryThreadCycleTime(thr[i].h, &cur[i]);
+        for (j = 0; j < nprev && prev[j].tid != thr[i].tid; j++) {}
+        cpu[i] = j < nprev && cur[i] > prev[j].c ? cur[i] - prev[j].c : 0;
+    }
+    for (i = 0; i < n; i++) { prev[i].tid = thr[i].tid; prev[i].c = cur[i]; }
+    nprev = n;
+    if (!t0) { t0 = now; return; }
+    win = ms_of(now - t0);
+    t0 = now;
+    frames = InterlockedExchange(&vz_frames, 0);
+    f = frames ? frames : 1;
+    len = sprintf(buf, "stutter: vazao 10 s: %ld quadros, %.1f ms/quadro (Present %.1f, limitador da fila %.1f) | GPU ms/quadro:",
+                  frames, ms_of(InterlockedExchange64(&vz_frame_ticks, 0)) / f, ms_of(InterlockedExchange64(&vz_present_ticks, 0)) / f,
+                  ms_of(InterlockedExchange64(&vz_lim_ticks, 0)) / f);
+    for (k = 0; k < 4; k++) {
+        if (k == 1) continue;
+        len += sprintf(buf + len, " %s %.1f (%.0f%%)", qn[k], ms_of(vz_gpu[k]) / f, ms_of(vz_gpu[k]) * 100 / win);
+        vz_gpu[k] = 0;
+    }
+    opens = InterlockedExchange(&vz_opens, 0);
+    len += sprintf(buf + len, " | ECL %.1f/quadro, listas %.0f/quadro (max %ld), %.2f ms/quadro | abertas %.0f/quadro, draws %.0f/quadro"
+                   " | CPU ms/quadro:", InterlockedExchange(&vz_ecl, 0) / f, InterlockedExchange(&vz_lists, 0) / f,
+                   InterlockedExchange(&vz_lists_max, 0), ms_of(InterlockedExchange64(&vz_ecl_ticks, 0)) / f, opens / f,
+                   InterlockedExchange(&vz_draws, 0) / f);
+    if (tsc_per_ms > 0) {
+        uint32_t idx[VZ_TOP_THREADS], nt = vz_top(cpu, n, idx, VZ_TOP_THREADS);
+        for (i = 0; i < nt && len < 1800; i++) {
+            st_thread *t = &thr[idx[i]];
+            double ms = cpu[idx[i]] / tsc_per_ms;
+            if (t->name[0]) wsprintfA(one, " %s", t->name);
+            else st_label_any(one, t->start);
+            len += sprintf(buf + len, " [%s tid %lu %.1f (%.0f%%)]", one[0] ? one + 1 : "?", t->tid, ms / f, ms * 100 / win);
+        }
+    }
+    wlog("%s", buf);
+    if (!opens) return;
+    {
+        uint64_t cnt[VZ_ORIGINS];
+        uint32_t nt;
+        AcquireSRWLockExclusive(&vz_lock);
+        for (i = 0; i < VZ_ORIGINS; i++) cnt[i] = (uint64_t)vz_orig[i].n;
+        nt = vz_top(cnt, VZ_ORIGINS, top, 6);
+        len = sprintf(buf, "stutter: vazao: origem das listas abertas (1 em %d):", VZ_EVERY);
+        for (i = 0; i < nt; i++) {
+            len += sprintf(buf + len, " [%.0f%%", cnt[top[i]] * 100.0 * VZ_EVERY / opens);
+            for (k = 0; k < VZ_KEY && vz_orig[top[i]].k[k]; k++) { st_label(one, (void *)vz_orig[top[i]].k[k]); len += sprintf(buf + len, "%s", one); }
+            len += sprintf(buf + len, "]");
+        }
+        other = vz_orig_other;
+        memset(vz_orig, 0, sizeof vz_orig);
+        vz_orig_other = 0;
+        ReleaseSRWLockExclusive(&vz_lock);
+        if (other) sprintf(buf + len, " outras %ld", other);
+    }
+    wlog("%s", buf);
+}
+
 static DWORD WINAPI st_sampler(void *arg)
 {
     HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 2 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
@@ -1346,6 +1505,7 @@ static DWORD WINAPI st_sampler(void *arg)
         if (!fs) continue;
         fq_poll(now);
         sg_poll(now);
+        vz_poll(now);
         if (!ncode_ranges) {   /* depois do 1o Present o jogo ja esta carregado */
             uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
             if (game) { code_ranges[ncode_ranges][0] = (uintptr_t)game; code_ranges[ncode_ranges++][1] = (uintptr_t)game + 0x8000000; }

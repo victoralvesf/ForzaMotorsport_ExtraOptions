@@ -27,6 +27,8 @@
 extern uint8_t *g_base;
 extern uint8_t *g_fm6_game;
 extern void wlog(const char *fmt, ...);
+extern void st_list_open(void);     /* stutter_fm6.c (vazao, so com StutterLog) */
+extern void st_draw(void);
 
 #define GG_MAX_HEAPS 512
 #define GG_MAX_REPORTS 40
@@ -1669,6 +1671,7 @@ static void STDMETHODCALLTYPE hook_draw(ID3D12GraphicsCommandList *l, UINT vc, U
     trace_op(l, GG_OP_DRAW, 0, arg, &direct);
     if (gg_skip_draw(direct, GG_OP_DRAW, check_ia(l, GG_OP_DRAW, arg), 0)) return;
     if (gg_skip_stages(gg_pso_info(gg_cl_rs(l, GG_CL_PSO, NULL, 0)))) return;
+    st_draw();
     bind_null_uavs(l);
     real_draw(l, vc, ic, sv, si);
 }
@@ -1688,6 +1691,7 @@ static void STDMETHODCALLTYPE hook_draw_indexed(ID3D12GraphicsCommandList *l, UI
     }
     if (gg_skip_draw(direct, GG_OP_DRAW_INDEXED, check_ia(l, GG_OP_DRAW_INDEXED, arg), h)) return;
     if (gg_skip_stages(info)) return;
+    st_draw();
     bind_null_uavs(l);
     real_draw_indexed(l, idx, ic, si, bv, sinst);
 }
@@ -1700,6 +1704,7 @@ static void STDMETHODCALLTYPE hook_exec_indirect(ID3D12GraphicsCommandList *l, I
     trace_op(l, GG_OP_EXECUTE_INDIRECT, 0, arg, &direct);
     if (gg_skip_draw(direct, GG_OP_EXECUTE_INDIRECT, 0, 0)) return;
     if (gg_skip_stages(gg_pso_info(gg_cl_rs(l, GG_CL_PSO, NULL, 0)))) return;
+    st_draw();
     bind_null_uavs(l);
     real_exec_indirect(l, sig, max, args, off, cnt, cnt_off);
 }
@@ -1777,6 +1782,7 @@ static void STDMETHODCALLTYPE hook_copytex(ID3D12GraphicsCommandList *l, const D
 
 static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
 {
+    st_list_open();
     gg_trace_reset(l);
     gg_cl_rs(l, 0, NULL, 1);
     gg_cl_rs(l, GG_CL_PSO, ps, 1);
@@ -1790,6 +1796,7 @@ static HRESULT STDMETHODCALLTYPE hook_reset(ID3D12GraphicsCommandList *l, ID3D12
    root signature e a mascara das tabelas definidas e guarda o PSO inicial (conferido contra a root signature) */
 static HRESULT STDMETHODCALLTYPE hook_reset_uav(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
 {
+    st_list_open();
     gg_cl_rs(l, 0, NULL, 1);
     gg_cl_rs(l, GG_CL_PSO, ps, 1);
     gg_cl_gtab(l, 0, 0);
@@ -1797,17 +1804,20 @@ static HRESULT STDMETHODCALLTYPE hook_reset_uav(ID3D12GraphicsCommandList *l, ID
 }
 static void STDMETHODCALLTYPE hook_draw_uav(ID3D12GraphicsCommandList *l, UINT vc, UINT ic, UINT sv, UINT si)
 {
+    st_draw();
     bind_null_uavs(l);
     real_draw(l, vc, ic, sv, si);
 }
 static void STDMETHODCALLTYPE hook_draw_indexed_uav(ID3D12GraphicsCommandList *l, UINT idx, UINT ic, UINT si, INT bv, UINT sinst)
 {
+    st_draw();
     bind_null_uavs(l);
     real_draw_indexed(l, idx, ic, si, bv, sinst);
 }
 static void STDMETHODCALLTYPE hook_exec_indirect_uav(ID3D12GraphicsCommandList *l, ID3D12CommandSignature *sig, UINT max,
                                                      ID3D12Resource *args, UINT64 off, ID3D12Resource *cnt, UINT64 cnt_off)
 {
+    st_draw();
     bind_null_uavs(l);
     real_exec_indirect(l, sig, max, args, off, cnt, cnt_off);
 }
@@ -1899,6 +1909,7 @@ static void list_created(void *obj)
     LONG k = InterlockedIncrement(&lists_made), live = InterlockedIncrement(&lists_live);
     gg_cl_forget(obj);
     note_make_site(0);
+    st_list_open();
     if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command lists criadas, %ld vivas", k, live);
 }
 

@@ -361,3 +361,47 @@ TEST(stutter_defer_release_default)
     CHECK(dr_wanted());
     dbgini_set(NULL);
 }
+
+/* vazao (PASSO 71): chave da origem de uma lista aberta = frames de codigo fora do 0x1400dee90 do Azimuth */
+TEST(stutter_throughput_origin_key)
+{
+    static const uintptr_t ranges[2][2] = { { 0x1000, 0x2000 }, { 0x8000, 0x9000 } };
+    void *f[6] = { (void *)0x1100, (void *)0x5000, (void *)0x1500, (void *)0x8100, (void *)0x8200, (void *)0x1f00 };
+    uintptr_t k[3];
+    CHECK_EQ(vz_key(f, 6, ranges, 2, 0x1000, 0x1200, k, 3), 3);   /* 0x1100 (o abridor) e 0x5000 (fora) saem */
+    CHECK_EQ(k[0], 0x1500);
+    CHECK_EQ(k[1], 0x8100);
+    CHECK_EQ(k[2], 0x8200);
+    CHECK_EQ(vz_key(f, 2, ranges, 2, 0x1000, 0x1200, k, 3), 0);
+    CHECK(!k[0] && !k[2]);                                         /* sobra zerada: chaves comparaveis */
+}
+
+/* maiores valores (CPU por thread, origens): ordem decrescente, zeros fora */
+TEST(stutter_throughput_top)
+{
+    uint64_t v[6] = { 5, 0, 90, 7, 90, 1 };
+    uint32_t idx[3];
+    CHECK_EQ(vz_top(v, 6, idx, 3), 3);
+    CHECK(v[idx[0]] == 90 && v[idx[1]] == 90 && v[idx[2]] == 7);
+    v[0] = v[2] = v[3] = v[4] = v[5] = 0;
+    CHECK_EQ(vz_top(v, 6, idx, 3), 0);
+}
+
+/* sem StutterLog os ganchos do gpuguard nao contam nada; com ele o draw soma de 64 em 64 */
+TEST(stutter_throughput_counters)
+{
+    int i, on = st_on;
+    st_on = 0;
+    vz_opens = vz_draws = 0;
+    st_list_open();
+    for (i = 0; i < 200; i++) st_draw();
+    CHECK_EQ(vz_opens, 0);
+    CHECK_EQ(vz_draws, 0);
+    st_on = 1;
+    for (i = 0; i < 130; i++) st_draw();
+    CHECK_EQ(vz_draws, 128);
+    st_list_open();                                                /* 1 de 8: so conta, sem pilha */
+    CHECK_EQ(vz_opens, 1);
+    st_on = on;
+    vz_opens = vz_draws = 0;
+}
