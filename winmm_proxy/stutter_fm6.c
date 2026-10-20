@@ -2022,26 +2022,27 @@ int cmdalloc_age_patch(int ms)
     return 1;
 }
 
-/* EXPERIMENTO RetireMargin (PASSO 81, debug.ini; padrao 0): 0x1400d9a40 poe na fila do reaper (recurso, descritor
- * ou objeto) com o valor de fence dado - enviado + 1 em 0x1400d9b10, por lote em 0x1400d9bd0 - e 0x1400d9d10 so passa
- * ao reaper quando o concluido chega nele; a fila e ordenada (insercao pelo valor). Somar N so no caminho de
- * 0x1400d9b10 (retorno azimuth+0xd9b7f: objeto do Azimuth, slots de descritor, Release D3D12) atrasa essa
- * aposentadoria por ~N envios (~13 por quadro). O de 0x1400d9bd0 (por lote, do submit) fica: atrasado tambem, o
- * FM6 caiu no carregamento (PASSO 81, 1a versao). */
+/* EXPERIMENTO RetireMargin (PASSO 81, debug.ini; padrao 0): 0x1400d9a40 poe na fila do reaper (ordenada pelo valor
+ * de fence) um shared_ptr {objeto, control block}; 0x1400d9d10 so o passa ao reaper quando o concluido chega no valor.
+ * Somar N so aos SLOTS DE DESCRITOR (control block _Ref_count_resource do lambda de retire_descriptor, vtable
+ * azimuth+0x2ae020, montado em 0x1400d9c70) atrasa a volta do slot ao pool por ~N envios (~13 por quadro).
+ * Atrasar tudo (1a versao) ou tudo de 0x1400d9b10 (81b: recursos, Storage/Slice/Block) derrubou o carregamento. */
 #define RM_ENQUEUE_RVA 0xd9a40
-#define RM_SINGLE_RET  0xd9b7f
+#define RM_DESC_CB_VT  0x2ae020
 typedef void (*rm_enqueue_fn)(void *dev, UINT64 fence, void *sp);
 static rm_enqueue_fn rm_orig;
 static UINT64 rm_margin;
 
-static UINT64 rm_fence(const void *ret, UINT64 fence)
+/* sp = {objeto, control block}; o control block comeca pela vtable */
+static UINT64 rm_fence(void *const *sp, UINT64 fence)
 {
-    return ret == g_base + RM_SINGLE_RET ? fence + rm_margin : fence;
+    void *const *cb = sp ? (void *const *)sp[1] : NULL;
+    return cb && *cb == g_base + RM_DESC_CB_VT ? fence + rm_margin : fence;
 }
 
 static void rm_enqueue(void *dev, UINT64 fence, void *sp)
 {
-    rm_orig(dev, rm_fence(__builtin_return_address(0), fence), sp);
+    rm_orig(dev, rm_fence(sp, fence), sp);
 }
 
 int retire_margin_patch(int n)
@@ -2052,7 +2053,7 @@ int retire_margin_patch(int n)
         wlog("d3d: fila do reaper do Azimuth (azimuth+%#x) nao confere -> sem RetireMargin", RM_ENQUEUE_RVA);
         return 0;
     }
-    wlog("d3d: RetireMargin: aposentadoria do Azimuth (recursos, descritores) atrasada em %d envios", n);
+    wlog("d3d: RetireMargin: volta dos slots de descritor do Azimuth ao pool atrasada em %d envios", n);
     return 1;
 }
 

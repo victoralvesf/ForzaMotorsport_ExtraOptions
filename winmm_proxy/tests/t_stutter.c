@@ -312,11 +312,17 @@ TEST(stutter_retire_margin_patch)
     CHECK(!memcmp(az + 0xd9a40, orig, sizeof orig));
     CHECK(retire_margin_patch(2000));
     CHECK(!memcmp(az + 0xd9a40, "ÿ%    ", 6));
-    rm_orig = fake_rm_enqueue;
-    rm_enqueue(NULL, 101, NULL);
-    CHECK(rm_seen == 101);                                     /* outro chamador (lote do submit): sem margem */
-    CHECK(rm_fence(az + 0xd9b7f, 101) == 2101);                /* 0x1400d9b10: com margem */
-    CHECK(rm_fence(az + 0xd9c00, 101) == 101);
+    {
+        void *desc_cb[1] = { az + 0x2ae020 }, *other_cb[1] = { az + 0x2ae000 };
+        void *desc_sp[2] = { NULL, desc_cb }, *other_sp[2] = { NULL, other_cb }, *empty_sp[2] = { NULL, NULL };
+        rm_orig = fake_rm_enqueue;
+        rm_enqueue(NULL, 101, desc_sp);
+        CHECK(rm_seen == 2101);                                /* slot de descritor: com margem */
+        rm_enqueue(NULL, 101, other_sp);
+        CHECK(rm_seen == 101);                                 /* recurso/objeto: sem margem */
+        rm_enqueue(NULL, 7, empty_sp);
+        CHECK(rm_seen == 7);
+    }
 }
 
 /* perfil das UpdateTileMappings (PASSO 68): contagens, recursos distintos, chamadores */
