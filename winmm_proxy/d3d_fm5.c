@@ -2489,6 +2489,9 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
    ainda nao passou dela: submete o lote atual se ela ainda nao saiu e espera a fence (o mesmo par submit/espera
    que o Azimuth ja usa nessa funcao para os dados de upload da lista). */
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
+extern void cx_add(uint32_t kind, void *a, void *b, const uint32_t *x, int nx);
+extern int st_on;
+#define CX_REEXEC_KIND 8   /* CX_REEXEC em stutter_fm6.c */
 #define RVA_APPLY_EXECUTE   0x11bd40
 #define RVA_SUBMIT          0xdf730
 #define RVA_FENCE_WAIT      0xf2c10
@@ -2507,6 +2510,11 @@ static void fm6_apply_execute(uint8_t *ctx, uint8_t *cl, int restore, void *ret)
 {
     uint8_t *st = cl ? *(uint8_t **)(cl + AZ_LIST_STATE) : NULL, *fence = *(uint8_t **)(ctx + AZ_CTX_DEVICE) + AZ_DEV_FENCE;
     uint64_t last = st ? *(volatile uint64_t *)(st + AZ_STATE_LAST_FENCE) : 0;
+    if (last && st_on) {   /* caixa-preta (PASSO 78): lista ja executada antes, reenviada agora */
+        uint32_t x[3] = { (uint32_t)last, (uint32_t)*(volatile uint64_t *)(fence + AZ_FENCE_DONE),
+                          (uint32_t)*(volatile uint64_t *)(fence + AZ_FENCE_SUBMITTED) };
+        cx_add(CX_REEXEC_KIND, cl, st, x, 3);
+    }
     if (last > *(volatile uint64_t *)(fence + AZ_FENCE_DONE)) {
         LONG k = InterlockedIncrement(&fm6_reexec_waits);
         int unsent = *(volatile uint64_t *)(fence + AZ_FENCE_SUBMITTED) < last;

@@ -579,3 +579,9 @@ TEST(stutter_defer_release_hold)
     CHECK(dr_old_enough(0, 20000000, 2000, f));      /* 2000 ms */
     CHECK(dr_old_enough(5, 4, -1, f));
 }
+
+TEST(stutter_blackbox_reexec_kind)
+{
+    CHECK_EQ(CX_REEXEC, 8);                         /* d3d_fm5.c usa CX_REEXEC_KIND 8 */
+    CHECK(strstr(cx_names[CX_REEXEC], "reexecutada") != NULL);
+}

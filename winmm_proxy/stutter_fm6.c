@@ -286,9 +286,10 @@ void rk_reset(void)
  * eventos fora das listas: criacao de reservado/heap/committed/placed, ultima Release do reaper (adiada) e a
  * destruicao de fato, UpdateTileMappings. Cada mapeamento e conferido: recurso ou heap ja solto pelo reaper (ou
  * destruido), faixa do heap alem do tamanho. cx_dump (dred_watch, D3D12Debug>=3) grava o anel quando o device cai. */
-enum { CX_RESERVED, CX_COMMITTED, CX_PLACED, CX_HEAP, CX_DEFER, CX_DESTROY, CX_TILES, CX_BAD, CX_N };
+enum { CX_RESERVED, CX_COMMITTED, CX_PLACED, CX_HEAP, CX_DEFER, CX_DESTROY, CX_TILES, CX_BAD, CX_REEXEC, CX_N };
 static const char *const cx_names[CX_N] = { "reservado", "committed", "placed", "heap", "reaper solta (adiado)",
-                                            "destruido", "UpdateTileMappings", "MAPEAMENTO SUSPEITO" };
+                                            "destruido", "UpdateTileMappings", "MAPEAMENTO SUSPEITO",
+                                            "lista reexecutada (fence anterior, concluida, enviada)" };
 typedef struct { LONG64 t; uint32_t kind, tid; void *a, *b; uint32_t x[8]; } cx_ev;
 #define CX_RING 1024
 static cx_ev cx_ring[CX_RING];
