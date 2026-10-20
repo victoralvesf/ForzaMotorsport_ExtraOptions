@@ -154,3 +154,37 @@ TEST(stutter_stack_returns)
     CHECK_EQ(out[2], 0x140000010ull);
     CHECK_EQ(st_scan_returns(stack, 1, ranges, 2, out, 3), 0);
 }
+
+/* limitador da fila do FM6: so troca o SwitchToThread do jogo se a chamada em 0x195410 e o slot conferirem */
+static BOOL WINAPI fake_switch(void) { return 7; }
+
+TEST(stutter_queue_throttle_install)
+{
+    static const uint8_t call[6] = { 0xff, 0x15, 0x72, 0x5b, 0xe8, 0x00 };
+    uint8_t *az = fake_azimuth(0), *old6 = g_fm6_game;
+    uint8_t *game = VirtualAlloc(NULL, 0x1020000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    void **slot;
+    REQUIRE(game);
+    slot = (void **)(game + 0x101af88);
+    g_fm6_game = game;
+    *slot = az + 0x1000;                                      /* dentro do azimuth.exe, mas bytes da chamada nao */
+    log_capture();
+    fq_install();
+    CHECK(*slot == az + 0x1000);
+    CHECK(log_has("stutter: limitador da fila (game+0x195410 / IAT 0x101af88) nao confere"));
+    memcpy(game + 0x195410, call, sizeof call);
+    *slot = (void *)0x1234;                                   /* fora do azimuth.exe */
+    fq_install();
+    CHECK(*slot == (void *)0x1234);
+    *slot = az + 0x1000;
+    log_capture();
+    fq_install();
+    CHECK(*slot == (void *)st_switch_thunk && fq_real == (void *)(az + 0x1000));
+    CHECK(fq_ret == (uintptr_t)game + 0x195416);
+    CHECK(log_has("stutter: limitador da fila do FM6 medido"));
+    /* chamada que nao vem do limitador: so repassa */
+    fq_real = fake_switch;
+    CHECK(st_switch_c(0x10, 0x20) == 7 && fq.q == 0);
+    g_fm6_game = old6;
+    VirtualFree(game, 0, MEM_RELEASE);
+}

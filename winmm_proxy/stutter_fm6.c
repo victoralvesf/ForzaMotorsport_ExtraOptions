@@ -730,6 +730,169 @@ static void st_report(LONG frame, double stalled_ms, double limit_ms)
     st_report_blocked();
 }
 
+/* ---- limitador da fila de blocos do FM6 (17_fm6.txt RESULTADO PASSO 59/60) ----
+ * game+0x195400: com pendentes [q+0xc0] > 2x limite [q+0xc4] a thread principal gira em kernelx!SwitchToThread
+ * (IAT do jogo 0x101af88, chamada em 0x195410, retorno 0x195416; rbx = fila) ate pendentes <= limite ou 1 s.
+ * Com StutterLog o slot vai para st_switch_thunk (rcx = rbx, rdx = retorno): cada episodio (chamadas seguidas
+ * com < 5 ms entre elas) vira "stutter: fila ..." se durar >= 20 ms, com os campos da fila, o dono (vtable em
+ * q-0x28) e as threads do jogo com q ou q-0x28 em algum registrador (candidatas a consumidora). */
+#define FQ_IAT 0x101af88
+#define FQ_CALL 0x195410
+#define FQ_GAP_MS 5
+#define FQ_MIN_MS 20
+#define FQ_CAND 6
+
+typedef struct { DWORD tid; uintptr_t start, rip, ret[ST_RETS]; const char *reg; uint8_t owner; } fq_cand;
+static BOOL (WINAPI *fq_real)(void);
+static uintptr_t fq_ret;
+static struct {
+    uintptr_t q, cur, owner_vt;
+    LONG64 t0, last;
+    LONG frame;
+    uint32_t spins, pend0, pend_max, lim, ncand;
+    uint8_t d5, captured;
+    fq_cand cand[FQ_CAND];
+} fq;
+static LONG fq_reports;
+
+extern BOOL WINAPI st_switch_thunk(void);
+__asm__(
+    ".text\n"
+    ".globl st_switch_thunk\n"
+    "st_switch_thunk:\n"
+    "    movq %rbx, %rcx\n"
+    "    movq (%rsp), %rdx\n"
+    "    jmp st_switch_c\n");
+
+static int fq_read(uintptr_t a, void *out, SIZE_T n)
+{
+    SIZE_T got = 0;
+    return ReadProcessMemory(GetCurrentProcess(), (void *)a, out, n, &got) && got == n;
+}
+
+/* threads do jogo com q ou o dono em algum registrador (cada uma suspensa so durante GetThreadContext) */
+static void fq_capture(uintptr_t q)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    THREADENTRY32 te;
+    BOOL ok;
+    DWORD pid = GetCurrentProcessId(), me = GetCurrentThreadId();
+    static nqit_fn nqit;
+    if (!nqit) nqit = (nqit_fn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread");
+    fq.ncand = 0;
+    if (snap == INVALID_HANDLE_VALUE) return;
+    te.dwSize = sizeof te;
+    for (ok = Thread32First(snap, &te); ok && fq.ncand < FQ_CAND; ok = Thread32Next(snap, &te)) {
+        HANDLE h;
+        uintptr_t start = 0;
+        CONTEXT ctx;
+        uint64_t stack[64];
+        int have;
+        if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
+        h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
+        if (!h) continue;
+        if (nqit) nqit(h, 9, &start, sizeof start, NULL);
+        if (!st_in_game(start) || SuspendThread(h) == (DWORD)-1) { CloseHandle(h); continue; }
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        have = GetThreadContext(h, &ctx) && fq_read((uintptr_t)ctx.Rsp, stack, sizeof stack);
+        ResumeThread(h);
+        CloseHandle(h);
+        if (have) {
+            static const char *const names[] = { "rbx", "rsi", "rdi", "rbp", "r12", "r13", "r14", "r15" };
+            DWORD64 regs[8];
+            int k;
+            regs[0] = ctx.Rbx; regs[1] = ctx.Rsi; regs[2] = ctx.Rdi; regs[3] = ctx.Rbp;
+            regs[4] = ctx.R12; regs[5] = ctx.R13; regs[6] = ctx.R14; regs[7] = ctx.R15;
+            for (k = 0; k < 8; k++)
+                if (regs[k] == q || regs[k] == q - 0x28) {
+                    fq_cand *c = &fq.cand[fq.ncand++];
+                    c->tid = te.th32ThreadID;
+                    c->start = start;
+                    c->rip = (uintptr_t)ctx.Rip;
+                    memset(c->ret, 0, sizeof c->ret);
+                    st_scan_returns(stack, 64, (const uintptr_t (*)[2])code_ranges, ncode_ranges, c->ret, ST_RETS);
+                    c->reg = names[k];
+                    c->owner = regs[k] != q;
+                    break;
+                }
+        }
+    }
+    CloseHandle(snap);
+}
+
+static void fq_flush(void)
+{
+    char buf[2000], one[96];
+    uint32_t i, q;
+    int len;
+    double ms = ms_of(fq.last - fq.t0);
+    if (!fq.q || ms < FQ_MIN_MS) return;
+    if (++fq_reports > 2000 && (fq_reports & (fq_reports - 1))) return;
+    st_label_any(one, fq.owner_vt);
+    len = sprintf(buf, "stutter: fila %p dono vt%s: %.1f ms girando (%u voltas) desde o quadro #%ld; pendentes %u (max %u) "
+                  "limite %u atual %p d5 %u; candidatas:", (void *)fq.q, one, ms, fq.spins, fq.frame, fq.pend0, fq.pend_max,
+                  fq.lim, (void *)fq.cur, fq.d5);
+    for (i = 0; i < fq.ncand && len < 1700; i++) {
+        fq_cand *c = &fq.cand[i];
+        st_label_any(one, c->start);
+        len += sprintf(buf + len, " [tid %lu inicio%s %s=%s rip", c->tid, one, c->reg, c->owner ? "dono" : "fila");
+        st_label_any(one, c->rip);
+        len += sprintf(buf + len, "%s <", one);
+        for (q = 0; q < ST_RETS && c->ret[q]; q++) { st_label_any(one, c->ret[q]); len += sprintf(buf + len, "%s", one); }
+        len += sprintf(buf + len, " >]");
+    }
+    if (!fq.ncand) len += sprintf(buf + len, " nenhuma");
+    wlog("%s", buf);
+}
+
+BOOL WINAPI st_switch_c(uintptr_t q, uintptr_t ret)
+{
+    if (ret == fq_ret) {
+        LONG64 now = qpc();
+        uint32_t pend = 0;
+        fq_read(q + 0xc0, &pend, 4);
+        if (q != fq.q || ms_of(now - fq.last) > FQ_GAP_MS) {
+            uintptr_t vt = 0;
+            fq_flush();
+            memset(&fq, 0, sizeof fq);
+            fq.q = q;
+            fq.t0 = now;
+            fq.frame = frame_no + 1;
+            fq.pend0 = pend;
+            fq_read(q + 0xc4, &fq.lim, 4);
+            fq_read(q + 0x60, &fq.cur, 8);
+            fq_read(q + 0xd5, &fq.d5, 1);
+            if (fq_read(q - 0x28, &vt, 8)) fq.owner_vt = vt;
+        }
+        if (pend > fq.pend_max) fq.pend_max = pend;
+        fq.spins++;
+        fq.last = now;
+        if (!fq.captured && ms_of(now - fq.t0) >= 10) { fq.captured = 1; fq_capture(q); }
+    }
+    return fq_real();
+}
+
+/* thread do amostrador, depois do 1o Present (imports do jogo ja resolvidos): confere os bytes da chamada e o slot */
+static void fq_install(void)
+{
+    static const uint8_t call[6] = { 0xff, 0x15, 0x72, 0x5b, 0xe8, 0x00 };   /* call [rip+0xe85b72] -> 0x101af88 */
+    uint8_t *game = g_fm6_game;
+    void **slot;
+    DWORD old;
+    if (!game) return;
+    slot = (void **)(game + FQ_IAT);
+    if (memcmp(game + FQ_CALL, call, sizeof call) || (uint8_t *)*slot < g_base || (uint8_t *)*slot >= g_base + 0x1000000) {
+        wlog("stutter: limitador da fila (game+%#x / IAT %#x) nao confere -> sem medicao da fila", FQ_CALL, FQ_IAT);
+        return;
+    }
+    fq_ret = (uintptr_t)game + FQ_CALL + 6;
+    fq_real = (BOOL (WINAPI *)(void))*slot;
+    VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old);
+    *slot = (void *)st_switch_thunk;
+    VirtualProtect(slot, sizeof *slot, old, &old);
+    wlog("stutter: limitador da fila do FM6 medido (SwitchToThread game+%#x)", FQ_IAT);
+}
+
 static DWORD WINAPI st_sampler(void *arg)
 {
     HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 2 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
@@ -763,6 +926,7 @@ static DWORD WINAPI st_sampler(void *arg)
             if (game) { code_ranges[ncode_ranges][0] = (uintptr_t)game; code_ranges[ncode_ranges++][1] = (uintptr_t)game + 0x8000000; }
             code_ranges[ncode_ranges][0] = (uintptr_t)g_base; code_ranges[ncode_ranges++][1] = (uintptr_t)g_base + 0x1000000;
             code_ranges[ncode_ranges][0] = (uintptr_t)self_mod; code_ranges[ncode_ranges++][1] = (uintptr_t)self_mod + 0x200000;
+            fq_install();
         }
         if (stalled) {
             if (fs != stall_frame_start) {   /* Present chegou: fim da parada */
