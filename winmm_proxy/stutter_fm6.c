@@ -679,14 +679,11 @@ static void (STDMETHODCALLTYPE *real_tiles)(ID3D12CommandQueue *, ID3D12Resource
                                             const D3D12_TILE_REGION_SIZE *, ID3D12Heap *, UINT, const D3D12_TILE_RANGE_FLAGS *,
                                             const UINT *, const UINT *, D3D12_TILE_MAPPING_FLAGS);
 /* PASSO 68: perfil das UpdateTileMappings em janelas de 10 s (linha "stutter: tiles 10 s" junto do resumo) - flags
- * do Azimuth, desmapeamentos, tiles, recursos distintos (1o mapeamento x remapeamento) e quem chama. Experimento
- * (debug.ini TileNoHazard=1): D3D12_TILE_MAPPING_FLAG_NO_HAZARD nos mapeamentos (heap != NULL), para o driver nao
- * sincronizar a fila a cada chamada (GPU longa depois das rajadas de streaming, PASSOS 63-67). */
+ * que chegam (com o tile_nohazard_patch: NO_HAZARD), desmapeamentos, tiles, recursos distintos e quem chama. */
 #define TL_SEEN 16384
 #define TL_CALLERS 4
-int tl_nohazard;
 static struct {
-    uint32_t calls, flagged, unmaps, nulls, regions, distinct, forced;
+    uint32_t calls, flagged, unmaps, nulls, regions, distinct;
     uint64_t tiles;
     void *seen[TL_SEEN];
     struct { void *ret; uint32_t n; } callers[TL_CALLERS];
@@ -701,8 +698,7 @@ void tl_reset(void)
     ReleaseSRWLockExclusive(&tl_lock);
 }
 
-/* devolve as flags que vao para o driver */
-D3D12_TILE_MAPPING_FLAGS tl_note(void *res, UINT nr, const D3D12_TILE_REGION_SIZE *sz, ID3D12Heap *h, UINT ng,
+void tl_note(void *res, UINT nr, const D3D12_TILE_REGION_SIZE *sz, ID3D12Heap *h, UINT ng,
                                  const D3D12_TILE_RANGE_FLAGS *rf, const UINT *rc, D3D12_TILE_MAPPING_FLAGS fl, void *ret)
 {
     UINT i;
@@ -726,9 +722,7 @@ D3D12_TILE_MAPPING_FLAGS tl_note(void *res, UINT nr, const D3D12_TILE_REGION_SIZ
         if (!tl.callers[k].ret) { tl.callers[k].ret = ret; tl.callers[k].n = 1; break; }
     }
     if (k == TL_CALLERS) tl.other_callers++;
-    if (tl_nohazard && h && !(fl & D3D12_TILE_MAPPING_FLAG_NO_HAZARD)) { fl |= D3D12_TILE_MAPPING_FLAG_NO_HAZARD; tl.forced++; }
     ReleaseSRWLockExclusive(&tl_lock);
-    return fl;
 }
 
 /* "stutter: tiles 10 s: 812 chamadas, 1300 regioes, 5120 tiles, 640 recursos distintos, flags 0 em 812, ..." */
@@ -737,8 +731,8 @@ int tl_format(char *buf, int cap)
     int len, k;
     if (!tl.calls) return 0;
     len = snprintf(buf, cap, "stutter: tiles 10 s: %u chamadas, %u regioes, %llu tiles, %u recursos distintos, %u com flags, "
-                   "%u sem heap, %u faixas NULL, %u NO_HAZARD forcados; chamadores:", tl.calls, tl.regions,
-                   (unsigned long long)tl.tiles, tl.distinct, tl.flagged, tl.unmaps, tl.nulls, tl.forced);
+                   "%u sem heap, %u faixas NULL; chamadores:", tl.calls, tl.regions,
+                   (unsigned long long)tl.tiles, tl.distinct, tl.flagged, tl.unmaps, tl.nulls);
     for (k = 0; k < TL_CALLERS && tl.callers[k].ret && len < cap - 40; k++) {
         char a[48];
         st_label(a, tl.callers[k].ret);
@@ -754,7 +748,7 @@ static void STDMETHODCALLTYPE st_tiles(ID3D12CommandQueue *q, ID3D12Resource *re
                                        const UINT *hs, const UINT *rc, D3D12_TILE_MAPPING_FLAGS fl)
 {
     LONG64 t;
-    fl = tl_note(res, nr, sz, h, ng, rf, rc, fl, __builtin_return_address(0));
+    tl_note(res, nr, sz, h, ng, rf, rc, fl, __builtin_return_address(0));
     t = qpc();
     real_tiles(q, res, nr, co, sz, h, ng, rf, hs, rc, fl);
     rk_note(RK_TILES, qpc() - t, NULL, 0, nr);
@@ -1387,6 +1381,49 @@ int cmdalloc_age_patch(int ms)
     return 1;
 }
 
+/* PASSO 69: o Azimuth mapeia os tiles de cada textura reservada (streaming) com uma UpdateTileMappings na fila de
+ * render (laco em azimuth+0xe0160, call r10 em 0xe01e8) com Flags = 0 -> o driver sincroniza a fila a cada chamada e
+ * a GPU para no quadro seguinte a uma rajada (150-270 chamadas). Na copia das flags (mov [rsp+0x50], ebp em 0xe017d,
+ * antes do test do heap) entra um jmp para um stub: com heap (mapeamento) as flags viram NO_HAZARD (as texturas sao
+ * novas: nada na GPU usa esses tiles por elas); sem heap (desmapeamento) segue igual. Confere os 9 bytes antes. */
+#define TN_SITE_RVA 0xe017d
+#define TN_MAP_RVA 0xe0186
+#define TN_UNMAP_RVA 0xe01a9
+extern uint8_t *alloc_near(uint8_t *mod, size_t size);
+extern void write_mem(void *dst, const void *src, size_t len);
+int tile_nohazard_patch(int on)
+{
+    static const uint8_t orig[9] = { 0x89, 0x6c, 0x24, 0x50, 0x48, 0x85, 0xc9, 0x74, 0x23 };
+    static const uint8_t body[0x11] = {
+        0x89, 0x6c, 0x24, 0x50,                                /* mov [rsp+0x50], ebp */
+        0x48, 0x85, 0xc9,                                      /* test rcx, rcx (heap) */
+        0x74, 0x16,                                            /* je -> jmp do desmapeamento */
+        0xc7, 0x44, 0x24, 0x50, 0x01, 0x00, 0x00, 0x00,        /* mov dword [rsp+0x50], NO_HAZARD */
+    };
+    uint8_t *at = g_base + TN_SITE_RVA, *stub, jmp[9] = { 0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90 };
+    uint8_t *back[2] = { g_base + TN_MAP_RVA, g_base + TN_UNMAP_RVA };
+    int32_t rel;
+    int i;
+    if (!on) return 0;
+    if (memcmp(at, orig, sizeof orig) || memcmp(g_base + TN_MAP_RVA, "\x48\x8b\x43\x58", 4)) {
+        wlog("d3d: UpdateTileMappings do Azimuth (azimuth+%#x) nao confere -> sem NO_HAZARD", TN_SITE_RVA);
+        return 0;
+    }
+    if (!(stub = alloc_near(g_base, 64))) { wlog("d3d: sem memoria perto do azimuth.exe para o NO_HAZARD"); return 0; }
+    memcpy(stub, body, sizeof body);
+    for (i = 0; i < 2; i++) {
+        memcpy(stub + 0x11 + i * 14, "\xff\x25\0\0\0\0", 6);
+        memcpy(stub + 0x17 + i * 14, &back[i], 8);
+    }
+    FlushInstructionCache(GetCurrentProcess(), stub, 64);
+    rel = (int32_t)(stub - (at + 5));
+    memcpy(jmp + 1, &rel, 4);
+    write_mem(at, jmp, sizeof jmp);
+    FlushInstructionCache(GetCurrentProcess(), at, sizeof jmp);
+    wlog("d3d: UpdateTileMappings do Azimuth com D3D12_TILE_MAPPING_FLAG_NO_HAZARD nos mapeamentos");
+    return 1;
+}
+
 /* DllMain (fm5_patch.c install): fabrica DXGI e esperas pela IAT do azimuth.exe */
 void stutter_install(void)
 {
@@ -1394,8 +1431,6 @@ void stutter_install(void)
     st_on = dbg_int(L"StutterLog", 0) > 0;
     if (!st_on) return;
     dr_on = dbg_int(L"DeferRelease", 0) > 0;
-    tl_nohazard = dbg_int(L"TileNoHazard", 0) > 0;
-    if (tl_nohazard) wlog("stutter: TileNoHazard=1 (UpdateTileMappings com D3D12_TILE_MAPPING_FLAG_NO_HAZARD)");
     if (dr_on) CloseHandle(CreateThread(NULL, 0, dr_drain, NULL, 0, NULL));
     QueryPerformanceFrequency(&st_freq);
     {

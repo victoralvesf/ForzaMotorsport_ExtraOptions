@@ -296,8 +296,7 @@ TEST(stutter_cmdalloc_age_patch)
     CHECK(!memcmp(az + 0xdeadd, "\x48\x3d\xff\xff\xff\x7f", 6));
 }
 
-/* perfil das UpdateTileMappings (PASSO 68): contagens, recursos distintos, chamadores; NO_HAZARD so com TileNoHazard
- * e so em mapeamento (heap != NULL) */
+/* perfil das UpdateTileMappings (PASSO 68): contagens, recursos distintos, chamadores */
 TEST(stutter_tile_profile)
 {
     D3D12_TILE_REGION_SIZE sz = { 4, FALSE, 0, 0, 0 };
@@ -309,15 +308,40 @@ TEST(stutter_tile_profile)
     char buf[512];
     tl_reset();
     CHECK_EQ(tl_format(buf, sizeof buf), 0);
-    tl_nohazard = 0;
-    CHECK_EQ(tl_note(r1, 1, &sz, heap, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c1), D3D12_TILE_MAPPING_FLAG_NONE);
-    CHECK_EQ(tl_note(r1, 1, &sz, NULL, 2, rf, rc, D3D12_TILE_MAPPING_FLAG_NONE, c1), D3D12_TILE_MAPPING_FLAG_NONE);
-    tl_nohazard = 1;
-    CHECK_EQ(tl_note(r2, 2, NULL, heap, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c2), D3D12_TILE_MAPPING_FLAG_NO_HAZARD);
-    CHECK_EQ(tl_note(r2, 1, &sz, NULL, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c2), D3D12_TILE_MAPPING_FLAG_NONE);
-    tl_nohazard = 0;
+    tl_note(r1, 1, &sz, heap, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c1);
+    tl_note(r1, 1, &sz, NULL, 2, rf, rc, D3D12_TILE_MAPPING_FLAG_NONE, c1);
+    tl_note(r2, 2, NULL, heap, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NO_HAZARD, c2);
+    tl_note(r2, 1, &sz, NULL, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c2);
     tl_format(buf, sizeof buf);
-    CHECK(strstr(buf, "stutter: tiles 10 s: 4 chamadas, 5 regioes, 18 tiles, 2 recursos distintos, 0 com flags, 2 sem heap, "
-                      "1 faixas NULL, 1 NO_HAZARD forcados; chamadores: azimuth+0xe3d00 x2 azimuth+0xe3e00 x2") != NULL);
+    CHECK(strstr(buf, "stutter: tiles 10 s: 4 chamadas, 5 regioes, 18 tiles, 2 recursos distintos, 1 com flags, 2 sem heap, "
+                      "1 faixas NULL; chamadores: azimuth+0xe3d00 x2 azimuth+0xe3e00 x2") != NULL);
     tl_reset();
+}
+
+/* NO_HAZARD (PASSO 69): so com os bytes originais; jmp para o stub que poe 1 nas flags com heap e volta aos 2 caminhos */
+TEST(stutter_tile_nohazard_patch)
+{
+    static const uint8_t site[9] = { 0x89, 0x6c, 0x24, 0x50, 0x48, 0x85, 0xc9, 0x74, 0x23 };
+    static const uint8_t map[4] = { 0x48, 0x8b, 0x43, 0x58 };
+    static const uint8_t stub_head[0x17] = { 0x89, 0x6c, 0x24, 0x50, 0x48, 0x85, 0xc9, 0x74, 0x16,
+                                             0xc7, 0x44, 0x24, 0x50, 0x01, 0x00, 0x00, 0x00,
+                                             0xff, 0x25, 0x00, 0x00, 0x00, 0x00 };
+    uint8_t *az = fake_azimuth(0), *stub;
+    log_capture();
+    CHECK(!tile_nohazard_patch(1));                                    /* bytes zerados: nao confere */
+    CHECK(log_has("UpdateTileMappings do Azimuth (azimuth+0xe017d) nao confere"));
+    memcpy(az + 0xe017d, site, sizeof site);
+    memcpy(az + 0xe0186, map, sizeof map);
+    CHECK(!tile_nohazard_patch(0));
+    CHECK(!memcmp(az + 0xe017d, site, sizeof site));
+    CHECK(tile_nohazard_patch(1));
+    CHECK_HEX(az + 0xe017d + 5, "90909090");
+    CHECK(az[0xe017d] == 0xe9);
+    stub = az + 0xe017d + 5 + *(int32_t *)(az + 0xe017d + 1);
+    CHECK(!memcmp(stub, stub_head, sizeof stub_head));
+    CHECK(*(uint8_t **)(stub + 0x17) == az + 0xe0186);                  /* mapeamento: segue no Azimuth */
+    CHECK_HEX(stub + 0x1f, "ff2500000000");
+    CHECK(*(uint8_t **)(stub + 0x25) == az + 0xe01a9);                  /* desmapeamento: flags 0 */
+    CHECK(stub + 9 + 0x16 == stub + 0x1f);                              /* je cai no 2o jmp */
+    memset(az + 0xe017d, 0, sizeof site);
 }
