@@ -296,6 +296,27 @@ TEST(stutter_cmdalloc_age_patch)
     CHECK(!memcmp(az + 0xdeadd, "\x48\x3d\xff\xff\xff\x7f", 6));
 }
 
+static UINT64 rm_seen;
+static void fake_rm_enqueue(void *dev, UINT64 fence, void *sp) { (void)dev; (void)sp; rm_seen = fence; }
+
+TEST(stutter_retire_margin_patch)
+{
+    static const uint8_t orig[15] = { 0x48, 0x89, 0x5c, 0x24, 0x08, 0x4c, 0x89, 0x44, 0x24, 0x18,
+                                      0x48, 0x89, 0x54, 0x24, 0x10 };
+    uint8_t *az = fake_azimuth(0);
+    log_capture();
+    CHECK(!retire_margin_patch(2000));                         /* bytes zerados: nao confere */
+    CHECK(log_has("sem RetireMargin"));
+    memcpy(az + 0xd9a40, orig, sizeof orig);
+    CHECK(!retire_margin_patch(0));
+    CHECK(!memcmp(az + 0xd9a40, orig, sizeof orig));
+    CHECK(retire_margin_patch(2000));
+    CHECK(!memcmp(az + 0xd9a40, "ÿ%    ", 6));
+    rm_orig = fake_rm_enqueue;
+    rm_enqueue(NULL, 101, NULL);
+    CHECK(rm_seen == 2101);
+}
+
 /* perfil das UpdateTileMappings (PASSO 68): contagens, recursos distintos, chamadores */
 TEST(stutter_tile_profile)
 {

@@ -27,6 +27,7 @@ extern uint8_t *g_fm6_game;
 extern void wlog(const char *fmt, ...);
 extern int dbg_int(const wchar_t *key, int def);
 extern int is_fm6(void);
+extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp_out);
 
 #define ST_AVG_N 64           /* media movel dos quadros */
 #define ST_WAITS 512          /* anel de esperas longas */
@@ -2018,6 +2019,32 @@ int cmdalloc_age_patch(int ms)
     VirtualProtect(at, sizeof orig, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, sizeof orig);
     wlog("stutter: command allocators ociosos destruidos so depois de %u ms (era 4000)", v);
+    return 1;
+}
+
+/* EXPERIMENTO RetireMargin (PASSO 81, debug.ini; padrao 0): 0x1400d9a40 poe na fila do reaper (recurso, descritor
+ * ou objeto) com o valor de fence dado - enviado + 1 em 0x1400d9b10, por lote em 0x1400d9bd0 - e 0x1400d9d10 so passa
+ * ao reaper quando o concluido chega nele. Somar N ao valor atrasa TODA a aposentadoria (objeto do Azimuth, slots de
+ * descritor, Release D3D12) por ~N envios (~13 por quadro). A fila continua em ordem (todos ganham o mesmo N). */
+#define RM_ENQUEUE_RVA 0xd9a40
+typedef void (*rm_enqueue_fn)(void *dev, UINT64 fence, void *sp);
+static rm_enqueue_fn rm_orig;
+static UINT64 rm_margin;
+
+static void rm_enqueue(void *dev, UINT64 fence, void *sp)
+{
+    rm_orig(dev, fence + rm_margin, sp);
+}
+
+int retire_margin_patch(int n)
+{
+    if (n <= 0) return 0;
+    rm_margin = (UINT64)n;
+    if (!hook_function(RM_ENQUEUE_RVA, "48895c24084c894424184889542410", 15, (void *)rm_enqueue, (void **)&rm_orig)) {
+        wlog("d3d: fila do reaper do Azimuth (azimuth+%#x) nao confere -> sem RetireMargin", RM_ENQUEUE_RVA);
+        return 0;
+    }
+    wlog("d3d: RetireMargin: aposentadoria do Azimuth (recursos, descritores) atrasada em %d envios", n);
     return 1;
 }
 
