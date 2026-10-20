@@ -541,3 +541,32 @@ TEST(stutter_list_pool)
     CHECK_EQ(lp_n[0], 0);
     lp_real_create = NULL;
 }
+
+TEST(stutter_blackbox_tile_check)
+{
+    static uint8_t res[16], heap[16], heap2[16];
+    const UINT hs_ok[2] = { 0, 1020 }, rc_ok[2] = { 4, 4 }, hs_over[2] = { 0, 1022 };
+    const D3D12_TILE_RANGE_FLAGS rf_null[2] = { D3D12_TILE_RANGE_FLAG_NONE, D3D12_TILE_RANGE_FLAG_NULL };
+    uint32_t fb = 99, tiles = 0;
+    LONG seq0 = cx_seq;
+    cx_created(CX_RESERVED, res, NULL, 0);
+    cx_created(CX_HEAP, heap, NULL, 64ull << 20);              /* 64 MB = 1024 tiles */
+    CHECK_EQ(cx_state(heap, &tiles), 1);
+    CHECK_EQ(tiles, 1024);
+    CHECK_EQ(cx_check_tiles(res, heap, 2, NULL, hs_ok, rc_ok, &fb), 0);
+    CHECK_EQ(cx_check_tiles(res, heap, 2, NULL, hs_over, rc_ok, &fb), 4);   /* 1022 + 4 > 1024 */
+    CHECK_EQ(fb, 1);
+    CHECK_EQ(cx_check_tiles(res, heap, 2, rf_null, hs_over, rc_ok, &fb), 0); /* faixa NULL nao usa o heap */
+    CHECK_EQ(cx_check_tiles(res, heap2, 2, NULL, hs_over, rc_ok, &fb), 0);  /* heap desconhecido: sem opiniao */
+    cx_set(res, 2, 0);                                          /* ultima referencia com o reaper */
+    CHECK_EQ(cx_check_tiles(res, heap, 2, NULL, hs_ok, rc_ok, &fb), 1);
+    cx_set(heap, 3, 0);                                         /* heap destruido: tamanho guardado */
+    CHECK_EQ(cx_check_tiles(res, heap, 2, NULL, hs_ok, rc_ok, &fb), 3);
+    CHECK_EQ(cx_state(heap, &tiles), 3);
+    CHECK_EQ(tiles, 1024);
+    cx_created(CX_RESERVED, res, NULL, 0);                      /* mesmo endereco criado de novo: vivo */
+    CHECK_EQ(cx_state(res, NULL), 1);
+    CHECK_EQ(cx_seq - seq0, 3);
+    CHECK_EQ(cx_ring[(seq0 + 1) % CX_RING].kind, CX_HEAP);
+    CHECK_EQ(cx_ring[(seq0 + 1) % CX_RING].x[0], 1024);          /* heap: tamanho em tiles */
+}

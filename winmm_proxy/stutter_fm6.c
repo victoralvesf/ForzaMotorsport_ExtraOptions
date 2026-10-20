@@ -281,6 +281,130 @@ void rk_reset(void)
     for (k = 0; k < RK_N; k++) { rk_n[k] = 0; rk_ticks[k] = 0; rk_top[k].ticks = 0; }
 }
 
+/* ---- caixa-preta do streaming (PASSO 76, so com StutterLog): a queda do fim da corrida do FM6 (0x887a0007 sem page
+ * fault, DRED sem nenhuma lista, sempre no mesmo ponto) nao vem de comando de command list -> anel dos ultimos
+ * eventos fora das listas: criacao de reservado/heap/committed/placed, ultima Release do reaper (adiada) e a
+ * destruicao de fato, UpdateTileMappings. Cada mapeamento e conferido: recurso ou heap ja solto pelo reaper (ou
+ * destruido), faixa do heap alem do tamanho. cx_dump (dred_watch, D3D12Debug>=3) grava o anel quando o device cai. */
+enum { CX_RESERVED, CX_COMMITTED, CX_PLACED, CX_HEAP, CX_DEFER, CX_DESTROY, CX_TILES, CX_BAD, CX_N };
+static const char *const cx_names[CX_N] = { "reservado", "committed", "placed", "heap", "reaper solta (adiado)",
+                                            "destruido", "UpdateTileMappings", "MAPEAMENTO SUSPEITO" };
+typedef struct { LONG64 t; uint32_t kind, tid; void *a, *b; uint32_t x[8]; } cx_ev;
+#define CX_RING 1024
+static cx_ev cx_ring[CX_RING];
+static volatile LONG cx_seq;
+
+void cx_add(uint32_t kind, void *a, void *b, const uint32_t *x, int nx)
+{
+    LONG i = InterlockedIncrement(&cx_seq) - 1;
+    cx_ev *e = &cx_ring[i % CX_RING];
+    int k;
+    e->t = qpc(); e->kind = kind; e->tid = GetCurrentThreadId(); e->a = a; e->b = b;
+    for (k = 0; k < 8; k++) e->x[k] = k < nx ? x[k] : 0;
+}
+
+/* objetos vistos: estado (1 = vivo, 2 = ultima referencia com o reaper/fila, 3 = destruido) e, no heap, o tamanho em
+   tiles de 64 KB. Tabela aberta; criacao no mesmo endereco volta a "vivo". */
+#define CX_OBJS 65536
+static struct { void *p; uint32_t state, tiles; } cx_obj[CX_OBJS];
+static SRWLOCK cx_lock = SRWLOCK_INIT;
+static volatile LONG cx_bad;
+
+static uint32_t cx_slot(void *p)
+{
+    uint32_t s = (uint32_t)(((uintptr_t)p >> 4) * 2654435761u) % CX_OBJS, k;
+    for (k = 0; k < CX_OBJS; k++, s = (s + 1) % CX_OBJS)
+        if (cx_obj[s].p == p || !cx_obj[s].p) return s;
+    return UINT32_MAX;
+}
+
+void cx_set(void *p, uint32_t state, uint32_t tiles)
+{
+    uint32_t s;
+    if (!p) return;
+    AcquireSRWLockExclusive(&cx_lock);
+    if ((s = cx_slot(p)) != UINT32_MAX) {
+        cx_obj[s].p = p;
+        cx_obj[s].state = state;
+        if (state == 1) cx_obj[s].tiles = tiles;
+    }
+    ReleaseSRWLockExclusive(&cx_lock);
+}
+
+/* 0 = desconhecido; *tiles = tamanho do heap em tiles (0 se nao e heap) */
+uint32_t cx_state(void *p, uint32_t *tiles)
+{
+    uint32_t s, st = 0;
+    if (tiles) *tiles = 0;
+    if (!p) return 0;
+    AcquireSRWLockShared(&cx_lock);
+    if ((s = cx_slot(p)) != UINT32_MAX && cx_obj[s].p == p) { st = cx_obj[s].state; if (tiles) *tiles = cx_obj[s].tiles; }
+    ReleaseSRWLockShared(&cx_lock);
+    return st;
+}
+
+/* confere um UpdateTileMappings; devolve bits: 1 recurso solto/destruido, 2 heap solto/destruido, 4 faixa alem do heap */
+uint32_t cx_check_tiles(void *res, void *heap, UINT ng, const D3D12_TILE_RANGE_FLAGS *rf, const UINT *hs, const UINT *rc,
+                        uint32_t *first_bad)
+{
+    uint32_t bad = 0, size = 0, i;
+    if (cx_state(res, NULL) >= 2) bad |= 1;
+    if (heap && cx_state(heap, &size) >= 2) bad |= 2;
+    for (i = 0; heap && size && hs && i < ng; i++) {
+        UINT n = rc ? rc[i] : 1;
+        if (rf && (rf[i] & (D3D12_TILE_RANGE_FLAG_NULL | D3D12_TILE_RANGE_FLAG_SKIP))) continue;
+        if ((uint64_t)hs[i] + n > size) { if (!(bad & 4) && first_bad) *first_bad = i; bad |= 4; }
+    }
+    return bad;
+}
+
+static void cx_tiles(void *res, UINT nr, const D3D12_TILED_RESOURCE_COORDINATE *co, const D3D12_TILE_REGION_SIZE *sz,
+                     void *heap, UINT ng, const D3D12_TILE_RANGE_FLAGS *rf, const UINT *hs, const UINT *rc, UINT fl)
+{
+    uint32_t x[8] = { nr, ng, fl, co ? co[0].X : 0, co ? co[0].Subresource : 0, sz ? sz[0].NumTiles : 0,
+                      hs && ng ? hs[0] : 0, rc && ng ? rc[0] : 0 };
+    uint32_t fb = 0, bad, size = 0;
+    cx_add(CX_TILES, res, heap, x, 8);
+    if (!(bad = cx_check_tiles(res, heap, ng, rf, hs, rc, &fb))) return;
+    cx_state(heap, &size);
+    {
+        uint32_t y[5] = { bad, fb, hs && fb < ng ? hs[fb] : 0, rc && fb < ng ? rc[fb] : 1, size };
+        LONG k = InterlockedIncrement(&cx_bad);
+        cx_add(CX_BAD, res, heap, y, 5);
+        if (k <= 32 || !(k & (k - 1)))
+            wlog("stutter: caixa-preta: UpdateTileMappings suspeito #%ld: recurso %p%s heap %p%s, faixa %u = tiles %u+%u de %u",
+                 k, res, bad & 1 ? " (JA SOLTO)" : "", heap, bad & 2 ? " (JA SOLTO)" : "", y[1], y[2], y[3], size);
+    }
+}
+
+void cx_dump(void)
+{
+    LONG n = cx_seq, i, first = n > CX_RING ? n - CX_RING : 0;
+    LONG64 now = qpc();
+    wlog("stutter: caixa-preta: %ld eventos, %ld mapeamentos suspeitos; ultimos %ld (ms antes da queda):", n, cx_bad, n - first);
+    for (i = first; i < n; i++) {
+        cx_ev *e = &cx_ring[i % CX_RING];
+        wlog("stutter: cx %.1f ms tid %lu %s %p %p [%u %u %u %u %u %u %u %u]", (double)(now - e->t) * 1000.0 / st_freq.QuadPart,
+             e->tid, e->kind < CX_N ? cx_names[e->kind] : "?", e->a, e->b, e->x[0], e->x[1], e->x[2], e->x[3], e->x[4],
+             e->x[5], e->x[6], e->x[7]);
+    }
+}
+
+/* criacao: descricao resumida (dim, largura, altura, profundidade/array, mips, formato, flags) */
+static void cx_created(uint32_t kind, void *obj, const D3D12_RESOURCE_DESC *rd, uint64_t heap_size)
+{
+    uint32_t x[8] = { 0 };
+    if (!obj) return;
+    if (rd) {
+        x[0] = rd->Dimension; x[1] = (uint32_t)rd->Width; x[2] = rd->Height; x[3] = rd->DepthOrArraySize;
+        x[4] = rd->MipLevels; x[5] = rd->Format; x[6] = rd->Flags; x[7] = (uint32_t)(rd->Width >> 32);
+    } else {
+        x[0] = (uint32_t)(heap_size >> 16); x[1] = (uint32_t)heap_size;
+    }
+    cx_set(obj, 1, kind == CX_HEAP ? (uint32_t)(heap_size >> 16) : 0);
+    cx_add(kind, obj, NULL, x, 8);
+}
+
 /* Release das vtables de recurso/heap (uma entrada por vtable: o slot original de cada uma) */
 #define RK_VT 6
 static struct { void **vt; ULONG (STDMETHODCALLTYPE *orig)(IUnknown *); } rk_vts[RK_VT];
@@ -338,6 +462,7 @@ static DWORD WINAPI dr_drain(void *arg)
         t0 = qpc();
         while (dr_tail != dr_head && (qpc() - t0) * 1000000 < (LONG64)DR_BUDGET_US * st_freq.QuadPart) {
             IUnknown *u = dr_q[dr_tail % DR_QUEUE];
+            if (st_on) { cx_set(u, 3, 0); cx_add(CX_DESTROY, u, NULL, NULL, 0); }
             rk_call_orig(u);
             InterlockedIncrement(&dr_tail);
             InterlockedIncrement(&dr_released);
@@ -356,7 +481,11 @@ static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u)
             ULONG r;
             if (dr_on && dr_thread_is_reaper()) {
                 ULONG c = u->lpVtbl->AddRef(u);       /* sonda: 2 = a referencia do reaper e a ultima */
-                if (c == 2 && dr_push(u)) { rk_vts[i].orig(u); return 0; }
+                if (c == 2 && dr_push(u)) {
+                    if (st_on) { cx_set(u, 2, 0); cx_add(CX_DEFER, u, NULL, NULL, 0); }
+                    rk_vts[i].orig(u);
+                    return 0;
+                }
                 rk_vts[i].orig(u);
             }
             t = qpc();
@@ -647,7 +776,7 @@ static HRESULT STDMETHODCALLTYPE st_committed(ID3D12Device *d, const D3D12_HEAP_
     st_count(ST_RES, dt);
     InterlockedAdd64(&st_bytes, (LONG64)st_res_bytes(rd));
     rk_note(RK_COMMITTED, dt, rd, 0, 0);
-    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_COMMITTED, *o, rd, 0); }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE st_placed(ID3D12Device *d, ID3D12Heap *h, UINT64 off, const D3D12_RESOURCE_DESC *rd, D3D12_RESOURCE_STATES s,
@@ -659,7 +788,7 @@ static HRESULT STDMETHODCALLTYPE st_placed(ID3D12Device *d, ID3D12Heap *h, UINT6
     dt = qpc() - t;
     st_count(ST_RES, dt);
     rk_note(RK_PLACED, dt, rd, 0, 0);
-    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_PLACED, *o, rd, 0); }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE st_reserved(ID3D12Device *d, const D3D12_RESOURCE_DESC *rd, D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c,
@@ -671,7 +800,7 @@ static HRESULT STDMETHODCALLTYPE st_reserved(ID3D12Device *d, const D3D12_RESOUR
     dt = qpc() - t;
     st_count(ST_RES, dt);
     rk_note(RK_RESERVED, dt, rd, 0, 0);
-    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_RESERVED, *o, rd, 0); }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE st_heap(ID3D12Device *d, const D3D12_HEAP_DESC *hd, REFIID r, void **o)
@@ -683,7 +812,7 @@ static HRESULT STDMETHODCALLTYPE st_heap(ID3D12Device *d, const D3D12_HEAP_DESC 
     st_count(ST_RES, dt);
     if (hd) InterlockedAdd64(&st_bytes, (LONG64)hd->SizeInBytes);
     rk_note(RK_HEAP, dt, NULL, hd ? hd->SizeInBytes : 0, hd ? (uint32_t)hd->Flags : 0);
-    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_HEAP, *o, NULL, hd ? hd->SizeInBytes : 0); }
     return hr;
 }
 
@@ -913,6 +1042,7 @@ static void STDMETHODCALLTYPE st_tiles(ID3D12CommandQueue *q, ID3D12Resource *re
 {
     LONG64 t;
     tl_note(res, nr, sz, h, ng, rf, rc, fl, __builtin_return_address(0));
+    cx_tiles(res, nr, co, sz, h, ng, rf, hs, rc, fl);
     t = qpc();
     real_tiles(q, res, nr, co, sz, h, ng, rf, hs, rc, fl);
     rk_note(RK_TILES, qpc() - t, NULL, 0, nr);
