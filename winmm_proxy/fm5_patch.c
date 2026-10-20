@@ -857,6 +857,7 @@ extern int audio_fm6_install(void);
 extern void audio_fm6_game_hooks(uint8_t *game);
 extern int debug12_install(void);
 extern void stutter_install(void);
+extern int cmdalloc_age_patch(int ms);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
 
@@ -983,6 +984,8 @@ static void fm6_patches(uint8_t *game)
 
 static void hook_apply_patches(void *image, const void *options)
 {
+    /* allocators ociosos do pool do Azimuth: no FM6 nunca destruidos (stutters, 17_fm6.txt PASSO 67) */
+    cmdalloc_age_patch(dbg_int(L"AllocatorMaxAgeMs", is_fm6() ? -1 : 0));
     if (is_fm5()) {
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM5 em %p, sites do FH2 pulados", game);
