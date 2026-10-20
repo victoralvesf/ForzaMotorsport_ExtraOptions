@@ -1387,6 +1387,107 @@ static void fq_install(void)
     wlog("stutter: limitador da fila do FM6 medido (SwitchToThread game+%#x)", FQ_IAT);
 }
 
+/* ---- perfil continuo (PASSO 72): threads do Azimuth com nome em QP_NAMES amostradas a cada volta do amostrador
+ * (~2 ms; so se rodaram desde a volta anterior): RIP em baldes de 16 bytes e o 1o retorno em codigo do jogo/azimuth/
+ * proxy (quem chamou o driver). A cada 10 s (vz_poll) "stutter: perfil '<nome>'": % por modulo, RIPs e chamadores. */
+#define QP_N 2
+#define QP_RIPS 1024
+#define QP_CALLERS 256
+static const char *const QP_NAMES[QP_N] = { "Azimuth queue", "Azimuth worker" };
+static struct { DWORD tid; ULONG64 c; } qp_prev[ST_THREADS];   /* por indice em thr (conferido pelo tid) */
+static struct {
+    uint32_t nrip, ncall, n, lost;
+    st_bin rips[QP_RIPS], callers[QP_CALLERS];
+} qp[QP_N];
+
+static void qp_tick(void)
+{
+    static uint64_t stack[ST_STACK_QW];
+    uint32_t i, k;
+    for (i = 0; i < nthr; i++) {
+        st_thread *t = &thr[i];
+        CONTEXT ctx;
+        ULONG64 c = 0;
+        uintptr_t ret[1] = { 0 };
+        uint32_t nq = 0;
+        int have;
+        for (k = 0; k < QP_N && strcmp(t->name, QP_NAMES[k]); k++) {}
+        if (k == QP_N) continue;
+        if (!QueryThreadCycleTime(t->h, &c)) continue;
+        if (qp_prev[i].tid != t->tid || (double)(c - qp_prev[i].c) < tsc_per_ms * 2 * 0.3) {   /* nova ou quase nao rodou */
+            qp_prev[i].tid = t->tid;
+            qp_prev[i].c = c;
+            continue;
+        }
+        qp_prev[i].c = c;
+        if (SuspendThread(t->h) == (DWORD)-1) continue;
+        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+        have = GetThreadContext(t->h, &ctx) && (nq = st_read_stack((uintptr_t)ctx.Rsp, stack)) != 0;
+        ResumeThread(t->h);
+        if (!have) continue;
+        st_scan_returns(stack, nq, (const uintptr_t (*)[2])code_ranges, ncode_ranges, ret, 1);
+        qp[k].n++;
+        if (!st_hist_add(qp[k].rips, QP_RIPS, &qp[k].nrip, (uintptr_t)ctx.Rip & ~(uintptr_t)(ST_BUCKET - 1))) qp[k].lost++;
+        st_hist_add(qp[k].callers, QP_CALLERS, &qp[k].ncall, ret[0]);
+    }
+}
+
+/* modulo de um endereco: base (0 = fora de modulo) */
+static uintptr_t qp_module(uintptr_t a)
+{
+    HMODULE m = NULL;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCWSTR)a, &m))
+        return (uintptr_t)m;
+    return 0;
+}
+
+static void qp_report(void)
+{
+    char buf[2400], one[96], path[MAX_PATH], *base;
+    uint32_t k, i, nm;
+    st_bin mods[32];
+    int len;
+    for (k = 0; k < QP_N; k++) {
+        double n = qp[k].n;
+        if (!qp[k].n) continue;
+        nm = 0;
+        for (i = 0; i < qp[k].nrip; i++) {
+            uintptr_t m = qp_module(qp[k].rips[i].key);
+            uint32_t j;
+            for (j = 0; j < nm && mods[j].key != m; j++) {}
+            if (j == nm) { if (nm == 32) continue; mods[nm].key = m; mods[nm++].n = 0; }
+            mods[j].n += qp[k].rips[i].n;
+        }
+        st_hist_sort(mods, nm);
+        len = sprintf(buf, "stutter: perfil '%s' 10 s: %u amostras (%u fora da tabela); modulos:", QP_NAMES[k], qp[k].n, qp[k].lost);
+        for (i = 0; i < nm && i < 8; i++) {
+            if (!mods[i].key) strcpy(path, "?");
+            else if ((HMODULE)mods[i].key == self_mod) strcpy(path, "winmm");
+            else if ((uint8_t *)mods[i].key == g_base) strcpy(path, "azimuth");
+            else GetModuleFileNameA((HMODULE)mods[i].key, path, sizeof path);
+            base = strrchr(path, '\\');
+            len += sprintf(buf + len, " %s %.0f%%", base ? base + 1 : path, mods[i].n * 100 / n);
+        }
+        wlog("%s", buf);
+        st_hist_sort(qp[k].rips, qp[k].nrip);
+        len = sprintf(buf, "stutter: perfil '%s' RIPs:", QP_NAMES[k]);
+        for (i = 0; i < qp[k].nrip && i < 16 && len < 2200; i++) {
+            st_label_any(one, qp[k].rips[i].key);
+            len += sprintf(buf + len, "%s %.1f%%;", one, qp[k].rips[i].n * 100 / n);
+        }
+        wlog("%s", buf);
+        st_hist_sort(qp[k].callers, qp[k].ncall);
+        len = sprintf(buf, "stutter: perfil '%s' 1o retorno em jogo/azimuth/proxy:", QP_NAMES[k]);
+        for (i = 0; i < qp[k].ncall && i < 16 && len < 2200; i++) {
+            if (qp[k].callers[i].key) st_label_any(one, qp[k].callers[i].key);
+            else strcpy(one, " nenhum");
+            len += sprintf(buf + len, "%s %.1f%%;", one, qp[k].callers[i].n * 100 / n);
+        }
+        wlog("%s", buf);
+        qp[k].n = qp[k].nrip = qp[k].ncall = qp[k].lost = 0;
+    }
+}
+
 /* indices dos ate max maiores valores, do maior para o menor (zeros fora); devolve quantos */
 uint32_t vz_top(const uint64_t *v, uint32_t n, uint32_t *idx, uint32_t max)
 {
@@ -1453,6 +1554,7 @@ static void vz_poll(LONG64 now)
         }
     }
     wlog("%s", buf);
+    qp_report();
     if (!opens) return;
     {
         uint64_t cnt[VZ_ORIGINS];
@@ -1506,6 +1608,7 @@ static DWORD WINAPI st_sampler(void *arg)
         fq_poll(now);
         sg_poll(now);
         vz_poll(now);
+        if (ncode_ranges) qp_tick();
         if (!ncode_ranges) {   /* depois do 1o Present o jogo ja esta carregado */
             uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
             if (game) { code_ranges[ncode_ranges][0] = (uintptr_t)game; code_ranges[ncode_ranges++][1] = (uintptr_t)game + 0x8000000; }

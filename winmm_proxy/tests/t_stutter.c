@@ -405,3 +405,21 @@ TEST(stutter_throughput_counters)
     st_on = on;
     vz_opens = vz_draws = 0;
 }
+
+/* perfil continuo (PASSO 72): sem amostras nao escreve nada; com amostras zera a janela depois do relatorio */
+TEST(stutter_queue_profile_report)
+{
+    log_capture();
+    qp_report();
+    CHECK(!log_has("stutter: perfil"));
+    qp[0].n = 2;
+    st_hist_add(qp[0].rips, QP_RIPS, &qp[0].nrip, 0x10);
+    st_hist_add(qp[0].rips, QP_RIPS, &qp[0].nrip, 0x10);
+    st_hist_add(qp[0].callers, QP_CALLERS, &qp[0].ncall, 0);
+    st_hist_add(qp[0].callers, QP_CALLERS, &qp[0].ncall, 0);
+    qp_report();
+    CHECK(log_has("stutter: perfil 'Azimuth queue' 10 s: 2 amostras"));
+    CHECK(log_has("? 100%"));
+    CHECK(log_has("nenhum 100.0%"));
+    CHECK(!qp[0].n && !qp[0].nrip && !qp[0].ncall);
+}
