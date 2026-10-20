@@ -687,9 +687,103 @@ static HRESULT STDMETHODCALLTYPE st_heap(ID3D12Device *d, const D3D12_HEAP_DESC 
     return hr;
 }
 
+/* ---- tempo por metodo da command list na thread 'Azimuth queue' (PASSO 73): a vtable da lista (a mesma de todas)
+ * e trocada no 1o ExecuteCommandLists, por cima dos ganchos do gpuguard; so a thread da fila (vz_qtid, achada pelo
+ * nome no qp_tick) soma. Linha "stutter: lista na fila 10 s" no vz_poll. ---- */
+enum { LT_RESET, LT_CLOSE, LT_HEAPS, LT_DRAW, LT_DRAWIDX, LT_PSO, LT_BARRIER, LT_GRS, LT_GTAB, LT_OMRT, LT_VB, LT_GCBV, LT_COPYBUF,
+       LT_COPYTEX, LT_CLEAR, LT_N };
+static const char *const lt_names[LT_N] = { "Reset", "Close", "SetDescriptorHeaps", "DrawInstanced", "DrawIndexedInstanced",
+                                            "SetPipelineState", "ResourceBarrier", "SetGraphicsRootSignature",
+                                            "SetGraphicsRootDescriptorTable", "OMSetRenderTargets", "IASetVertexBuffers",
+                                            "SetGraphicsRootConstantBufferView", "CopyBufferRegion", "CopyTextureRegion",
+                                            "ClearRenderTargetView" };
+static volatile DWORD vz_qtid;
+static volatile LONG lt_n[LT_N];
+static volatile LONG64 lt_ticks[LT_N];
+
+static void lt_add(int k, LONG64 t0)
+{
+    if (GetCurrentThreadId() != vz_qtid) return;
+    lt_ticks[k] += qpc() - t0;     /* uma thread so (a fila): sem Interlocked */
+    lt_n[k]++;
+}
+
+#define LT_WRAP(name, k, params, args)     static void (STDMETHODCALLTYPE *lt_real_##name) params;     static void STDMETHODCALLTYPE lt_##name params { LONG64 t = qpc(); lt_real_##name args; lt_add(k, t); }
+typedef ID3D12GraphicsCommandList GCL;
+static HRESULT (STDMETHODCALLTYPE *lt_real_Reset)(GCL *, ID3D12CommandAllocator *, ID3D12PipelineState *);
+static HRESULT STDMETHODCALLTYPE lt_Reset(GCL *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
+{ LONG64 t = qpc(); HRESULT hr = lt_real_Reset(l, a, ps); lt_add(LT_RESET, t); return hr; }
+static HRESULT (STDMETHODCALLTYPE *lt_real_Close)(GCL *);
+static HRESULT STDMETHODCALLTYPE lt_Close(GCL *l)
+{ LONG64 t = qpc(); HRESULT hr = lt_real_Close(l); lt_add(LT_CLOSE, t); return hr; }
+LT_WRAP(Heaps, LT_HEAPS, (GCL *l, UINT n, ID3D12DescriptorHeap *const *h), (l, n, h))
+LT_WRAP(Draw, LT_DRAW, (GCL *l, UINT a, UINT b, UINT c, UINT d), (l, a, b, c, d))
+LT_WRAP(DrawIdx, LT_DRAWIDX, (GCL *l, UINT a, UINT b, UINT c, INT d, UINT e), (l, a, b, c, d, e))
+LT_WRAP(Pso, LT_PSO, (GCL *l, ID3D12PipelineState *p), (l, p))
+LT_WRAP(Barrier, LT_BARRIER, (GCL *l, UINT n, const D3D12_RESOURCE_BARRIER *b), (l, n, b))
+LT_WRAP(Grs, LT_GRS, (GCL *l, ID3D12RootSignature *r), (l, r))
+LT_WRAP(Gtab, LT_GTAB, (GCL *l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE h), (l, i, h))
+LT_WRAP(OmRt, LT_OMRT, (GCL *l, UINT n, const D3D12_CPU_DESCRIPTOR_HANDLE *r, BOOL s, const D3D12_CPU_DESCRIPTOR_HANDLE *d), (l, n, r, s, d))
+LT_WRAP(Vb, LT_VB, (GCL *l, UINT s, UINT n, const D3D12_VERTEX_BUFFER_VIEW *v), (l, s, n, v))
+LT_WRAP(Gcbv, LT_GCBV, (GCL *l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS a), (l, i, a))
+LT_WRAP(CopyBuf, LT_COPYBUF, (GCL *l, ID3D12Resource *d, UINT64 o, ID3D12Resource *s, UINT64 so, UINT64 n), (l, d, o, s, so, n))
+LT_WRAP(CopyTex, LT_COPYTEX, (GCL *l, const D3D12_TEXTURE_COPY_LOCATION *d, UINT x, UINT y, UINT z, const D3D12_TEXTURE_COPY_LOCATION *s,
+                              const D3D12_BOX *b), (l, d, x, y, z, s, b))
+LT_WRAP(Clear, LT_CLEAR, (GCL *l, D3D12_CPU_DESCRIPTOR_HANDLE r, const FLOAT c[4], UINT n, const D3D12_RECT *rc), (l, r, c, n, rc))
+
+static void lt_hook(ID3D12CommandList *cl)
+{
+    static volatile LONG done;
+    GCL *l = NULL;
+    ID3D12GraphicsCommandListVtbl *v;
+    if (done || !cl || InterlockedCompareExchange(&done, 1, 0)) return;
+    if (FAILED(cl->lpVtbl->QueryInterface(cl, &IID_ID3D12GraphicsCommandList, (void **)&l))) return;
+    v = l->lpVtbl;
+    vt_swap((void **)&v->Reset, lt_Reset, (void **)&lt_real_Reset);
+    vt_swap((void **)&v->Close, lt_Close, (void **)&lt_real_Close);
+    vt_swap((void **)&v->SetDescriptorHeaps, lt_Heaps, (void **)&lt_real_Heaps);
+    vt_swap((void **)&v->DrawInstanced, lt_Draw, (void **)&lt_real_Draw);
+    vt_swap((void **)&v->DrawIndexedInstanced, lt_DrawIdx, (void **)&lt_real_DrawIdx);
+    vt_swap((void **)&v->SetPipelineState, lt_Pso, (void **)&lt_real_Pso);
+    vt_swap((void **)&v->ResourceBarrier, lt_Barrier, (void **)&lt_real_Barrier);
+    vt_swap((void **)&v->SetGraphicsRootSignature, lt_Grs, (void **)&lt_real_Grs);
+    vt_swap((void **)&v->SetGraphicsRootDescriptorTable, lt_Gtab, (void **)&lt_real_Gtab);
+    vt_swap((void **)&v->OMSetRenderTargets, lt_OmRt, (void **)&lt_real_OmRt);
+    vt_swap((void **)&v->IASetVertexBuffers, lt_Vb, (void **)&lt_real_Vb);
+    vt_swap((void **)&v->SetGraphicsRootConstantBufferView, lt_Gcbv, (void **)&lt_real_Gcbv);
+    vt_swap((void **)&v->CopyBufferRegion, lt_CopyBuf, (void **)&lt_real_CopyBuf);
+    vt_swap((void **)&v->CopyTextureRegion, lt_CopyTex, (void **)&lt_real_CopyTex);
+    vt_swap((void **)&v->ClearRenderTargetView, lt_Clear, (void **)&lt_real_Clear);
+    l->lpVtbl->Release(l);
+    wlog("stutter: tempo dos metodos da command list na thread 'Azimuth queue' medido");
+}
+
+uint32_t vz_top(const uint64_t *v, uint32_t n, uint32_t *idx, uint32_t max);
+
+/* " Reset 690 4.1 ms (5.9 us)," por quadro, so metodos chamados, do mais caro ao mais barato */
+int lt_format(char *buf, int cap, double frames)
+{
+    uint64_t t[LT_N];
+    uint32_t idx[LT_N], n, i;
+    int len = 0;
+    double total = 0;
+    for (i = 0; i < LT_N; i++) { t[i] = (uint64_t)lt_ticks[i]; total += ms_of(lt_ticks[i]); }
+    n = vz_top(t, LT_N, idx, LT_N);
+    len += snprintf(buf + len, cap - len, "stutter: lista na fila 10 s (por quadro): medidos %.2f ms;", total / frames);
+    for (i = 0; i < n && len < cap - 100; i++) {
+        uint32_t k = idx[i];
+        len += snprintf(buf + len, cap - len, " %s %.0f %.2f ms (%.1f us);", lt_names[k], lt_n[k] / frames, ms_of(lt_ticks[k]) / frames,
+                        lt_n[k] ? ms_of(lt_ticks[k]) * 1000 / lt_n[k] : 0);
+    }
+    for (i = 0; i < LT_N; i++) { lt_ticks[i] = 0; lt_n[i] = 0; }
+    return n ? len : 0;
+}
+
 static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
 {
-    LONG64 t = qpc(), dt;
+    LONG64 t, dt;
+    if (n) lt_hook(l[0]);
+    t = qpc();
     real_ecl(q, n, l);
     dt = qpc() - t;
     st_count(ST_ECL, dt);
@@ -1413,6 +1507,7 @@ static void qp_tick(void)
         int have;
         for (k = 0; k < QP_N && strcmp(t->name, QP_NAMES[k]); k++) {}
         if (k == QP_N) continue;
+        if (k == 0) vz_qtid = t->tid;
         if (!QueryThreadCycleTime(t->h, &c)) continue;
         if (qp_prev[i].tid != t->tid || (double)(c - qp_prev[i].c) < tsc_per_ms * 2 * 0.3) {   /* nova ou quase nao rodou */
             qp_prev[i].tid = t->tid;
@@ -1554,6 +1649,7 @@ static void vz_poll(LONG64 now)
         }
     }
     wlog("%s", buf);
+    if (lt_format(buf, sizeof buf, f)) wlog("%s", buf);
     qp_report();
     if (!opens) return;
     {

@@ -423,3 +423,26 @@ TEST(stutter_queue_profile_report)
     CHECK(log_has("nenhum 100.0%"));
     CHECK(!qp[0].n && !qp[0].nrip && !qp[0].ncall);
 }
+
+/* tempo por metodo na fila (PASSO 73): so a thread da fila soma; formato por quadro, do mais caro, e zera */
+TEST(stutter_queue_list_methods)
+{
+    char buf[1024];
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    st_freq = f;
+    vz_qtid = GetCurrentThreadId() + 1;
+    lt_add(LT_RESET, qpc());
+    CHECK_EQ(lt_n[LT_RESET], 0);
+    CHECK(!lt_format(buf, sizeof buf, 1));
+    vz_qtid = GetCurrentThreadId();
+    lt_add(LT_CLOSE, qpc() - f.QuadPart / 1000);           /* ~1 ms */
+    lt_add(LT_RESET, qpc() - f.QuadPart / 500);            /* ~2 ms */
+    lt_add(LT_RESET, qpc() - f.QuadPart / 500);
+    CHECK(lt_format(buf, sizeof buf, 2) > 0);
+    CHECK(strstr(buf, "stutter: lista na fila 10 s (por quadro): medidos 2.5"));
+    CHECK(strstr(buf, " Reset 1 2.0") && strstr(buf, " Close 0 0.5"));
+    CHECK(strstr(buf, "Reset") < strstr(buf, "Close"));
+    CHECK(!lt_n[LT_RESET] && !lt_ticks[LT_CLOSE]);
+    vz_qtid = 0;
+}
