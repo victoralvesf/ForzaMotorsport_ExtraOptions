@@ -213,6 +213,8 @@ static rk_max rk_top[RK_N];
 static SRWLOCK rk_lock = SRWLOCK_INIT;
 
 uint64_t st_res_bytes(const D3D12_RESOURCE_DESC *d);
+void tl_reset(void);
+int tl_format(char *buf, int cap);
 
 void rk_note(int k, LONG64 ticks, const D3D12_RESOURCE_DESC *rd, uint64_t size, uint32_t flags)
 {
@@ -457,6 +459,11 @@ static void frame_tick(LONG64 before, LONG64 after)
         mean10 /= sum_n;
         wlog("stutter: 10 s: %u quadros, media %.1f ms, p99 %.1f, max %.1f, %u picos", sum_n, mean10,
              st_percentile(sum_frames, sum_n, 99), sum_max, sum_spikes);
+        {
+            char tb[512];
+            if (tl_format(tb, sizeof tb)) wlog("%s", tb);
+            tl_reset();
+        }
         sum_n = sum_spikes = 0; sum_max = 0; sum_t0 = after;
     }
     frame_start = after;
@@ -671,11 +678,84 @@ static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12Comman
 static void (STDMETHODCALLTYPE *real_tiles)(ID3D12CommandQueue *, ID3D12Resource *, UINT, const D3D12_TILED_RESOURCE_COORDINATE *,
                                             const D3D12_TILE_REGION_SIZE *, ID3D12Heap *, UINT, const D3D12_TILE_RANGE_FLAGS *,
                                             const UINT *, const UINT *, D3D12_TILE_MAPPING_FLAGS);
+/* PASSO 68: perfil das UpdateTileMappings em janelas de 10 s (linha "stutter: tiles 10 s" junto do resumo) - flags
+ * do Azimuth, desmapeamentos, tiles, recursos distintos (1o mapeamento x remapeamento) e quem chama. Experimento
+ * (debug.ini TileNoHazard=1): D3D12_TILE_MAPPING_FLAG_NO_HAZARD nos mapeamentos (heap != NULL), para o driver nao
+ * sincronizar a fila a cada chamada (GPU longa depois das rajadas de streaming, PASSOS 63-67). */
+#define TL_SEEN 16384
+#define TL_CALLERS 4
+int tl_nohazard;
+static struct {
+    uint32_t calls, flagged, unmaps, nulls, regions, distinct, forced;
+    uint64_t tiles;
+    void *seen[TL_SEEN];
+    struct { void *ret; uint32_t n; } callers[TL_CALLERS];
+    uint32_t other_callers;
+} tl;
+static SRWLOCK tl_lock = SRWLOCK_INIT;
+
+void tl_reset(void)
+{
+    AcquireSRWLockExclusive(&tl_lock);
+    memset(&tl, 0, sizeof tl);
+    ReleaseSRWLockExclusive(&tl_lock);
+}
+
+/* devolve as flags que vao para o driver */
+D3D12_TILE_MAPPING_FLAGS tl_note(void *res, UINT nr, const D3D12_TILE_REGION_SIZE *sz, ID3D12Heap *h, UINT ng,
+                                 const D3D12_TILE_RANGE_FLAGS *rf, const UINT *rc, D3D12_TILE_MAPPING_FLAGS fl, void *ret)
+{
+    UINT i;
+    uint32_t slot = (uint32_t)(((uintptr_t)res >> 4) * 2654435761u) % TL_SEEN, k;
+    AcquireSRWLockExclusive(&tl_lock);
+    tl.calls++;
+    tl.regions += nr;
+    if (fl) tl.flagged++;
+    if (!h) tl.unmaps++;
+    for (i = 0; i < ng; i++) {
+        if (rf && (rf[i] & D3D12_TILE_RANGE_FLAG_NULL)) tl.nulls++;
+        tl.tiles += rc ? rc[i] : 1;
+    }
+    if (!ng) for (i = 0; i < nr; i++) tl.tiles += sz ? sz[i].NumTiles : 1;
+    for (k = 0; k < TL_SEEN; k++, slot = (slot + 1) % TL_SEEN) {
+        if (tl.seen[slot] == res) break;
+        if (!tl.seen[slot]) { tl.seen[slot] = res; tl.distinct++; break; }
+    }
+    for (k = 0; k < TL_CALLERS; k++) {
+        if (tl.callers[k].ret == ret) { tl.callers[k].n++; break; }
+        if (!tl.callers[k].ret) { tl.callers[k].ret = ret; tl.callers[k].n = 1; break; }
+    }
+    if (k == TL_CALLERS) tl.other_callers++;
+    if (tl_nohazard && h && !(fl & D3D12_TILE_MAPPING_FLAG_NO_HAZARD)) { fl |= D3D12_TILE_MAPPING_FLAG_NO_HAZARD; tl.forced++; }
+    ReleaseSRWLockExclusive(&tl_lock);
+    return fl;
+}
+
+/* "stutter: tiles 10 s: 812 chamadas, 1300 regioes, 5120 tiles, 640 recursos distintos, flags 0 em 812, ..." */
+int tl_format(char *buf, int cap)
+{
+    int len, k;
+    if (!tl.calls) return 0;
+    len = snprintf(buf, cap, "stutter: tiles 10 s: %u chamadas, %u regioes, %llu tiles, %u recursos distintos, %u com flags, "
+                   "%u sem heap, %u faixas NULL, %u NO_HAZARD forcados; chamadores:", tl.calls, tl.regions,
+                   (unsigned long long)tl.tiles, tl.distinct, tl.flagged, tl.unmaps, tl.nulls, tl.forced);
+    for (k = 0; k < TL_CALLERS && tl.callers[k].ret && len < cap - 40; k++) {
+        char a[48];
+        st_label(a, tl.callers[k].ret);
+        if (!a[0]) wsprintfA(a, " %p", tl.callers[k].ret);
+        len += snprintf(buf + len, cap - len, "%s x%u", a, tl.callers[k].n);
+    }
+    if (tl.other_callers && len < cap - 24) len += snprintf(buf + len, cap - len, " outros x%u", tl.other_callers);
+    return len;
+}
+
 static void STDMETHODCALLTYPE st_tiles(ID3D12CommandQueue *q, ID3D12Resource *res, UINT nr, const D3D12_TILED_RESOURCE_COORDINATE *co,
                                        const D3D12_TILE_REGION_SIZE *sz, ID3D12Heap *h, UINT ng, const D3D12_TILE_RANGE_FLAGS *rf,
                                        const UINT *hs, const UINT *rc, D3D12_TILE_MAPPING_FLAGS fl)
 {
-    LONG64 t = qpc();
+    LONG64 t;
+    fl = tl_note(res, nr, sz, h, ng, rf, rc, fl, __builtin_return_address(0));
+    t = qpc();
     real_tiles(q, res, nr, co, sz, h, ng, rf, hs, rc, fl);
     rk_note(RK_TILES, qpc() - t, NULL, 0, nr);
 }
@@ -1314,6 +1394,8 @@ void stutter_install(void)
     st_on = dbg_int(L"StutterLog", 0) > 0;
     if (!st_on) return;
     dr_on = dbg_int(L"DeferRelease", 0) > 0;
+    tl_nohazard = dbg_int(L"TileNoHazard", 0) > 0;
+    if (tl_nohazard) wlog("stutter: TileNoHazard=1 (UpdateTileMappings com D3D12_TILE_MAPPING_FLAG_NO_HAZARD)");
     if (dr_on) CloseHandle(CreateThread(NULL, 0, dr_drain, NULL, 0, NULL));
     QueryPerformanceFrequency(&st_freq);
     {

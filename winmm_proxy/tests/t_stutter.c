@@ -295,3 +295,29 @@ TEST(stutter_cmdalloc_age_patch)
     CHECK(cmdalloc_age_patch(-1));
     CHECK(!memcmp(az + 0xdeadd, "\x48\x3d\xff\xff\xff\x7f", 6));
 }
+
+/* perfil das UpdateTileMappings (PASSO 68): contagens, recursos distintos, chamadores; NO_HAZARD so com TileNoHazard
+ * e so em mapeamento (heap != NULL) */
+TEST(stutter_tile_profile)
+{
+    D3D12_TILE_REGION_SIZE sz = { 4, FALSE, 0, 0, 0 };
+    D3D12_TILE_RANGE_FLAGS rf[2] = { D3D12_TILE_RANGE_FLAG_NONE, D3D12_TILE_RANGE_FLAG_NULL };
+    UINT rc[2] = { 3, 5 };
+    ID3D12Heap *heap = (ID3D12Heap *)(uintptr_t)0x1000;
+    void *r1 = (void *)(uintptr_t)0x10000, *r2 = (void *)(uintptr_t)0x20000;
+    void *c1 = g_base + 0xe3d00, *c2 = g_base + 0xe3e00;
+    char buf[512];
+    tl_reset();
+    CHECK_EQ(tl_format(buf, sizeof buf), 0);
+    tl_nohazard = 0;
+    CHECK_EQ(tl_note(r1, 1, &sz, heap, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c1), D3D12_TILE_MAPPING_FLAG_NONE);
+    CHECK_EQ(tl_note(r1, 1, &sz, NULL, 2, rf, rc, D3D12_TILE_MAPPING_FLAG_NONE, c1), D3D12_TILE_MAPPING_FLAG_NONE);
+    tl_nohazard = 1;
+    CHECK_EQ(tl_note(r2, 2, NULL, heap, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c2), D3D12_TILE_MAPPING_FLAG_NO_HAZARD);
+    CHECK_EQ(tl_note(r2, 1, &sz, NULL, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c2), D3D12_TILE_MAPPING_FLAG_NONE);
+    tl_nohazard = 0;
+    tl_format(buf, sizeof buf);
+    CHECK(strstr(buf, "stutter: tiles 10 s: 4 chamadas, 5 regioes, 18 tiles, 2 recursos distintos, 0 com flags, 2 sem heap, "
+                      "1 faixas NULL, 1 NO_HAZARD forcados; chamadores: azimuth+0xe3d00 x2 azimuth+0xe3e00 x2") != NULL);
+    tl_reset();
+}
