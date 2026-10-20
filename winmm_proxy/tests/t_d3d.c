@@ -1062,6 +1062,7 @@ TEST(fm6_resource_batch_records_objects)
     fm6_batch b = { cb, srv, sizeof cb, sizeof srv };
     memset(cb, 0xee, sizeof cb);
     fake_azimuth(0);
+    fm6_batch_hold = 0;                                       /* objetos sem vtable */
     fm6_batch_add_cb(&b, o[0], 0);
     fm6_batch_add_cb(&b, o[3], 3);
     fm6_batch_add_cb(&b, o[4], 14);                           /* estagio 1 (HS), slot 0 */
@@ -1105,6 +1106,51 @@ TEST(fm6_resource_batch_records_objects)
     fm6_SetFastResourcesFromBatch(ctx, cb + 4 * 20, 20);      /* registro nao gravado: nada */
     CHECK_EQ(batch_calls, 0);
     CHECK(log_has("registro desconhecido 0xeeeeeeee"));
+}
+
+/* objeto com contagem de referencias (AddRef/Release nos slots 1/2) */
+typedef struct { void **vt; LONG refs; } fake_ref_obj;
+static ULONG fake_ref_addref(void *o) { return ++((fake_ref_obj *)o)->refs; }
+static ULONG fake_ref_release(void *o) { return --((fake_ref_obj *)o)->refs; }
+static void *fake_ref_vt[3] = { NULL, (void *)fake_ref_addref, (void *)fake_ref_release };
+
+TEST(fm6_resource_batch_holds_srv_refs)
+{
+    static uint8_t srv[4 * 36];
+    static void *az_tab[0x10e], *ctx[1] = { az_tab };
+    fake_ref_obj a = { fake_ref_vt, 1 }, b2 = { fake_ref_vt, 1 };
+    fm6_batch b = { NULL, srv, 0, sizeof srv };
+    fake_azimuth(0);
+    fm6_batch_hold = 1;
+    memset(srv, 0, sizeof srv);
+    fm6_batch_add_srv(&b, &a, 1);
+    CHECK_EQ(a.refs, 2);                                      /* o jogo + o batch */
+    fm6_batch_add_srv(&b, &a, 2);
+    CHECK_EQ(a.refs, 3);                                      /* dois registros */
+    memcpy(srv + 1 * 36, "оооо", 4);               /* lixo no registro velho: nao e lido */
+    fm6_batch_add_srv(&b, &b2, 1);                            /* regravado: solta o anterior */
+    CHECK_EQ(a.refs, 2);
+    CHECK_EQ(b2.refs, 2);
+    CHECK_HEX(srv + 36, "0185baf6");
+    CHECK(*(void **)(srv + 36 + 4) == &b2);
+    fm6_batch_add_srv(&b, NULL, 2);                           /* nulo: solta o anterior, nada a segurar */
+    CHECK_EQ(a.refs, 1);
+    az_tab[0x43] = (void *)fake_batch_43;
+    a.refs = 1;
+    fm6_batch_add_srv(&b, &a, 3);
+    a.refs--;                                                 /* o jogo solta a view */
+    batch_calls = 0;
+    log_capture();
+    fm6_SetFastResourcesFromBatch(ctx, srv + 3 * 36, 36);
+    CHECK(batch_calls == 1 && batch_obj[0] == &a);
+    CHECK_EQ(a.refs, 1);                                      /* a sonda devolve o que pegou */
+    CHECK(log_has("ja solto pelo jogo"));
+    batch_calls = 0;
+    log_capture();
+    fm6_SetFastResourcesFromBatch(ctx, srv + 1 * 36, 36);     /* b2 ainda do jogo: sem aviso */
+    CHECK(batch_calls == 1 && batch_obj[0] == &b2);
+    CHECK(!log_has("ja solto pelo jogo"));
+    fm6_batch_hold = 1;
 }
 
 TEST(fm6_resource_batch_builders_patched)
@@ -1327,6 +1373,7 @@ TEST(fm6_nested_bundle_inherits_om)
     fake_cl *b, *b2, *part, *f;
     int i;
     fake_azimuth(0);
+    fm6_batch_hold = 0;                     /* aqui so a heranca: o batch nao segura referencia */
     for (i = 0; i < 0x100; i++) dev_vt[i] = (void *)(uintptr_t)(0x2000 + i);
     dev_vt[0x1b] = dev_vt[0x2d] = dev_vt[0x44] = (void *)inh_defctx;
     fm6_device_fixups(dev_vt);
@@ -1470,6 +1517,7 @@ TEST(fm6_nested_bundle_inherits_om)
     ((exec_fn)def[0x3b])(j, b, TRUE);
     CHECK(rtv.ref == 1);
     ((fin_fn)def[0x73])(j, FALSE, &out);
+    fm6_batch_hold = 1;
 }
 
 /* aliasing da ESRAM no FM6 (17_fm6.txt PASSO 44): cena em cor 2x + prof a; o compute (W/8, H/8, 1) le a prof b e o

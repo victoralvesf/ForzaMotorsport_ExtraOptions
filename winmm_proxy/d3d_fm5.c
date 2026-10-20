@@ -1930,6 +1930,7 @@ extern void write_mem(void *dst, const void *src, size_t len);
 extern uint8_t *alloc_near(uint8_t *mod, size_t size);
 extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
 extern void abs_jmp(uint8_t *at, const void *to, size_t len);
+extern int dbg_int(const wchar_t *key, int def);
 
 static int fm6_ctx_slot(int s)
 {
@@ -2159,12 +2160,79 @@ static void fm6_batch_add_cb(fm6_batch *b, void *buf, uint32_t i)
     fm6_batch_put(b->cb + i * FM6_BATCH_CB_SIZE, FM6_BATCH_MAGIC | fm6_batch_stage[i / 14] << 8 | i % 14, buf);
 }
 
+/* PASSO 79: no console o registro guarda a COPIA do T#, entao o jogo solta a view logo depois e o batch continua
+   valido; aqui o registro guarda o objeto do Azimuth, que morre na ultima Release (memoria liberada na hora, slots de
+   descritor devolvidos pelo reaper e reaproveitados). Com BatchHoldRefs (FM6 padrao 1, debug.ini) o batch segura
+   uma referencia ao SRV: tabela lateral endereco do registro -> objeto (o registro velho nao e lido: memoria nova
+   do jogo pode ter lixo com o magic); regravar o registro solta o anterior. */
+int fm6_batch_hold = 1;
+typedef struct { const uint8_t *rec; void *obj; } fm6_hold_ent;
+static fm6_hold_ent *fm6_hold_tab;
+static size_t fm6_hold_cap, fm6_hold_n;
+static SRWLOCK fm6_hold_lock = SRWLOCK_INIT;
+static volatile LONG fm6_batch_orphans, fm6_batch_probes;
+
+static size_t fm6_hold_slot(fm6_hold_ent *t, size_t cap, const uint8_t *rec)
+{
+    size_t h = ((uintptr_t)rec >> 2) * 0x9e3779b97f4a7c15ull & (cap - 1);
+    while (t[h].rec && t[h].rec != rec) h = (h + 1) & (cap - 1);
+    return h;
+}
+
+/* guarda obj para o registro rec; devolve o que ele segurava (NULL se nada); 0 = sem memoria (nao guarda) */
+static int fm6_hold_swap(const uint8_t *rec, void *obj, void **old)
+{
+    size_t h;
+    *old = NULL;
+    AcquireSRWLockExclusive(&fm6_hold_lock);
+    if ((fm6_hold_n + 1) * 2 > fm6_hold_cap) {
+        size_t cap = fm6_hold_cap ? fm6_hold_cap * 2 : 4096, k;
+        fm6_hold_ent *t = calloc(cap, sizeof *t);
+        if (!t) { ReleaseSRWLockExclusive(&fm6_hold_lock); return 0; }
+        for (k = 0; k < fm6_hold_cap; k++)
+            if (fm6_hold_tab[k].rec) t[fm6_hold_slot(t, cap, fm6_hold_tab[k].rec)] = fm6_hold_tab[k];
+        free(fm6_hold_tab);
+        fm6_hold_tab = t;
+        fm6_hold_cap = cap;
+    }
+    h = fm6_hold_slot(fm6_hold_tab, fm6_hold_cap, rec);
+    if (!fm6_hold_tab[h].rec) { fm6_hold_tab[h].rec = rec; fm6_hold_n++; }
+    *old = fm6_hold_tab[h].obj;
+    fm6_hold_tab[h].obj = obj;
+    ReleaseSRWLockExclusive(&fm6_hold_lock);
+    return 1;
+}
+
 /* game+0xda9cac(batch, srv, i) */
 static void fm6_batch_add_srv(fm6_batch *b, void *srv, uint32_t i)
 {
+    uint8_t *rec;
+    void *old;
     if (i * FM6_BATCH_SRV_SIZE >= b->srv_size || i >> 7 >= 4) return;
-    fm6_batch_put(b->srv + i * FM6_BATCH_SRV_SIZE,
-                  FM6_BATCH_MAGIC | FM6_BATCH_SRV_FLAG | fm6_batch_stage[i >> 7] << 8 | (i & 0x7f), srv);
+    rec = b->srv + i * FM6_BATCH_SRV_SIZE;
+    fm6_batch_put(rec, FM6_BATCH_MAGIC | FM6_BATCH_SRV_FLAG | fm6_batch_stage[i >> 7] << 8 | (i & 0x7f), srv);
+    if (!fm6_batch_hold) return;
+    if (srv) ((ULONG (*)(void *))(*(void ***)srv)[1])(srv);
+    if (!fm6_hold_swap(rec, srv, &old)) {
+        if (srv) ((ULONG (*)(void *))(*(void ***)srv)[2])(srv);
+        return;
+    }
+    if (old) ((ULONG (*)(void *))(*(void ***)old)[2])(old);
+}
+
+/* com BatchHoldRefs: SRV aplicado do batch que so a nossa referencia segura (AddRef devolve 2) = o jogo ja o soltou
+   (sem a referencia seria objeto liberado). Limite inferior: referencias de listas gravadas tambem contam. */
+static void fm6_batch_probe(const uint8_t *rec, void *obj)
+{
+    ULONG c = ((ULONG (*)(void *))(*(void ***)obj)[1])(obj);
+    LONG k;
+    ((ULONG (*)(void *))(*(void ***)obj)[2])(obj);
+    if (InterlockedIncrement(&fm6_batch_probes) <= 4)
+        wlog("d3d: batch do FM6: sonda de referencia do SRV %p = %lu", obj, (unsigned long)c);
+    if (c != 2) return;
+    k = InterlockedIncrement(&fm6_batch_orphans);
+    if (k <= 16 || !(k & (k - 1)))
+        wlog("d3d: batch do FM6: SRV %p ja solto pelo jogo ainda aplicado do registro %p (%ld vezes)", obj, rec, k);
 }
 
 static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size)
@@ -2196,6 +2264,7 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
                      vt >= tabs && vt < tabs + NTYPES * SLOTS * 8 ? (int)((vt - tabs) / (SLOTS * 8)) : -1);
             }
         }
+        if (fm6_batch_hold && obj && hdr & FM6_BATCH_SRV_FLAG) fm6_batch_probe(p, obj);
         ((set_fn)(*(void ***)ctx)[hdr & FM6_BATCH_SRV_FLAG ? fm6_stage_srv[stage] : fm6_stage_cb[stage]])
             (ctx, slot, 1, &obj);
         fm6_res_note(ctx, !!(hdr & FM6_BATCH_SRV_FLAG), stage, slot, 1, &obj);
@@ -2560,8 +2629,9 @@ int fm6_batch_install(uint8_t *game)
             return 0;
         }
     for (i = 0; i < 2; i++) abs_jmp(game + site[i].rva, site[i].fn, 14);
-    wlog("d3d: montadores de batch do FM6 (game+%#x CB, game+%#x SRV) -> registros com o objeto", FM6_BATCH_CB,
-         FM6_BATCH_SRV);
+    fm6_batch_hold = dbg_int(L"BatchHoldRefs", 1) > 0;
+    wlog("d3d: montadores de batch do FM6 (game+%#x CB, game+%#x SRV) -> registros com o objeto%s", FM6_BATCH_CB,
+         FM6_BATCH_SRV, fm6_batch_hold ? "; o batch segura referencia ao SRV" : "");
     return 1;
 }
 
