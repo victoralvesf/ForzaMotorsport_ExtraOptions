@@ -587,7 +587,7 @@ TEST(stutter_list_pool)
     lpf_vt.GetType = lpf_type; lpf_vt.Reset = lpf_reset; lpf_vt.Close = lpf_close;
     lpf_nmade = 0;
     lp_real_create = lpf_create;
-    lp_n[0] = 0;
+    lp_n[0] = 0; lp_head[0] = 0;
     /* FM6 por padrao; o debug.ini desliga */
     dbgini_set(NULL);
     fake_azimuth(2);
@@ -634,6 +634,61 @@ TEST(stutter_list_pool)
     CHECK_EQ(((IUnknown *)out)->lpVtbl->Release(out), 0);
     CHECK_EQ(a->destroyed, 1);
     CHECK_EQ(lp_n[0], 0);
+    lp_real_create = NULL;
+}
+
+/* pool x GPU: a lista guardada so volta depois que o fence do proxy da fila passou do que foi enviado ate ela ser
+ * guardada (reenviar com a execucao anterior em voo = erro 553 da debug layer); FIFO */
+static UINT64 lpq_done;
+static UINT64 STDMETHODCALLTYPE lpq_completed(ID3D12Fence *f) { (void)f; return lpq_done; }
+static ID3D12FenceVtbl lpq_fvt;
+static struct { const ID3D12FenceVtbl *vt; } lpq_fence = { &lpq_fvt };
+
+TEST(stutter_list_pool_waits_gpu)
+{
+    void *a = NULL, *b = NULL, *c = NULL, *d = NULL;
+    lpf_vt.QueryInterface = lpf_qi; lpf_vt.AddRef = lpf_addref; lpf_vt.Release = lpf_release;
+    lpf_vt.GetType = lpf_type; lpf_vt.Reset = lpf_reset; lpf_vt.Close = lpf_close;
+    lpq_fvt.GetCompletedValue = lpq_completed;
+    lpf_vt.Release = (void *)lp_release; lp_real_release = (void *)lpf_release;   /* gancho ja posto no 1o teste */
+    lpf_nmade = 0;
+    lp_real_create = lpf_create;
+    lp_n[0] = 0; lp_head[0] = 0;
+    memset(sg_queues, 0, sizeof sg_queues);
+    sg_queues[0].lf = (ID3D12Fence *)&lpq_fence;
+    sg_nqueues = 1;
+    lp_on = 1;
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &a)));
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &b)));
+    /* a enviada ate o valor 5 e guardada; b ate o 6 */
+    sg_queues[0].lsent = 5;
+    lpf_close(a);
+    CHECK_EQ(((IUnknown *)a)->lpVtbl->Release(a), 0);
+    sg_queues[0].lsent = 6;
+    lpf_close(b);
+    CHECK_EQ(((IUnknown *)b)->lpVtbl->Release(b), 0);
+    CHECK_EQ(lp_n[0], 2);
+    /* GPU em 4: nenhuma volta, lista nova */
+    lpq_done = 4;
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &c)));
+    CHECK(c == &lpf_made[2]);
+    CHECK_EQ(lp_n[0], 2);
+    /* GPU em 5: volta a (a mais antiga), b ainda nao */
+    lpq_done = 5;
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &d)));
+    CHECK(d == a);
+    CHECK_EQ(lpf_made[0].resets, 1);
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &d)));
+    CHECK(d == &lpf_made[3]);
+    /* device removido (UINT64_MAX): b volta */
+    lpq_done = UINT64_MAX;
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &d)));
+    CHECK(d == b);
+    CHECK_EQ(lp_n[0], 0);
+    lp_on = 0;
+    sg_nqueues = 0;
+    memset(sg_queues, 0, sizeof sg_queues);
+    lp_n[0] = 0; lp_head[0] = 0;
     lp_real_create = NULL;
 }
 

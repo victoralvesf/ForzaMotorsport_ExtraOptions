@@ -573,7 +573,9 @@ static LONG64 sig_last_done[4];                  /* por tipo de fila (0 direct, 
 static volatile LONG64 gpu_max_ticks;            /* maior trecho do intervalo (zerado no Present) */
 static volatile LONG64 gpu_max_val, gpu_sum_ticks;
 static volatile LONG gpu_max_qt, gpu_done, gpu_pend;
-static struct { ID3D12CommandQueue *q; uint8_t type; } sg_queues[SG_QUEUES];
+/* lf/lsent: fence do proxy sinalizado depois de cada ExecuteCommandLists da fila (pool de command lists, lp_ecl) */
+typedef struct { ID3D12CommandQueue *q; uint8_t type; ID3D12Fence *lf; volatile UINT64 lsent; SRWLOCK llock; } sg_queue;
+static sg_queue sg_queues[SG_QUEUES];
 static volatile LONG sg_nqueues;
 
 /* duracao de um trecho de GPU: desde o Signal ou desde a conclusao anterior na fila, o que vier depois */
@@ -799,6 +801,30 @@ static HRESULT (STDMETHODCALLTYPE *real_reserved)(ID3D12Device *, const D3D12_RE
 static HRESULT (STDMETHODCALLTYPE *real_heap)(ID3D12Device *, const D3D12_HEAP_DESC *, REFIID, void **);
 static HRESULT (STDMETHODCALLTYPE *real_queue)(ID3D12Device *, const D3D12_COMMAND_QUEUE_DESC *, REFIID, void **);
 static void (STDMETHODCALLTYPE *real_ecl)(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *);
+static HRESULT (STDMETHODCALLTYPE *real_signal)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
+extern int lp_on;
+
+static sg_queue *sg_find(ID3D12CommandQueue *q)
+{
+    LONG i, n = sg_nqueues;
+    for (i = 0; i < n && i < SG_QUEUES; i++) if (sg_queues[i].q == q) return &sg_queues[i];
+    return NULL;
+}
+
+/* ExecuteCommandLists + Signal do fence do proxy da fila, sob a trava da fila (valores em ordem). O pool de command
+ * lists so devolve uma lista guardada depois que a GPU passou desse valor: reenviar uma lista cuja execucao
+ * anterior ainda esta em voo e invalido (debug layer, erro 553: o envio e descartado) */
+static void lp_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
+{
+    sg_queue *s = lp_on ? sg_find(q) : NULL;
+    HRESULT (STDMETHODCALLTYPE *sig)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
+    if (!s || !s->lf) { real_ecl(q, n, l); return; }
+    sig = real_signal ? real_signal : q->lpVtbl->Signal;   /* o da fila, nao o st_signal (fora da medicao) */
+    AcquireSRWLockExclusive(&s->llock);
+    real_ecl(q, n, l);
+    if (SUCCEEDED(sig(q, s->lf, s->lsent + 1))) s->lsent++;
+    ReleaseSRWLockExclusive(&s->llock);
+}
 
 static HRESULT STDMETHODCALLTYPE st_committed(ID3D12Device *d, const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_RESOURCE_DESC *rd,
                                               D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c, REFIID r, void **o)
@@ -1138,7 +1164,7 @@ static int gt_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
     gt_buf[k++] = (ID3D12CommandList *)gt_lists[(e->ts0 + ng) % GT_TS];
     gt_next_ts = (gt_next_ts + ng + 1) % GT_TS;
     gt_head++;
-    real_ecl(q, k, gt_buf);       /* sob a trava: a ordem do anel e a ordem na GPU */
+    lp_ecl(q, k, gt_buf);         /* sob a trava: a ordem do anel e a ordem na GPU */
     ReleaseSRWLockExclusive(&gt_lock);
     return 1;
 }
@@ -1146,10 +1172,11 @@ static int gt_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
 static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
 {
     LONG64 t, dt;
+    if (!st_on) { lp_ecl(q, n, l); return; }   /* so o fence do pool (ListPool sem StutterLog) */
     if (n) lt_hook(l[0]);
     t = qpc();
     if (!(gt_slow_ms > 0 && sg_is_direct(q) && gt_ecl(q, n, l)))
-        real_ecl(q, n, l);
+        lp_ecl(q, n, l);
     dt = qpc() - t;
     st_count(ST_ECL, dt);
     InterlockedAdd(&st_lists, (LONG)n);
@@ -1284,7 +1311,6 @@ static void STDMETHODCALLTYPE st_tiles(ID3D12CommandQueue *q, ID3D12Resource *re
     rk_note(RK_TILES, qpc() - t, NULL, 0, nr);
 }
 
-static HRESULT (STDMETHODCALLTYPE *real_signal)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
 static HRESULT (STDMETHODCALLTYPE *real_qwait)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
 
 static uint8_t sg_type(ID3D12CommandQueue *q)
@@ -1363,11 +1389,19 @@ static HRESULT STDMETHODCALLTYPE st_queue(ID3D12Device *d, const D3D12_COMMAND_Q
     ID3D12CommandQueue *q = NULL;
     if (SUCCEEDED(hr) && o && *o && SUCCEEDED(((IUnknown *)*o)->lpVtbl->QueryInterface(*o, &IID_ID3D12CommandQueue, (void **)&q))) {
         LONG k = sg_nqueues;
-        if (k < SG_QUEUES) { sg_queues[k].q = q; sg_queues[k].type = qd ? (uint8_t)(qd->Type & 3) : 0; sg_nqueues = k + 1; }
+        if (k < SG_QUEUES) {
+            sg_queue *s = &sg_queues[k];
+            s->q = q; s->type = qd ? (uint8_t)(qd->Type & 3) : 0;
+            InitializeSRWLock(&s->llock);
+            if (FAILED(d->lpVtbl->CreateFence(d, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&s->lf))) s->lf = NULL;
+            sg_nqueues = k + 1;
+        }
         vt_swap((void **)&q->lpVtbl->ExecuteCommandLists, st_ecl, (void **)&real_ecl);
-        vt_swap((void **)&q->lpVtbl->Signal, st_signal, (void **)&real_signal);
-        vt_swap((void **)&q->lpVtbl->Wait, st_qwait, (void **)&real_qwait);
-        vt_swap((void **)&q->lpVtbl->UpdateTileMappings, st_tiles, (void **)&real_tiles);
+        if (st_on) {
+            vt_swap((void **)&q->lpVtbl->Signal, st_signal, (void **)&real_signal);
+            vt_swap((void **)&q->lpVtbl->Wait, st_qwait, (void **)&real_qwait);
+            vt_swap((void **)&q->lpVtbl->UpdateTileMappings, st_tiles, (void **)&real_tiles);
+        }
         q->lpVtbl->Release(q);
     }
     return hr;
@@ -1377,13 +1411,16 @@ static HRESULT STDMETHODCALLTYPE st_queue(ID3D12Device *d, const D3D12_COMMAND_Q
  * slot de lista vazio e 0x1400dee90 chama CreateCommandList - 524288 listas criadas numa sessao (553 vivas), o custo
  * por lista do trecho denso (driver AMD). Com o pool a ultima Release de uma command list a guarda (a do pool e a
  * unica referencia que sobra) e o CreateCommandList seguinte do mesmo tipo devolve uma guardada com Reset(allocator,
- * PSO) - legal no D3D12 logo depois do ExecuteCommandLists (quem nao pode voltar a ser usado em voo e o allocator,
- * que continua vindo novo do pool do Azimuth). Ganchos no device sempre (o device nasce antes do apply_patches);
- * lp_on decidido em list_pool_setup: FM6 sim, debug.ini ListPool=0/1 sobrescreve. ---- */
+ * PSO). O Reset logo depois do ExecuteCommandLists e legal, mas a lista nao pode ser ENVIADA de novo antes da GPU
+ * terminar a execucao anterior (debug layer: erro 553, envio descartado): a guardada leva os valores enviados do
+ * fence do proxy de cada fila (lp_ecl) e so volta quando todos passaram; fila FIFO (a mais antiga primeiro).
+ * Ganchos no device sempre (o device nasce antes do apply_patches); lp_on decidido em list_pool_setup: FM6 sim,
+ * debug.ini ListPool=0/1 sobrescreve. ---- */
 #define LP_MAX 1024
 int lp_on;
-static IUnknown *lp_pool[4][LP_MAX];
-static LONG lp_n[4];
+typedef struct { IUnknown *u; UINT64 sent[SG_QUEUES]; } lp_ent;
+static lp_ent lp_pool[4][LP_MAX];
+static LONG lp_n[4], lp_head[4];                 /* lp_n guardadas a partir de lp_head (anel) */
 static SRWLOCK lp_lock = SRWLOCK_INIT;
 static ULONG (STDMETHODCALLTYPE *lp_real_release)(IUnknown *);
 static HRESULT (STDMETHODCALLTYPE *lp_real_create)(ID3D12Device *, UINT, D3D12_COMMAND_LIST_TYPE, ID3D12CommandAllocator *,
@@ -1396,19 +1433,36 @@ extern int gg_cl_forget(void *cl);
 int lp_put(IUnknown *u, unsigned type)
 {
     int ok = 0;
+    LONG i, nq = sg_nqueues;
     if (type >= 4) return 0;
     AcquireSRWLockExclusive(&lp_lock);
-    if (lp_n[type] < LP_MAX) { lp_pool[type][lp_n[type]++] = u; ok = 1; }
+    if (lp_n[type] < LP_MAX) {
+        lp_ent *e = &lp_pool[type][(lp_head[type] + lp_n[type]++) % LP_MAX];
+        e->u = u;
+        for (i = 0; i < SG_QUEUES; i++) e->sent[i] = i < nq ? sg_queues[i].lsent : 0;
+        ok = 1;
+    }
     ReleaseSRWLockExclusive(&lp_lock);
     return ok;
 }
 
+/* a mais antiga, se a GPU ja passou de todos os envios feitos ate ela ser guardada; senao NULL (lista nova) */
 IUnknown *lp_take(unsigned type)
 {
     IUnknown *u = NULL;
+    LONG i, nq = sg_nqueues;
     if (type >= 4) return NULL;
     AcquireSRWLockExclusive(&lp_lock);
-    if (lp_n[type]) u = lp_pool[type][--lp_n[type]];
+    if (lp_n[type]) {
+        lp_ent *e = &lp_pool[type][lp_head[type]];
+        for (i = 0; i < nq && i < SG_QUEUES; i++)
+            if (e->sent[i] && sg_queues[i].lf && sg_queues[i].lf->lpVtbl->GetCompletedValue(sg_queues[i].lf) < e->sent[i]) break;
+        if (i >= nq || i >= SG_QUEUES) {
+            u = e->u;
+            lp_head[type] = (lp_head[type] + 1) % LP_MAX;
+            lp_n[type]--;
+        }
+    }
     ReleaseSRWLockExclusive(&lp_lock);
     return u;
 }
@@ -1500,10 +1554,10 @@ void stutter_device(IUnknown *obj)
     vt_swap((void **)&dev->lpVtbl->CreateReservedResource, st_reserved, (void **)&real_reserved);
     vt_swap((void **)&dev->lpVtbl->CreateHeap, st_heap, (void **)&real_heap);
     vt_swap((void **)&dev->lpVtbl->CreateCommandList, lp_create, (void **)&lp_real_create);
+    vt_swap((void **)&dev->lpVtbl->CreateCommandQueue, st_queue, (void **)&real_queue);   /* fence do pool */
     if (!st_on) { dev->lpVtbl->Release(dev); return; }
     vt_swap((void **)&dev->lpVtbl->CreateGraphicsPipelineState, st_gpso, (void **)&real_gpso);
     vt_swap((void **)&dev->lpVtbl->CreateComputePipelineState, st_cpso, (void **)&real_cpso);
-    vt_swap((void **)&dev->lpVtbl->CreateCommandQueue, st_queue, (void **)&real_queue);
     dev->lpVtbl->Release(dev);
     if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device1, (void **)&dev1))) {
         vt_swap((void **)&dev1->lpVtbl->CreatePipelineLibrary, st_lib, (void **)&real_lib);
