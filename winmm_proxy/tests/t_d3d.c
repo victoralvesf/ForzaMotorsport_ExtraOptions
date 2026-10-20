@@ -1153,6 +1153,40 @@ TEST(fm6_resource_batch_holds_srv_refs)
     fm6_batch_hold = 1;
 }
 
+TEST(fm6_immediate_srv_hold)
+{
+    fake_ref_obj a = { fake_ref_vt, 1 }, b2 = { fake_ref_vt, 1 }, c = { fake_ref_vt, 1 };
+    void *ctx = (void *)0x1234, *out[8], *v2[2];
+    int k;
+    memset(ih_ctx, 0, sizeof ih_ctx);
+    ih_head = ih_tail = 0;
+    k = ih_bind(ctx, 4, 3, 1, (void *[]){ &a }, 100, 50, out, 8);
+    CHECK_EQ(k, 0);
+    CHECK_EQ(a.refs, 2);                                      /* o jogo + o estado do imediato */
+    CHECK(ih_ctx[0].ctx == ctx && ih_ctx[0].v[4][3] == &a);
+    k = ih_bind(ctx, 4, 3, 1, (void *[]){ &a }, 110, 50, out, 8);
+    CHECK(k == 0 && a.refs == 2);                             /* mesma view: nada muda */
+    a.refs--;                                                 /* o jogo solta a view ainda ligada */
+    log_capture();
+    v2[0] = &b2; v2[1] = &c;
+    k = ih_bind(ctx, 4, 3, 2, v2, 120, 50, out, 8);
+    CHECK_EQ(k, 0);
+    CHECK_EQ(a.refs, 1);                                      /* trocada: ainda na fila, nao solta */
+    CHECK(b2.refs == 2 && c.refs == 2);
+    CHECK(log_has("solta pelo jogo ainda ligada no imediato"));
+    k = ih_bind(ctx, 0, 0, 0, NULL, 160, 50, out, 8);         /* 40 de 50: ainda espera */
+    CHECK_EQ(k, 0);
+    k = ih_bind(ctx, 0, 0, 0, NULL, 170, 50, out, 8);
+    CHECK(k == 1 && out[0] == &a);                            /* o chamador solta fora da trava */
+    log_capture();
+    k = ih_bind(ctx, 4, 3, 2, NULL, 180, 50, out, 8);         /* desliga: as duas vao para a fila */
+    CHECK(k == 0 && b2.refs == 2 && c.refs == 2);
+    CHECK(!log_has("solta pelo jogo"));                       /* o jogo ainda as tem */
+    CHECK(ih_ctx[0].v[4][3] == NULL && ih_ctx[0].v[4][4] == NULL);
+    k = ih_bind(ctx, 6, 0, 1, (void *[]){ &a }, 300, 50, out, 8);   /* estagio invalido: so drena */
+    CHECK(k == 2 && a.refs == 1);
+}
+
 TEST(fm6_resource_batch_builders_patched)
 {
     uint8_t *game = pe_map(FM6_EXE, NULL);

@@ -864,6 +864,7 @@ extern void defer_release_setup(void);
 extern void list_pool_setup(void);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
+extern int fm6_imm_srv_hold_install(void);
 
 /* EXPERIMENTO D3D12Debug=5 (17_fm6.txt PASSO 24): o criterio 0x14013bae0 de title_storage (so chamado por
    CreatePlacementTexture2D/3D) escolhe recurso reservado (tiled) em vez de committed; com tiled tier 4 vale p/
@@ -1012,6 +1013,7 @@ static void hook_apply_patches(void *image, const void *options)
         implicit_apu_heap("FM6");
         fm6_batch_install(game);
         fm6_reexec_install();
+        fm6_imm_srv_hold_install();
         fm6_graphics_protect_install();
         /* audio_fm6_game_hooks(game): desligado - suspeito de travar o carregamento (17_fm6.txt PASSO 53) */
         fm6_patches(game);

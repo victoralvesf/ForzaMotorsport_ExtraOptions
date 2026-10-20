@@ -2614,6 +2614,101 @@ int fm6_reexec_install(void)
     return 1;
 }
 
+/* PASSO 82: SRVs do contexto IMEDIATO sem referencia. *SetShaderResources do Azimuth (0x1401b21d0) no diferido
+   (ctx+0xc48) faz AddRef/Release das views; no imediato vai para 0x14010fd30, que so copia os ponteiros para o
+   estado e publica a operacao para o 'Azimuth worker' - sem referencia. O worker aplica depois e, no draw, o bind
+   (0x140127740) le o handle CPU do objeto da view (+0x40/+0xd0) e copia para o heap da GPU. O jogo (D3D11: o contexto
+   segura a referencia; console: o T# ja foi copiado) solta a view ainda ligada -> objeto liberado na hora, slot de
+   descritor devolvido pelo reaper em "enviado + 1" e reaproveitado -> o worker copia o slot de OUTRA view (reset no
+   fim da corrida; com RetireMargin nos slots, descritor de recurso ja destruido: GPU lenta).
+   Correcao: o hook segura uma referencia a cada SRV ligada no imediato (por contexto, estagio e slot) e a view
+   trocada so e solta depois de ImmediateSrvHoldMs (debug.ini, FM6 padrao 1000; 0 = sem hook), quando o worker e a
+   GPU ja passaram. Diagnostico: na troca, a view que so a nossa referencia segura = o jogo soltou ainda ligada.
+   O SetFastResources imediato (0x140111cd0) nao passa por aqui. */
+#define RVA_IMM_SET_SRVS 0x10fd30
+#define IH_CTX  4
+#define IH_RING 65536
+typedef void (*imm_srvs_fn)(void *ctx, UINT stage, UINT start, UINT n, void *const *views, UINT64 a6);
+static imm_srvs_fn orig_imm_srvs;
+int ih_hold_ms;
+static LONG64 ih_freq;
+static SRWLOCK ih_lock = SRWLOCK_INIT;
+static struct { void *ctx; void *v[6][128]; } ih_ctx[IH_CTX];
+static struct { void *obj; LONG64 t; } ih_q[IH_RING];
+static unsigned ih_head, ih_tail;                 /* fila de views trocadas: [tail, head) */
+static volatile LONG ih_dead_bound, ih_overflow;
+
+static ULONG ih_addref(void *o) { return ((ULONG (*)(void *))(*(void ***)o)[1])(o); }
+static ULONG ih_release(void *o) { return ((ULONG (*)(void *))(*(void ***)o)[2])(o); }
+
+/* sob ih_lock: anota a troca dos slots, faz AddRef nas novas, enfileira as antigas e devolve em out (ate max) as
+   que ja esperaram hold_ms (ou que transbordaram a fila) para soltar fora da trava */
+static int ih_bind(void *ctx, UINT stage, UINT start, UINT n, void *const *views, LONG64 now, LONG64 hold,
+                   void **out, int max)
+{
+    int c, k = 0;
+    UINT i;
+    for (c = 0; c < IH_CTX && ih_ctx[c].ctx && ih_ctx[c].ctx != ctx; c++) {}
+    if (c < IH_CTX && !ih_ctx[c].ctx) ih_ctx[c].ctx = ctx;
+    while (ih_tail != ih_head && k < max && now - ih_q[ih_tail % IH_RING].t >= hold)
+        out[k++] = ih_q[ih_tail++ % IH_RING].obj;
+    if (c >= IH_CTX || stage >= 6 || start >= 128) return k;
+    if (n > 128 - start) n = 128 - start;
+    for (i = 0; i < n; i++) {
+        void *nv = views ? views[i] : NULL, **slot = &ih_ctx[c].v[stage][start + i], *old = *slot;
+        if (nv == old) continue;
+        if (nv) ih_addref(nv);
+        *slot = nv;
+        if (!old) continue;
+        if (ih_addref(old) == 2) {                /* so a nossa (+ a sonda): o jogo ja soltou */
+            LONG d = InterlockedIncrement(&ih_dead_bound);
+            if (d <= 8 || !(d & (d - 1)))
+                wlog("d3d: SRV %p solta pelo jogo ainda ligada no imediato %p (estagio %u slot %u; %ld vezes)", old,
+                     ctx, stage, start + i, d);
+        }
+        ih_release(old);
+        if (ih_head - ih_tail >= IH_RING) {       /* fila cheia: a mais antiga sai agora */
+            if (k < max) out[k++] = ih_q[ih_tail % IH_RING].obj;
+            else ih_release(ih_q[ih_tail % IH_RING].obj);
+            ih_tail++;
+            InterlockedIncrement(&ih_overflow);
+        }
+        ih_q[ih_head % IH_RING].obj = old;
+        ih_q[ih_head++ % IH_RING].t = now;
+    }
+    return k;
+}
+
+static void fm6_imm_set_srvs(void *ctx, UINT stage, UINT start, UINT n, void *const *views, UINT64 a6)
+{
+    void *out[64];
+    LARGE_INTEGER t;
+    int k;
+    QueryPerformanceCounter(&t);
+    AcquireSRWLockExclusive(&ih_lock);
+    k = ih_bind(ctx, stage, start, n, views, t.QuadPart, ih_freq * ih_hold_ms / 1000, out, 64);
+    ReleaseSRWLockExclusive(&ih_lock);
+    orig_imm_srvs(ctx, stage, start, n, views, a6);
+    while (k) ih_release(out[--k]);
+}
+
+int fm6_imm_srv_hold_install(void)
+{
+    LARGE_INTEGER f;
+    ih_hold_ms = dbg_int(L"ImmediateSrvHoldMs", 1000);
+    if (ih_hold_ms <= 0) return 0;
+    QueryPerformanceFrequency(&f);
+    ih_freq = f.QuadPart;
+    if (!hook_function(RVA_IMM_SET_SRVS, "48895c240848896c24104889742418", 15, (void *)fm6_imm_set_srvs,
+                       (void **)&orig_imm_srvs)) {
+        wlog("d3d: SetShaderResources imediato do Azimuth (%#x) nao confere; SRVs do imediato sem referencia",
+             RVA_IMM_SET_SRVS);
+        return 0;
+    }
+    wlog("d3d: FM6: SRVs do contexto imediato com referencia; a trocada sai %d ms depois", ih_hold_ms);
+    return 1;
+}
+
 int fm6_batch_install(uint8_t *game)
 {
     static const struct { uint32_t rva; const char *orig; void *fn; } site[2] = {
