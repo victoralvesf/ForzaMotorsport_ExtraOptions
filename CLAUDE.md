@@ -8,7 +8,7 @@ Goal: make **Forza Motorsport 5** (title id `7B35D917`, same ForzaTech engine, N
 without modifying `azimuth.exe` on disk: everything is done in memory by a **`winmm.dll` proxy**.
 
 Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (60) kept in the menus; FM5 passes the locks, starts, plays audio, shows intro/menu and loads the race;
-3D scene OK (ESRAM aliasing emulated in the proxy, cont. 19) and the 1st race is completed; end of race, "continue" (FMASK 4x) and garage (4x aliasing, cont. 21) OK; save thumbnails (MSAA resolve, cont. 23) OK; ~40 min without a crash. See `docs/contexto/99_proximos_passos_historico.txt`.
+3D scene OK (ESRAM aliasing emulated in the proxy, cont. 19) and the 1st race is completed; end of race, "continue" (FMASK 4x) and garage (4x aliasing, cont. 21) OK; save thumbnails (MSAA resolve, cont. 23) OK; ~40 min without a crash. FM6 playable at ~60 fps with one open crash (end of the 1st race). See `docs/contexto/99_proximos_passos.txt`.
 
 ## How the solution works
 - **Azimuth locks**: games are identified by SHA-256 (manifest, exe, pinned files) and a constant record
@@ -56,7 +56,9 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
 - Local only (`.gitignore`), never in the public repository: `docs\` (whole folder), `data\` (Azimuth's folder),
   `car_model_report\` (internal research), `tools\sessoes_antigas\`, `*.pkl`, `game_binaries\`, `ghidra\`, `azimuth.exe`.
 - At the end of each step: record the findings in the topic's `docs\contexto\` file (section "PASSO 8 (cont. N)"
-  with RESULTADO and the next error) and update `99_proximos_passos_historico.txt`; then **commit** the code
+  with RESULTADO and the next error; FM6 steps go in the matching `docs\contexto\fm6\` file and the short summary in
+  `17_fm6.txt`) and update `99_proximos_passos.txt` (open items only: finished items become one line in
+  `docs\contexto\historico\`); then **commit** the code
   (docs stay local). Large/generated files go in `.gitignore`, and so does any new
   file/folder of internal research, derived from the game/Azimuth binaries, or belonging to Azimuth: never `git add` those.
 - **Never commit code from Azimuth or Forza** (MIT covers only our code): no decompiled/disassembled snippets, Ghidra
@@ -89,5 +91,5 @@ Read only what is relevant to the task:
 | `14_present_draws_telapreta_resolve.txt` | cont. 9/11/13/14: DXGIXPresentArray, IASetIndexBuffer, black screen (packed Draw*), D3D12 debug layer, ResolveSubresource |
 | `15_opcoes_ini_e_videos.txt` | cont. 12/15 + STEP 11: azimuth_fm5.ini, SkipIntro, SkipPresentationVideo, UnlockDLC (DLC ownership/ContentOffers), EnableMarketplace, FM5 command line options |
 | `16_opcoes_graficas.txt` | STEP 9: launcher graphics options (resolution, AA, fps, presets) in FH2 x FM5, porting plan |
-| `17_fm6.txt` | FM6 (`64F9397E`, 1.0.0.44, OS "era"): manifest, record, section-count lock, missing SOFTWARE hive |
-| `99_proximos_passos_historico.txt` | what has been done and **the current next step** |
+| `17_fm6.txt` | FM6 (`64F9397E`) SUMMARY: state, active fixes, open crash; index of `fm6\01..06_*.txt` (full step history by topic) |
+| `99_proximos_passos.txt` | **the current next step** and open items only (old history: `historico\`, read only if needed) |
