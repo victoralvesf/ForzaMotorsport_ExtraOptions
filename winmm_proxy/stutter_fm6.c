@@ -836,30 +836,39 @@ static HRESULT STDMETHODCALLTYPE st_queue(ID3D12Device *d, const D3D12_COMMAND_Q
 }
 
 /* DeferRelease (PASSO 70): no FM6 sempre (a rajada de destruicao do reaper para o quadro ~150 ms e, junto com o
- * NO_HAZARD dos tiles, derrubou a GPU no boot do PASSO 69 sem ele); debug.ini DeferRelease=0/1 sobrescreve */
+ * NO_HAZARD dos tiles, derrubou a GPU nos boots sem ele); debug.ini DeferRelease=0/1 sobrescreve */
 int dr_wanted(void) { return dbg_int(L"DeferRelease", is_fm6()) > 0; }
 
+/* hook do apply_patches (fm5_patch.c): o device D3D12 nasce ANTES do registro do jogo (is_fm6 ainda falso no
+ * stutter_device), entao a decisao e a thread de drenagem ficam para ca */
+void defer_release_setup(void)
+{
+    static int started;
+    dr_on = dr_wanted();
+    if (!dr_on || started) return;
+    started = 1;
+    if (!st_freq.QuadPart) QueryPerformanceFrequency(&st_freq);
+    CloseHandle(CreateThread(NULL, 0, dr_drain, NULL, 0, NULL));
+    wlog("d3d: DeferRelease: a ultima Release do 'Azimuth reaper' em recurso/heap fica numa fila, solta aos poucos");
+}
+
 /* chamado pelo hook do D3D12CreateDevice (debug12_fm5.c), depois do gpuguard (estes hooks ficam por fora). Os hooks
- * de criacao de recurso/heap registram o Release das vtables (DeferRelease); o resto so com StutterLog. */
+ * de criacao de recurso/heap registram o Release das vtables (DeferRelease decide depois, no apply_patches; com
+ * DeferRelease=0 no debug.ini e sem StutterLog nada e trocado); o resto so com StutterLog. */
 void stutter_device(IUnknown *obj)
 {
     ID3D12Device *dev = NULL;
     ID3D12Device1 *dev1 = NULL;
     ID3D12Device2 *dev2 = NULL;
     static int done;
-    if (done) return;
-    dr_on = dr_wanted();
-    if ((!st_on && !dr_on) || FAILED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device, (void **)&dev))) return;
+    if (done || (!st_on && !dbg_int(L"DeferRelease", 1)) ||
+        FAILED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device, (void **)&dev))) return;
     done = 1;
     if (!st_freq.QuadPart) QueryPerformanceFrequency(&st_freq);
     vt_swap((void **)&dev->lpVtbl->CreateCommittedResource, st_committed, (void **)&real_committed);
     vt_swap((void **)&dev->lpVtbl->CreatePlacedResource, st_placed, (void **)&real_placed);
     vt_swap((void **)&dev->lpVtbl->CreateReservedResource, st_reserved, (void **)&real_reserved);
     vt_swap((void **)&dev->lpVtbl->CreateHeap, st_heap, (void **)&real_heap);
-    if (dr_on) {
-        CloseHandle(CreateThread(NULL, 0, dr_drain, NULL, 0, NULL));
-        wlog("d3d: DeferRelease: a ultima Release do 'Azimuth reaper' em recurso/heap fica numa fila, solta aos poucos");
-    }
     if (!st_on) { dev->lpVtbl->Release(dev); return; }
     vt_swap((void **)&dev->lpVtbl->CreateGraphicsPipelineState, st_gpso, (void **)&real_gpso);
     vt_swap((void **)&dev->lpVtbl->CreateComputePipelineState, st_cpso, (void **)&real_cpso);

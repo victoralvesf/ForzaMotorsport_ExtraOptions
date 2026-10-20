@@ -4,6 +4,8 @@
  */
 #include "../fm5_patch.c"
 #include "test.h"
+
+extern int dr_on;
 #include <stdlib.h>
 extern void debug12_create_device(void);   /* debug12_fm5.c (so o endereco) */
 
@@ -157,9 +159,11 @@ TEST(apply_patches_skips_fm6)
     *(void **)(az + RVA_APU_HEAPS) = VirtualAlloc(NULL, 0x500000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     *(uint32_t *)(az + RVA_APU_HEAPS + 8) = 0x500000; *(uint32_t *)(az + RVA_APU_HEAPS + 0xc) = 0x1000000;
     memcpy(az + 0xdeadd, "\x48\x3d\xa0\x0f\x00\x00", 6);             /* cmp rax, 4000 do pool de allocators */
-    dbgini_set(NULL);
+    dbgini_set("[Debug]\nDeferRelease=0\n");                            /* sem a thread de drenagem no teste */
     CHECK(is_fm6() && !is_fm5());
     hook_apply_patches(img, opt);
+    CHECK(!dr_on && !log_has("DeferRelease"));
+    dbgini_set(NULL);
     CHECK_EQ(orig_apply_calls, 0);
     CHECK_HEX(az + 0xdeadd, "483dffffff7f");                            /* FM6: nunca destroi */
     CHECK(log_has("FM6"));
