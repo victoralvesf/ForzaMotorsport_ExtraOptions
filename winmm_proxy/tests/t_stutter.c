@@ -446,3 +446,98 @@ TEST(stutter_queue_list_methods)
     CHECK(!lt_n[LT_RESET] && !lt_ticks[LT_CLOSE]);
     vz_qtid = 0;
 }
+
+/* pool de command lists (PASSO 74): lista falsa com contagem de referencias, Reset/Close/GetType */
+typedef struct { const ID3D12GraphicsCommandListVtbl *vt; LONG ref, resets, closes, destroyed, open; } lp_fake;
+static ULONG STDMETHODCALLTYPE lpf_addref(ID3D12GraphicsCommandList *l) { return (ULONG)InterlockedIncrement(&((lp_fake *)l)->ref); }
+static ULONG STDMETHODCALLTYPE lpf_release(ID3D12GraphicsCommandList *l)
+{
+    LONG r = InterlockedDecrement(&((lp_fake *)l)->ref);
+    if (!r) ((lp_fake *)l)->destroyed++;
+    return (ULONG)r;
+}
+static HRESULT STDMETHODCALLTYPE lpf_qi(ID3D12GraphicsCommandList *l, REFIID r, void **o) { (void)r; lpf_addref(l); *o = l; return S_OK; }
+static D3D12_COMMAND_LIST_TYPE STDMETHODCALLTYPE lpf_type(ID3D12GraphicsCommandList *l) { (void)l; return D3D12_COMMAND_LIST_TYPE_DIRECT; }
+static HRESULT STDMETHODCALLTYPE lpf_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *p)
+{
+    lp_fake *f = (lp_fake *)l;
+    (void)a; (void)p;
+    if (f->open) return E_FAIL;                       /* Reset de lista aberta falha (precisa do Close) */
+    f->resets++; f->open = 1;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE lpf_close(ID3D12GraphicsCommandList *l) { ((lp_fake *)l)->closes++; ((lp_fake *)l)->open = 0; return S_OK; }
+static ID3D12GraphicsCommandListVtbl lpf_vt;
+static lp_fake lpf_made[4];
+static int lpf_nmade;
+static HRESULT STDMETHODCALLTYPE lpf_create(ID3D12Device *d, UINT m, D3D12_COMMAND_LIST_TYPE t, ID3D12CommandAllocator *a,
+                                            ID3D12PipelineState *p, REFIID r, void **o)
+{
+    lp_fake *f = &lpf_made[lpf_nmade++];
+    (void)d; (void)m; (void)t; (void)a; (void)p; (void)r;
+    memset(f, 0, sizeof *f);
+    f->vt = &lpf_vt; f->ref = 1; f->open = 1;
+    *o = f;
+    return S_OK;
+}
+
+TEST(stutter_list_pool)
+{
+    void *out = NULL, *out2 = NULL;
+    lp_fake *a;
+    LARGE_INTEGER fq;
+    QueryPerformanceFrequency(&fq);
+    st_freq = fq;
+    lpf_vt.QueryInterface = lpf_qi; lpf_vt.AddRef = lpf_addref; lpf_vt.Release = lpf_release;
+    lpf_vt.GetType = lpf_type; lpf_vt.Reset = lpf_reset; lpf_vt.Close = lpf_close;
+    lpf_nmade = 0;
+    lp_real_create = lpf_create;
+    lp_n[0] = 0;
+    /* FM6 por padrao; o debug.ini desliga */
+    dbgini_set(NULL);
+    fake_azimuth(2);
+    list_pool_setup();
+    CHECK(lp_on);
+    dbgini_set("[Debug]\nListPool=0\n");
+    list_pool_setup();
+    CHECK(!lp_on);
+    dbgini_set(NULL);
+    fake_azimuth(0);
+    list_pool_setup();
+    CHECK(!lp_on);
+    lp_on = 1;
+    /* 1a: criada de verdade; a vtable ganha a Release do pool */
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &out)));
+    a = (lp_fake *)out;
+    CHECK(a == &lpf_made[0]);
+    CHECK(lpf_vt.Release == (void *)lp_release);
+    /* referencia extra: a Release dela nao guarda */
+    lpf_addref(out);
+    CHECK_EQ(((IUnknown *)out)->lpVtbl->Release(out), 1);
+    CHECK_EQ(lp_n[0], 0);
+    /* ultima Release: guardada (pool fica com 1 referencia, nada destruido) */
+    lpf_close(out);
+    CHECK_EQ(((IUnknown *)out)->lpVtbl->Release(out), 0);
+    CHECK_EQ(lp_n[0], 1);
+    CHECK_EQ(a->ref, 1);
+    CHECK_EQ(a->destroyed, 0);
+    /* proxima criacao: a mesma lista, com Reset, so com a referencia do chamador */
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &out2)));
+    CHECK(out2 == out);
+    CHECK_EQ(lpf_nmade, 1);
+    CHECK_EQ(a->resets, 1);
+    CHECK_EQ(a->ref, 1);
+    CHECK_EQ(lp_n[0], 0);
+    /* guardada ainda aberta: Close antes do Reset */
+    CHECK_EQ(((IUnknown *)out2)->lpVtbl->Release(out2), 0);
+    CHECK(SUCCEEDED(lp_create(NULL, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, NULL, NULL, &IID_ID3D12GraphicsCommandList, &out)));
+    CHECK(out == out2);
+    CHECK_EQ(a->closes, 2);
+    CHECK_EQ(a->resets, 2);
+    /* desligado: a ultima Release destroi */
+    lp_on = 0;
+    CHECK_EQ(((IUnknown *)out)->lpVtbl->Release(out), 0);
+    CHECK_EQ(a->destroyed, 1);
+    CHECK_EQ(lp_n[0], 0);
+    lp_real_create = NULL;
+}

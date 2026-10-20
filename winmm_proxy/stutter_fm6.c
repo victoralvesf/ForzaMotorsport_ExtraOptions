@@ -999,6 +999,96 @@ static HRESULT STDMETHODCALLTYPE st_queue(ID3D12Device *d, const D3D12_COMMAND_Q
     return hr;
 }
 
+/* ---- pool de command lists (PASSO 74): o Azimuth abre cada gravacao (contexto diferido / execucao na fila) com um
+ * slot de lista vazio e 0x1400dee90 chama CreateCommandList - 524288 listas criadas numa sessao (553 vivas), o custo
+ * por lista do trecho denso (driver AMD). Com o pool a ultima Release de uma command list a guarda (a do pool e a
+ * unica referencia que sobra) e o CreateCommandList seguinte do mesmo tipo devolve uma guardada com Reset(allocator,
+ * PSO) - legal no D3D12 logo depois do ExecuteCommandLists (quem nao pode voltar a ser usado em voo e o allocator,
+ * que continua vindo novo do pool do Azimuth). Ganchos no device sempre (o device nasce antes do apply_patches);
+ * lp_on decidido em list_pool_setup: FM6 sim, debug.ini ListPool=0/1 sobrescreve. ---- */
+#define LP_MAX 1024
+int lp_on;
+static IUnknown *lp_pool[4][LP_MAX];
+static LONG lp_n[4];
+static SRWLOCK lp_lock = SRWLOCK_INIT;
+static ULONG (STDMETHODCALLTYPE *lp_real_release)(IUnknown *);
+static HRESULT (STDMETHODCALLTYPE *lp_real_create)(ID3D12Device *, UINT, D3D12_COMMAND_LIST_TYPE, ID3D12CommandAllocator *,
+                                                   ID3D12PipelineState *, REFIID, void **);
+static volatile LONG lp_made, lp_reused, lp_kept, lp_failed;
+static volatile LONG64 lp_made_ticks;
+extern int gg_cl_forget(void *cl);
+
+/* guarda u (ja com so a referencia do pool) se houver lugar; devolve 1 se guardou */
+int lp_put(IUnknown *u, unsigned type)
+{
+    int ok = 0;
+    if (type >= 4) return 0;
+    AcquireSRWLockExclusive(&lp_lock);
+    if (lp_n[type] < LP_MAX) { lp_pool[type][lp_n[type]++] = u; ok = 1; }
+    ReleaseSRWLockExclusive(&lp_lock);
+    return ok;
+}
+
+IUnknown *lp_take(unsigned type)
+{
+    IUnknown *u = NULL;
+    if (type >= 4) return NULL;
+    AcquireSRWLockExclusive(&lp_lock);
+    if (lp_n[type]) u = lp_pool[type][--lp_n[type]];
+    ReleaseSRWLockExclusive(&lp_lock);
+    return u;
+}
+
+static ULONG STDMETHODCALLTYPE lp_release(IUnknown *u)
+{
+    if (lp_on) {
+        ULONG c = u->lpVtbl->AddRef(u);              /* sonda: 2 = a referencia do chamador e a ultima */
+        if (c == 2 && lp_put(u, (unsigned)((ID3D12CommandList *)u)->lpVtbl->GetType((ID3D12CommandList *)u))) {
+            lp_real_release(u);                       /* fica a do pool */
+            InterlockedIncrement(&lp_kept);
+            return 0;
+        }
+        lp_real_release(u);
+    }
+    return lp_real_release(u);
+}
+
+static HRESULT STDMETHODCALLTYPE lp_create(ID3D12Device *d, UINT mask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *a,
+                                           ID3D12PipelineState *ps, REFIID riid, void **out)
+{
+    static volatile LONG hooked;
+    IUnknown *u = lp_on && out ? lp_take((unsigned)type) : NULL;
+    LONG64 t;
+    HRESULT hr;
+    if (u) {
+        ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)u;
+        gg_cl_forget(u);                              /* estado por lista do gpuguard: como uma lista nova */
+        hr = l->lpVtbl->Reset(l, a, ps);
+        if (FAILED(hr)) { l->lpVtbl->Close(l); hr = l->lpVtbl->Reset(l, a, ps); }
+        if (SUCCEEDED(hr)) hr = u->lpVtbl->QueryInterface(u, riid, out);
+        lp_real_release(u);                           /* a do pool: sobra a do chamador (ou nenhuma -> destruida) */
+        if (SUCCEEDED(hr)) { InterlockedIncrement(&lp_reused); return hr; }
+        InterlockedIncrement(&lp_failed);
+    }
+    t = qpc();
+    hr = lp_real_create(d, mask, type, a, ps, riid, out);
+    InterlockedAdd64(&lp_made_ticks, qpc() - t);
+    InterlockedIncrement(&lp_made);
+    if (SUCCEEDED(hr) && out && *out && !hooked && !InterlockedCompareExchange(&hooked, 1, 0)) {
+        void **vt = *(void ***)*out;                  /* a mesma vtable para todos os tipos (por cima do gpuguard) */
+        vt_swap(&vt[2], (void *)lp_release, (void **)&lp_real_release);
+    }
+    return hr;
+}
+
+/* hook do apply_patches (fm5_patch.c), como o DeferRelease */
+int lp_wanted(void) { return dbg_int(L"ListPool", is_fm6()) > 0; }
+void list_pool_setup(void)
+{
+    lp_on = lp_real_create && lp_wanted();
+    if (lp_on) wlog("d3d: pool de command lists: a ultima Release guarda a lista, o CreateCommandList seguinte a reaproveita (Reset)");
+}
+
 /* DeferRelease (PASSO 70): no FM6 sempre (a rajada de destruicao do reaper para o quadro ~150 ms e, junto com o
  * NO_HAZARD dos tiles, derrubou a GPU nos boots sem ele); debug.ini DeferRelease=0/1 sobrescreve */
 int dr_wanted(void) { return dbg_int(L"DeferRelease", is_fm6()) > 0; }
@@ -1025,7 +1115,7 @@ void stutter_device(IUnknown *obj)
     ID3D12Device1 *dev1 = NULL;
     ID3D12Device2 *dev2 = NULL;
     static int done;
-    if (done || (!st_on && !dbg_int(L"DeferRelease", 1)) ||
+    if (done || (!st_on && !dbg_int(L"DeferRelease", 1) && !dbg_int(L"ListPool", 1)) ||
         FAILED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device, (void **)&dev))) return;
     done = 1;
     if (!st_freq.QuadPart) QueryPerformanceFrequency(&st_freq);
@@ -1033,6 +1123,7 @@ void stutter_device(IUnknown *obj)
     vt_swap((void **)&dev->lpVtbl->CreatePlacedResource, st_placed, (void **)&real_placed);
     vt_swap((void **)&dev->lpVtbl->CreateReservedResource, st_reserved, (void **)&real_reserved);
     vt_swap((void **)&dev->lpVtbl->CreateHeap, st_heap, (void **)&real_heap);
+    vt_swap((void **)&dev->lpVtbl->CreateCommandList, lp_create, (void **)&lp_real_create);
     if (!st_on) { dev->lpVtbl->Release(dev); return; }
     vt_swap((void **)&dev->lpVtbl->CreateGraphicsPipelineState, st_gpso, (void **)&real_gpso);
     vt_swap((void **)&dev->lpVtbl->CreateComputePipelineState, st_cpso, (void **)&real_cpso);
@@ -1634,10 +1725,12 @@ static void vz_poll(LONG64 now)
         vz_gpu[k] = 0;
     }
     opens = InterlockedExchange(&vz_opens, 0);
-    len += sprintf(buf + len, " | ECL %.1f/quadro, listas %.0f/quadro (max %ld), %.2f ms/quadro | abertas %.0f/quadro, draws %.0f/quadro"
-                   " | CPU ms/quadro:", InterlockedExchange(&vz_ecl, 0) / f, InterlockedExchange(&vz_lists, 0) / f,
+    len += sprintf(buf + len, " | ECL %.1f/quadro, listas %.0f/quadro (max %ld), %.2f ms/quadro | abertas %.0f/quadro, draws %.0f/quadro", InterlockedExchange(&vz_ecl, 0) / f, InterlockedExchange(&vz_lists, 0) / f,
                    InterlockedExchange(&vz_lists_max, 0), ms_of(InterlockedExchange64(&vz_ecl_ticks, 0)) / f, opens / f,
                    InterlockedExchange(&vz_draws, 0) / f);
+    len += sprintf(buf + len, " | CreateCommandList %.1f/quadro %.2f ms, reaproveitadas %.1f/quadro, guardadas %.1f/quadro, falhas %ld"
+                   " | CPU ms/quadro:", InterlockedExchange(&lp_made, 0) / f, ms_of(InterlockedExchange64(&lp_made_ticks, 0)) / f,
+                   InterlockedExchange(&lp_reused, 0) / f, InterlockedExchange(&lp_kept, 0) / f, InterlockedExchange(&lp_failed, 0));
     if (tsc_per_ms > 0) {
         uint32_t idx[VZ_TOP_THREADS], nt = vz_top(cpu, n, idx, VZ_TOP_THREADS);
         for (i = 0; i < nt && len < 1800; i++) {

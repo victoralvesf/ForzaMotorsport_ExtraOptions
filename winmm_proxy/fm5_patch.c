@@ -860,6 +860,7 @@ extern void stutter_install(void);
 extern int cmdalloc_age_patch(int ms);
 extern int tile_nohazard_patch(int on);
 extern void defer_release_setup(void);
+extern void list_pool_setup(void);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
 
@@ -992,6 +993,8 @@ static void hook_apply_patches(void *image, const void *options)
     tile_nohazard_patch(dbg_int(L"TileNoHazard", is_fm6()));
     /* ultima Release do reaper espalhada: no FM6 sempre (stutters e queda da GPU, PASSO 70) */
     defer_release_setup();
+    /* command lists reaproveitadas em vez de criadas a cada gravacao: no FM6 sempre (vazao, PASSO 74) */
+    list_pool_setup();
     if (is_fm5()) {
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM5 em %p, sites do FH2 pulados", game);
