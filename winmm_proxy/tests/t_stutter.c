@@ -345,3 +345,19 @@ TEST(stutter_tile_nohazard_patch)
     CHECK(stub + 9 + 0x16 == stub + 0x1f);                              /* je cai no 2o jmp */
     memset(az + 0xe017d, 0, sizeof site);
 }
+
+/* DeferRelease (PASSO 70): padrao no FM6, desligado nos outros; o debug.ini sobrescreve nos dois sentidos */
+TEST(stutter_defer_release_default)
+{
+    dbgini_set(NULL);
+    fake_azimuth(2);
+    CHECK(dr_wanted());
+    dbgini_set("[Debug]\nDeferRelease=0\n");
+    CHECK(!dr_wanted());
+    fake_azimuth(0);
+    dbgini_set(NULL);
+    CHECK(!dr_wanted());
+    dbgini_set("[Debug]\nDeferRelease=1\n");
+    CHECK(dr_wanted());
+    dbgini_set(NULL);
+}
