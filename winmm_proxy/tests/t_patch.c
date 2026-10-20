@@ -369,6 +369,7 @@ TEST(fm6_skip_intro_patches_exe)
     uint8_t *game = pe_map(FM6_EXE, NULL);
     size_t i;
     if (!game) { test_skip("exe do FM6 ausente"); return; }
+    dbgini_set("[Debug]\nPlacementCommitted=0\n");   /* so os patches do exe do jogo */
     log_capture();
     ini6_set(NULL);
     fm6_patches(game);
@@ -384,6 +385,7 @@ TEST(fm6_skip_intro_patches_exe)
     fm6_patches(game);
     CHECK(log_has("FM6: SkipIntro: site 0xa06b33 nao confere, ignorado"));
     ini6_set(NULL);
+    dbgini_set(NULL);
     pe_unmap(game);
     dump_log_on_fail();
 }
@@ -393,6 +395,7 @@ TEST(fm6_skip_presentation_video_patches_exe)
 {
     uint8_t *game = pe_map(FM6_EXE, NULL);
     if (!game) { test_skip("exe do FM6 ausente"); return; }
+    dbgini_set("[Debug]\nPlacementCommitted=0\n");   /* so os patches do exe do jogo */
     log_capture();
     ini6_set(NULL);
     fm6_patches(game);
@@ -410,6 +413,7 @@ TEST(fm6_skip_presentation_video_patches_exe)
     CHECK(log_has("FM6: SkipPresentationVideo: site nao confere, ignorado"));
     CHECK_HEX(game + 0xce1eb4, "85c06690");
     ini6_set(NULL);
+    dbgini_set(NULL);
     pe_unmap(game);
     dump_log_on_fail();
 }
@@ -422,16 +426,22 @@ TEST(fm6_debug5_committed_placement)
     g_base = az;
     log_capture();
     ini6_set(NULL);
-    dbgini_set("[Debug]\nD3D12Debug=3\n");
+    dbgini_set("[Debug]\nD3D12Debug=3\nPlacementCommitted=0\n");
     fm6_patches(game);
-    CHECK_HEX(az + 0x13bae0, "48895c241055565748");
-    dbgini_set("[Debug]\nD3D12Debug=5\n");
+    CHECK_HEX(az + 0x13bae0, "48895c241055565748");          /* desligado: reservado como no Azimuth */
+    dbgini_set("[Debug]\nD3D12Debug=5\nPlacementCommitted=0\n");
+    fm6_patches(game);
+    CHECK_HEX(az + 0x13bae0, "31c0c324105556574881");        /* D3D12Debug=5 antigo ainda liga */
+    CHECK(log_has("FM6: placement textures como recurso committed"));
+    fm6_patches(game);                            /* bytes ja trocados -> nada muda */
+    CHECK(log_has("FM6: placement textures committed: site 0x13bae0 nao confere, ignorado"));
+    CHECK_HEX(az + 0x13bae0, "31c0c3");
+    pe_unmap(az);
+    az = pe_map(AZIMUTH_EXE, NULL);
+    g_base = az;
+    dbgini_set(NULL);                             /* padrao do FM6: committed */
     fm6_patches(game);
     CHECK_HEX(az + 0x13bae0, "31c0c324105556574881");
-    CHECK(log_has("FM6: D3D12Debug=5: placement textures como recurso committed"));
-    fm6_patches(game);                            /* bytes ja trocados -> nada muda */
-    CHECK(log_has("FM6: D3D12Debug=5: site 0x13bae0 nao confere, ignorado"));
-    CHECK_HEX(az + 0x13bae0, "31c0c3");
     dbgini_set(NULL);
     pe_unmap(game);
     pe_unmap(az);

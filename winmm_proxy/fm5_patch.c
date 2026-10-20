@@ -876,11 +876,11 @@ static void fm6_committed_placement_textures(void)
 {
     static const uint8_t ret0[3] = { 0x31, 0xc0, 0xc3 };
     if (!bytes_match(g_base + RVA_TITLE_STORAGE_RESERVED, "48895c241055565748", 9)) {
-        wlog("FM6: D3D12Debug=5: site %#x nao confere, ignorado", RVA_TITLE_STORAGE_RESERVED);
+        wlog("FM6: placement textures committed: site %#x nao confere, ignorado", RVA_TITLE_STORAGE_RESERVED);
         return;
     }
     write_mem(g_base + RVA_TITLE_STORAGE_RESERVED, ret0, 3);
-    wlog("FM6: D3D12Debug=5: placement textures como recurso committed (sem recurso reservado)");
+    wlog("FM6: placement textures como recurso committed (sem recurso reservado)");
 }
 
 /* EXPERIMENTO D3D12Debug=6 (17_fm6.txt PASSO 25): o destroy comum 0x1400da270 (chamado pela fila de Release
@@ -958,7 +958,13 @@ static int fm6_graphics_protect_install(void)
 /* opcoes do azimuth_fm6.ini */
 static void fm6_patches(uint8_t *game)
 {
-    if (dbg_int(L"D3D12Debug", 0) == 5) fm6_committed_placement_textures();
+    /* PASSO 85: com tiled tier 4 o Azimuth faz de TODA placement texture 2D/3D do FM6 um recurso reservado (create +
+       GetResourceTiling + UpdateTileMappings na fila de render; a destruicao desmapeia no kernel). O streaming do FM6
+       cria/destroi centenas por segundo e a fila de paginacao (atualizacao de tabela de paginas) trava: a fila de
+       render espera por ela, CreateReservedResource bloqueia ~1 s e o device cai (DEVICE_RESET sem lista em voo,
+       sem page fault) no fim da 1a corrida. O caminho committed e o que o Azimuth usa com tier < 4.
+       debug.ini PlacementCommitted=0 volta ao reservado; D3D12Debug=5 (antigo) tambem liga. */
+    if (dbg_int(L"PlacementCommitted", 1) > 0 || dbg_int(L"D3D12Debug", 0) == 5) fm6_committed_placement_textures();
     if (dbg_int(L"D3D12Debug", 0) == 6) fm6_leak_gfx_objects();
     if (cfg6_int(L"SkipIntro", 0)) {
         static const uint8_t nop2[2] = { 0x66, 0x90 }, jmp8 = 0xeb;
