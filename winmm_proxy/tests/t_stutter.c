@@ -250,3 +250,30 @@ TEST(stutter_release_hook)
     CHECK_EQ(rk_nvt, n0 + 1);
     CHECK_EQ(((IUnknown *)&obj)->lpVtbl->Release((IUnknown *)&obj), 41);
 }
+
+/* DeferRelease: a ultima referencia do reaper vai para a fila (objeto vivo); as outras passam direto */
+typedef struct { void **lpVtbl; LONG refs; } fake_obj;
+static ULONG STDMETHODCALLTYPE fo_addref(IUnknown *u) { return (ULONG)InterlockedIncrement(&((fake_obj *)u)->refs); }
+static ULONG STDMETHODCALLTYPE fo_release(IUnknown *u) { return (ULONG)InterlockedDecrement(&((fake_obj *)u)->refs); }
+TEST(stutter_defer_release)
+{
+    static void *vt[3] = { NULL, (void *)fo_addref, (void *)fo_release };
+    fake_obj o = { vt, 2 };
+    LONG d0 = dr_deferred;
+    rk_hook_release(&o);
+    dr_on = 1;
+    dr_is_reaper = 1;
+    CHECK_EQ(((IUnknown *)&o)->lpVtbl->Release((IUnknown *)&o), 1);   /* nao era a ultima: solta direto */
+    CHECK_EQ(o.refs, 1);
+    CHECK_EQ(((IUnknown *)&o)->lpVtbl->Release((IUnknown *)&o), 0);   /* ultima: adiada */
+    CHECK_EQ(o.refs, 1);
+    CHECK_EQ(dr_deferred, d0 + 1);
+    CHECK(dr_q[(dr_head - 1) % DR_QUEUE] == (IUnknown *)&o);
+    rk_call_orig((IUnknown *)&o);                                     /* o que a thread de drenagem faz */
+    CHECK_EQ(o.refs, 0);
+    dr_tail = dr_head;
+    dr_is_reaper = 0;
+    CHECK_EQ(((IUnknown *)&o)->lpVtbl->Release((IUnknown *)&o), (ULONG)-1);   /* fora do reaper: direto */
+    dr_on = 0;
+    dr_is_reaper = -1;
+}

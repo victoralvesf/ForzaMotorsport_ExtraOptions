@@ -268,19 +268,94 @@ void rk_reset(void)
 static struct { void **vt; ULONG (STDMETHODCALLTYPE *orig)(IUnknown *); } rk_vts[RK_VT];
 static volatile LONG rk_nvt;
 
+/* experimento (debug.ini DeferRelease=1, so com StutterLog): a ULTIMA referencia que a thread 'Azimuth reaper'
+ * solta fica numa fila e uma thread propria solta aos poucos (<= DR_BUDGET_US a cada ~2 ms). Testa se a destruicao
+ * em rajada (ate 318 recursos reservados num quadro, PASSO 64) e o que para o quadro. */
+#define DR_QUEUE 16384
+#define DR_BUDGET_US 500
+int dr_on;
+static IUnknown *dr_q[DR_QUEUE];
+static volatile LONG dr_head, dr_tail, dr_deferred, dr_released, dr_full;
+static __thread int dr_is_reaper = -1;
+
+static int dr_thread_is_reaper(void)
+{
+    typedef HRESULT (WINAPI *gtd_fn2)(HANDLE, PWSTR *);
+    static gtd_fn2 gtd;
+    PWSTR desc = NULL;
+    if (dr_is_reaper >= 0) return dr_is_reaper;
+    if (!gtd) gtd = (gtd_fn2)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
+    dr_is_reaper = 0;
+    if (gtd && SUCCEEDED(gtd(GetCurrentThread(), &desc)) && desc) {
+        dr_is_reaper = wcscmp(desc, L"Azimuth reaper") == 0;
+        LocalFree(desc);
+    }
+    return dr_is_reaper;
+}
+
+/* devolve 1 se guardou o objeto (a referencia do chamador passa a ser da fila) */
+static int dr_push(IUnknown *u)
+{
+    LONG h = dr_head;
+    if (h - dr_tail >= DR_QUEUE) { InterlockedIncrement(&dr_full); return 0; }
+    dr_q[h % DR_QUEUE] = u;
+    InterlockedExchange(&dr_head, h + 1);    /* um so produtor (o reaper) */
+    InterlockedIncrement(&dr_deferred);
+    return 1;
+}
+
+static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u);
+static ULONG rk_call_orig(IUnknown *u);
+
+static DWORD WINAPI dr_drain(void *arg)
+{
+    HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 2 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+    (void)arg;
+    for (;;) {
+        LARGE_INTEGER due;
+        LONG64 t0;
+        due.QuadPart = -20000;
+        if (timer && SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, INFINITE);
+        else Sleep(2);
+        t0 = qpc();
+        while (dr_tail != dr_head && (qpc() - t0) * 1000000 < (LONG64)DR_BUDGET_US * st_freq.QuadPart) {
+            IUnknown *u = dr_q[dr_tail % DR_QUEUE];
+            rk_call_orig(u);
+            InterlockedIncrement(&dr_tail);
+            InterlockedIncrement(&dr_released);
+        }
+    }
+    return 0;
+}
+
 static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u)
 {
     void **vt = *(void ***)u;
     LONG i, n = rk_nvt;
     for (i = 0; i < n; i++)
         if (rk_vts[i].vt == vt) {
-            LONG64 t = qpc(), d;
-            ULONG r = rk_vts[i].orig(u);
+            LONG64 t, d;
+            ULONG r;
+            if (dr_on && dr_thread_is_reaper()) {
+                ULONG c = u->lpVtbl->AddRef(u);       /* sonda: 2 = a referencia do reaper e a ultima */
+                if (c == 2 && dr_push(u)) { rk_vts[i].orig(u); return 0; }
+                rk_vts[i].orig(u);
+            }
+            t = qpc();
+            r = rk_vts[i].orig(u);
             d = qpc() - t;
             if (d * 5000 >= st_freq.QuadPart) rk_note(RK_RELEASE, d, NULL, 0, 0);   /* >= 0,2 ms */
             return r;
         }
     return 0;   /* nao acontece: so vtables registradas apontam para ca */
+}
+
+static ULONG rk_call_orig(IUnknown *u)
+{
+    void **vt = *(void ***)u;
+    LONG i, n = rk_nvt;
+    for (i = 0; i < n; i++) if (rk_vts[i].vt == vt) return rk_vts[i].orig(u);
+    return 0;
 }
 
 static SRWLOCK rk_vt_lock = SRWLOCK_INIT;
@@ -349,6 +424,8 @@ static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 
         len += wsprintfA(buf + len, "]");
     }
     len += rk_format(buf + len, (int)sizeof buf - len - 300);
+    if (dr_on) len += sprintf(buf + len, " | adiados %ld soltos %ld fila %ld cheia %ld", dr_deferred, dr_released,
+                              dr_head - dr_tail, dr_full);
     {
         static const char *const qn[] = { "direct", "bundle", "compute", "copy" };
         len += sprintf(buf + len, " | GPU: maior trecho %.1f ms (%s, valor %llu), soma %.1f ms, %ld concluidos, %ld pendentes, "
@@ -903,18 +980,31 @@ static void fq_note(const st_thread *t, const CONTEXT *ctx, const uintptr_t *ret
     }
 }
 
+/* copia da pilha a partir de rsp: 4 KB (a pilha do driver passa de 512 bytes, PASSO 64); perto da base da pilha
+ * a leitura grande falha -> 1 KB, 512 B. Devolve quantos qwords. */
+#define ST_STACK_QW 512
+static uint32_t st_read_stack(uintptr_t rsp, uint64_t *out)
+{
+    static const uint32_t tries[] = { ST_STACK_QW, 128, 64 };
+    uint32_t i;
+    for (i = 0; i < 3; i++) {
+        SIZE_T got = 0;
+        if (ReadProcessMemory(GetCurrentProcess(), (void *)rsp, out, tries[i] * 8, &got) && got == tries[i] * 8) return tries[i];
+    }
+    return 0;
+}
+
 /* RIP + pilha da thread i (suspensa so durante GetThreadContext e a copia) */
 static void st_capture(uint32_t i, uint8_t blocked)
 {
     st_thread *t = &thr[i];
     CONTEXT ctx;
-    uint64_t stack[64];
-    SIZE_T got = 0;
+    static uint64_t stack[ST_STACK_QW];      /* so a thread do amostrador */
+    uint32_t nq = 0;
     int have;
     if (SuspendThread(t->h) == (DWORD)-1) return;
     ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-    have = GetThreadContext(t->h, &ctx) &&
-           ReadProcessMemory(GetCurrentProcess(), (void *)ctx.Rsp, stack, sizeof stack, &got) && got == sizeof stack;
+    have = GetThreadContext(t->h, &ctx) && (nq = st_read_stack((uintptr_t)ctx.Rsp, stack)) != 0;
     ResumeThread(t->h);
     if (!have) return;
     {
@@ -923,7 +1013,7 @@ static void st_capture(uint32_t i, uint8_t blocked)
         s->blocked = blocked;
         s->rip = (uintptr_t)ctx.Rip;
         memset(s->ret, 0, sizeof s->ret);
-        st_scan_returns(stack, 64, (const uintptr_t (*)[2])code_ranges, ncode_ranges, s->ret, ST_RETS);
+        st_scan_returns(stack, nq, (const uintptr_t (*)[2])code_ranges, ncode_ranges, s->ret, ST_RETS);
         fq_note(t, &ctx, s->ret);
     }
 }
@@ -1198,6 +1288,8 @@ void stutter_install(void)
     int i, n = 0;
     st_on = dbg_int(L"StutterLog", 0) > 0;
     if (!st_on) return;
+    dr_on = dbg_int(L"DeferRelease", 0) > 0;
+    if (dr_on) CloseHandle(CreateThread(NULL, 0, dr_drain, NULL, 0, NULL));
     QueryPerformanceFrequency(&st_freq);
     {
         void **f1 = (void **)(g_base + 0x26f878), **f2 = (void **)(g_base + 0x26f880);
