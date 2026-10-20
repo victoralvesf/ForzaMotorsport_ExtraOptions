@@ -203,6 +203,108 @@ static LONG64 sum_t0;
 static volatile LONG frame_no, spikes;
 static float sum_max;
 
+/* ---- recursos por tipo (PASSO 64): criacao (committed/placed/reserved/heap), UpdateTileMappings da fila e
+ * destruicao (Release de ID3D12Resource/ID3D12Heap que leva >= 0,2 ms); a mais lenta de cada tipo com descricao. ---- */
+enum { RK_COMMITTED, RK_PLACED, RK_RESERVED, RK_HEAP, RK_TILES, RK_RELEASE, RK_N };
+typedef struct { LONG64 ticks; DWORD tid; uint32_t dim, w, h, depth, mips, fmt, flags; uint64_t size; } rk_max;
+static volatile LONG rk_n[RK_N];
+static volatile LONG64 rk_ticks[RK_N];
+static rk_max rk_top[RK_N];
+static SRWLOCK rk_lock = SRWLOCK_INIT;
+
+uint64_t st_res_bytes(const D3D12_RESOURCE_DESC *d);
+
+void rk_note(int k, LONG64 ticks, const D3D12_RESOURCE_DESC *rd, uint64_t size, uint32_t flags)
+{
+    InterlockedIncrement(&rk_n[k]);
+    InterlockedAdd64(&rk_ticks[k], ticks);
+    if (ticks <= rk_top[k].ticks) return;
+    AcquireSRWLockExclusive(&rk_lock);
+    if (ticks > rk_top[k].ticks) {
+        rk_max *m = &rk_top[k];
+        memset(m, 0, sizeof *m);
+        m->ticks = ticks;
+        m->tid = GetCurrentThreadId();
+        m->size = size;
+        m->flags = flags;
+        if (rd) {
+            m->dim = rd->Dimension; m->w = (uint32_t)rd->Width; m->h = rd->Height; m->depth = rd->DepthOrArraySize;
+            m->mips = rd->MipLevels; m->fmt = rd->Format; m->flags = rd->Flags;
+            if (!size) m->size = st_res_bytes(rd);
+        }
+    }
+    ReleaseSRWLockExclusive(&rk_lock);
+}
+
+/* " | committed 3 12.0 ms (max 9.1 ms tex2d 2048x2048x1 m12 f71 fl0 16384 KB tid 123), ..." so tipos com chamadas */
+int rk_format(char *buf, int cap)
+{
+    static const char *const kn[RK_N] = { "committed", "placed", "reserved", "heap", "tiles", "destruir" };
+    static const char *const dn[] = { "?", "buf", "tex1d", "tex2d", "tex3d" };
+    int len = 0, k, any = 0;
+    for (k = 0; k < RK_N && len < cap - 200; k++) {
+        rk_max *m = &rk_top[k];
+        if (!rk_n[k]) continue;
+        len += sprintf(buf + len, "%s %s %ld %.1f ms (max %.1f ms", any ? "," : " |", kn[k], rk_n[k], ms_of(rk_ticks[k]), ms_of(m->ticks));
+        if (k == RK_HEAP) len += sprintf(buf + len, " %llu KB fl%#x", (unsigned long long)(m->size >> 10), m->flags);
+        else if (k == RK_TILES) len += sprintf(buf + len, " %u regioes", m->flags);
+        else if (k < RK_HEAP)
+            len += sprintf(buf + len, " %s %ux%ux%u m%u f%u fl%#x %llu KB", dn[m->dim <= 4 ? m->dim : 0], m->w, m->h, m->depth, m->mips,
+                           m->fmt, m->flags, (unsigned long long)(m->size >> 10));
+        len += sprintf(buf + len, " tid %lu)", m->tid);
+        any = 1;
+    }
+    return len;
+}
+
+void rk_reset(void)
+{
+    int k;
+    for (k = 0; k < RK_N; k++) { rk_n[k] = 0; rk_ticks[k] = 0; rk_top[k].ticks = 0; }
+}
+
+/* Release das vtables de recurso/heap (uma entrada por vtable: o slot original de cada uma) */
+#define RK_VT 6
+static struct { void **vt; ULONG (STDMETHODCALLTYPE *orig)(IUnknown *); } rk_vts[RK_VT];
+static volatile LONG rk_nvt;
+
+static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u)
+{
+    void **vt = *(void ***)u;
+    LONG i, n = rk_nvt;
+    for (i = 0; i < n; i++)
+        if (rk_vts[i].vt == vt) {
+            LONG64 t = qpc(), d;
+            ULONG r = rk_vts[i].orig(u);
+            d = qpc() - t;
+            if (d * 5000 >= st_freq.QuadPart) rk_note(RK_RELEASE, d, NULL, 0, 0);   /* >= 0,2 ms */
+            return r;
+        }
+    return 0;   /* nao acontece: so vtables registradas apontam para ca */
+}
+
+static SRWLOCK rk_vt_lock = SRWLOCK_INIT;
+static void rk_hook_release(void *obj)
+{
+    void **vt;
+    LONG i;
+    DWORD old;
+    if (!obj) return;
+    vt = *(void ***)obj;
+    if (vt[2] == (void *)rk_release) return;
+    AcquireSRWLockExclusive(&rk_vt_lock);
+    for (i = 0; i < rk_nvt && rk_vts[i].vt != vt; i++) {}
+    if (i == rk_nvt && i < RK_VT && vt[2] != (void *)rk_release) {
+        rk_vts[i].vt = vt;
+        rk_vts[i].orig = (ULONG (STDMETHODCALLTYPE *)(IUnknown *))vt[2];
+        rk_nvt = i + 1;
+        VirtualProtect(&vt[2], sizeof vt[2], PAGE_READWRITE, &old);
+        vt[2] = (void *)rk_release;
+        VirtualProtect(&vt[2], sizeof vt[2], old, &old);
+    }
+    ReleaseSRWLockExclusive(&rk_vt_lock);
+}
+
 /* ---- GPU por envio (PASSO 63): Signal das filas -> anel; o amostrador consulta GetCompletedValue a cada ~2 ms.
  * Trecho de GPU = conclusao - max(Signal, conclusao anterior na mesma fila) ~ tempo que a GPU levou nesse trecho. */
 #define SG_RING 2048
@@ -228,7 +330,7 @@ LONG64 st_gpu_segment(LONG64 t_sig, LONG64 prev_done, LONG64 t_done)
 static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 t0, LONG64 t1)
 {
     static const char *const kind[] = { "WFSO", "WFSOEx", "WFMO", "CondVar", "WaitOnAddress", "Sleep", "SleepEx" };
-    char buf[1600], one[40];
+    char buf[2600], one[40];
     uint32_t top[6], nt = st_wait_top(t0, t1, top, 6), i, j;
     int len;
     LONG k = InterlockedIncrement(&spikes);
@@ -246,6 +348,7 @@ static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 
         for (j = 0; j < w->nframes; j++) { st_label(one, w->frames[j]); len += wsprintfA(buf + len, "%s", one); }
         len += wsprintfA(buf + len, "]");
     }
+    len += rk_format(buf + len, (int)sizeof buf - len - 300);
     {
         static const char *const qn[] = { "direct", "bundle", "compute", "copy" };
         len += sprintf(buf + len, " | GPU: maior trecho %.1f ms (%s, valor %llu), soma %.1f ms, %ld concluidos, %ld pendentes, "
@@ -282,6 +385,7 @@ static void frame_tick(LONG64 before, LONG64 after)
     frame_start = after;
     for (i = 0; i < ST_NCOUNT; i++) { st_n[i] = 0; st_ticks[i] = 0; }
     st_lists = 0; st_bytes = 0;
+    rk_reset();
     gpu_max_ticks = 0; gpu_max_val = 0; gpu_sum_ticks = 0; gpu_done = 0; sig_waits = 0; sig_dropped = 0;
 }
 
@@ -431,15 +535,53 @@ static void (STDMETHODCALLTYPE *real_ecl)(ID3D12CommandQueue *, UINT, ID3D12Comm
 
 static HRESULT STDMETHODCALLTYPE st_committed(ID3D12Device *d, const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_RESOURCE_DESC *rd,
                                               D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c, REFIID r, void **o)
-{ HRESULT hr; TIMED(ST_RES, real_committed(d, hp, hf, rd, s, c, r, o)); InterlockedAdd64(&st_bytes, (LONG64)st_res_bytes(rd)); return hr; }
+{
+    HRESULT hr;
+    LONG64 t = qpc(), dt;
+    hr = real_committed(d, hp, hf, rd, s, c, r, o);
+    dt = qpc() - t;
+    st_count(ST_RES, dt);
+    InterlockedAdd64(&st_bytes, (LONG64)st_res_bytes(rd));
+    rk_note(RK_COMMITTED, dt, rd, 0, 0);
+    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    return hr;
+}
 static HRESULT STDMETHODCALLTYPE st_placed(ID3D12Device *d, ID3D12Heap *h, UINT64 off, const D3D12_RESOURCE_DESC *rd, D3D12_RESOURCE_STATES s,
                                            const D3D12_CLEAR_VALUE *c, REFIID r, void **o)
-{ HRESULT hr; TIMED(ST_RES, real_placed(d, h, off, rd, s, c, r, o)); return hr; }
+{
+    HRESULT hr;
+    LONG64 t = qpc(), dt;
+    hr = real_placed(d, h, off, rd, s, c, r, o);
+    dt = qpc() - t;
+    st_count(ST_RES, dt);
+    rk_note(RK_PLACED, dt, rd, 0, 0);
+    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    return hr;
+}
 static HRESULT STDMETHODCALLTYPE st_reserved(ID3D12Device *d, const D3D12_RESOURCE_DESC *rd, D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c,
                                              REFIID r, void **o)
-{ HRESULT hr; TIMED(ST_RES, real_reserved(d, rd, s, c, r, o)); return hr; }
+{
+    HRESULT hr;
+    LONG64 t = qpc(), dt;
+    hr = real_reserved(d, rd, s, c, r, o);
+    dt = qpc() - t;
+    st_count(ST_RES, dt);
+    rk_note(RK_RESERVED, dt, rd, 0, 0);
+    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    return hr;
+}
 static HRESULT STDMETHODCALLTYPE st_heap(ID3D12Device *d, const D3D12_HEAP_DESC *hd, REFIID r, void **o)
-{ HRESULT hr; TIMED(ST_RES, real_heap(d, hd, r, o)); if (hd) InterlockedAdd64(&st_bytes, (LONG64)hd->SizeInBytes); return hr; }
+{
+    HRESULT hr;
+    LONG64 t = qpc(), dt;
+    hr = real_heap(d, hd, r, o);
+    dt = qpc() - t;
+    st_count(ST_RES, dt);
+    if (hd) InterlockedAdd64(&st_bytes, (LONG64)hd->SizeInBytes);
+    rk_note(RK_HEAP, dt, NULL, hd ? hd->SizeInBytes : 0, hd ? (uint32_t)hd->Flags : 0);
+    if (SUCCEEDED(hr) && o) rk_hook_release(*o);
+    return hr;
+}
 
 static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
 {
@@ -447,6 +589,18 @@ static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12Comman
     real_ecl(q, n, l);
     st_count(ST_ECL, qpc() - t);
     InterlockedAdd(&st_lists, (LONG)n);
+}
+
+static void (STDMETHODCALLTYPE *real_tiles)(ID3D12CommandQueue *, ID3D12Resource *, UINT, const D3D12_TILED_RESOURCE_COORDINATE *,
+                                            const D3D12_TILE_REGION_SIZE *, ID3D12Heap *, UINT, const D3D12_TILE_RANGE_FLAGS *,
+                                            const UINT *, const UINT *, D3D12_TILE_MAPPING_FLAGS);
+static void STDMETHODCALLTYPE st_tiles(ID3D12CommandQueue *q, ID3D12Resource *res, UINT nr, const D3D12_TILED_RESOURCE_COORDINATE *co,
+                                       const D3D12_TILE_REGION_SIZE *sz, ID3D12Heap *h, UINT ng, const D3D12_TILE_RANGE_FLAGS *rf,
+                                       const UINT *hs, const UINT *rc, D3D12_TILE_MAPPING_FLAGS fl)
+{
+    LONG64 t = qpc();
+    real_tiles(q, res, nr, co, sz, h, ng, rf, hs, rc, fl);
+    rk_note(RK_TILES, qpc() - t, NULL, 0, nr);
 }
 
 static HRESULT (STDMETHODCALLTYPE *real_signal)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
@@ -523,6 +677,7 @@ static HRESULT STDMETHODCALLTYPE st_queue(ID3D12Device *d, const D3D12_COMMAND_Q
         vt_swap((void **)&q->lpVtbl->ExecuteCommandLists, st_ecl, (void **)&real_ecl);
         vt_swap((void **)&q->lpVtbl->Signal, st_signal, (void **)&real_signal);
         vt_swap((void **)&q->lpVtbl->Wait, st_qwait, (void **)&real_qwait);
+        vt_swap((void **)&q->lpVtbl->UpdateTileMappings, st_tiles, (void **)&real_tiles);
         q->lpVtbl->Release(q);
     }
     return hr;

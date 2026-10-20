@@ -215,3 +215,38 @@ TEST(stutter_gpu_segment)
     CHECK_EQ(st_gpu_segment(100, 150, 180), 30);   /* fila ocupada: conta da conclusao anterior */
     CHECK_EQ(st_gpu_segment(100, 200, 180), 0);
 }
+
+/* recursos por tipo: so tipos com chamadas, a mais lenta com descricao */
+TEST(stutter_resource_kinds_format)
+{
+    D3D12_RESOURCE_DESC d;
+    char buf[1024];
+    memset(&d, 0, sizeof d);
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width = 2048; d.Height = 1024; d.DepthOrArraySize = 1; d.MipLevels = 12;
+    d.Format = DXGI_FORMAT_BC1_UNORM;
+    rk_reset();
+    buf[0] = 0;
+    CHECK_EQ(rk_format(buf, sizeof buf), 0);
+    rk_note(RK_PLACED, st_freq.QuadPart / 1000, &d, 0, 0);          /* 1 ms */
+    rk_note(RK_PLACED, st_freq.QuadPart / 100, &d, 0, 0);           /* 10 ms: a maior */
+    rk_note(RK_HEAP, st_freq.QuadPart / 500, NULL, 4 << 20, 0x4);
+    rk_format(buf, sizeof buf);
+    CHECK(strstr(buf, " | placed 2 11.0 ms (max 10.0 ms tex2d 2048x1024x1 m12 f71 fl0 8192 KB tid") != NULL);
+    CHECK(strstr(buf, ", heap 1 2.0 ms (max 2.0 ms 4096 KB fl0x4 tid") != NULL);
+    CHECK(strstr(buf, "committed") == NULL);
+    rk_reset();
+}
+
+/* Release das vtables de recurso: repassa e devolve o valor da original; vtable ja trocada nao entra de novo */
+static ULONG STDMETHODCALLTYPE fake_release(IUnknown *u) { (void)u; return 41; }
+TEST(stutter_release_hook)
+{
+    static void *vt[3] = { NULL, NULL, (void *)fake_release };
+    struct { void **lpVtbl; } obj = { vt };
+    LONG n0 = rk_nvt;
+    rk_hook_release(&obj);
+    CHECK(vt[2] == (void *)rk_release && rk_nvt == n0 + 1);
+    rk_hook_release(&obj);
+    CHECK_EQ(rk_nvt, n0 + 1);
+    CHECK_EQ(((IUnknown *)&obj)->lpVtbl->Release((IUnknown *)&obj), 41);
+}
