@@ -413,6 +413,36 @@ uint32_t gg_trace_get(void *cl, gg_site *out, uint32_t max, uint32_t *dropped)
     return n;
 }
 
+/* resumo da lista para o tempo de GPU por lista (stutter_fm6.c, PASSO 83): em *nops o total de operacoes rastreadas
+   (draws, dispatches, copias) e em top os `max` pontos com mais ocorrencias, do maior ao menor: {hash do PSO da 1a
+   ocorrencia, contagem, op, arg[0], arg[1]}; devolve quantos */
+uint32_t gg_pso_hash(void *pso);
+const char *gg_op_str(uint32_t op) { return op < sizeof gg_op_name / sizeof *gg_op_name ? gg_op_name[op] : "?"; }
+
+uint32_t gg_trace_brief(void *cl, uint32_t *nops, uint32_t (*top)[5], uint32_t max)
+{
+    gg_trace *t;
+    uint32_t n = 0, i, j, k;
+    void *pso[8];
+    if (max > 8) max = 8;
+    *nops = 0;
+    AcquireSRWLockShared(&trace_lock);
+    if ((t = gg_trace_slot(cl, 0)))
+        for (i = 0; i < t->n; i++) {
+            const gg_site *s = &t->s[i];
+            *nops += s->count;
+            for (j = 0; j < n && top[j][1] >= s->count; j++) {}
+            if (j >= max) continue;
+            if (n < max) n++;
+            for (k = n - 1; k > j; k--) { memcpy(top[k], top[k - 1], sizeof *top); pso[k] = pso[k - 1]; }
+            top[j][1] = s->count; top[j][2] = s->op; top[j][3] = s->arg[0]; top[j][4] = s->arg[1];
+            pso[j] = s->pso;
+        }
+    ReleaseSRWLockShared(&trace_lock);
+    for (i = 0; i < n; i++) top[i][0] = gg_pso_hash(pso[i]);   /* fora da trava: gg_pso_hash tem a sua */
+    return n;
+}
+
 /* ---- validacao de CopyTextureRegion (17_fm6.txt PASSO 26) ----
  * O +0x10000 do endereco do page fault (0xbeefdeadb000 -> 0xbeefdeaeb000) parece o "subrecurso seguinte" de um
  * objeto sem memoria; a ultima lista do DRED sempre tem dezenas de CopyTextureRegion. Confere subrecurso,

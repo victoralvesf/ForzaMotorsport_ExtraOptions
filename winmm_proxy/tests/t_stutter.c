@@ -325,6 +325,47 @@ TEST(stutter_retire_margin_patch)
     }
 }
 
+TEST(stutter_gpu_time_per_group)
+{
+    static UINT64 rb[GT_TS];
+    static int cla, clb;
+    ID3D12CommandList *l[3] = { (ID3D12CommandList *)&cla, (ID3D12CommandList *)&clb, (ID3D12CommandList *)&cla };
+    gt_ent *e;
+    gt_rb = rb;
+    gt_freq = 1000;                                           /* 1 tick = 1 ms */
+    gt_slow_ms = 50;
+    gt_head = gt_tail = 0;
+    gt_prev_end = 0;
+    memset(gt_busy, 0, sizeof gt_busy);
+    e = &gt_ring[0];
+    e->ts0 = GT_TS - 1; e->ng = 2; e->n = 3; e->seq = 7; e->qpc = qpc();   /* da a volta no anel de timestamps */
+    gt_group_fill(&e->g[0], l, 0, 2);
+    gt_group_fill(&e->g[1], l, 2, 3);
+    CHECK(e->g[0].cl0 == &cla && e->g[0].nl == 2 && e->g[1].nl == 1 && e->g[0].nops == 0);
+    gt_busy[GT_TS - 1] = gt_busy[0] = gt_busy[1] = 1;
+    gt_head = 1;
+    rb[GT_TS - 1] = 1000; rb[0] = 1010;
+    log_capture();
+    gt_poll();
+    CHECK_EQ(gt_tail, 0);                                     /* o ultimo timestamp ainda nao veio */
+    rb[1] = 1100;                                             /* grupo 2: 90 ms */
+    gt_poll();
+    CHECK_EQ(gt_tail, 1);
+    CHECK(log_has("GPU lenta 90.0 ms no ECL #7 (3 listas; grupo 2 de 2: 1 listas"));
+    CHECK(!log_has("grupo 1 de 2"));                          /* 10 ms: abaixo do limite */
+    CHECK(rb[GT_TS - 1] == 0 && rb[1] == 0 && !gt_busy[0] && !gt_busy[1]);
+    CHECK(gt_prev_end == 1100);
+    e = &gt_ring[1];                                          /* proximo ECL comeca 200 ms depois do fim do anterior */
+    e->ts0 = 2; e->ng = 1; e->n = 1; e->seq = 8;
+    gt_group_fill(&e->g[0], l, 0, 1);
+    gt_head = 2;
+    rb[2] = 1300; rb[3] = 1301;
+    log_capture();
+    gt_poll();
+    CHECK(log_has("GPU parada 200.0 ms ANTES do ECL #8"));
+    CHECK(!log_has("GPU lenta"));
+}
+
 /* perfil das UpdateTileMappings (PASSO 68): contagens, recursos distintos, chamadores */
 TEST(stutter_tile_profile)
 {

@@ -106,6 +106,27 @@ TEST(gpuguard_root_signature_per_list)
     CHECK(gg_cl_rs(&cl1, 1, NULL, 0) == &rs2);
 }
 
+TEST(gpuguard_trace_brief)
+{
+    static int cl, rs, pso1, pso2;
+    void *fa[1] = { (void *)0x140005000 }, *fb[1] = { (void *)0x140006000 }, *fc[1] = { (void *)0x140007000 };
+    uint32_t a1[3] = { 36, 2, 0 }, a2[3] = { 1500, 1, 0 }, top[8][5], nops = 99, i;
+    gg_trace_add(&cl, GG_OP_DRAW_INDEXED, &rs, &pso1, a1, fa, 1);
+    for (i = 0; i < 3; i++) gg_trace_add(&cl, GG_OP_DRAW, &rs, &pso2, a2, fb, 1);
+    gg_trace_add(&cl, GG_OP_DISPATCH, &rs, NULL, a1, fc, 1);
+    gg_trace_add(&cl, GG_OP_DISPATCH, &rs, NULL, a1, fc, 1);
+    CHECK_EQ(gg_trace_brief(&cl, &nops, top, 2), 2);          /* so os 2 com mais ocorrencias */
+    CHECK_EQ(nops, 6);
+    CHECK(top[0][1] == 3 && top[0][2] == GG_OP_DRAW && top[0][3] == 1500 && top[0][4] == 1);
+    CHECK(top[0][0] == gg_pso_hash(&pso2));
+    CHECK(top[1][1] == 2 && top[1][2] == GG_OP_DISPATCH);
+    CHECK_EQ(gg_trace_brief(&cl, &nops, top, 8), 3);
+    CHECK(top[2][1] == 1 && top[2][3] == 36);
+    CHECK_EQ(gg_trace_brief(&rs, &nops, top, 8), 0);          /* lista desconhecida */
+    CHECK_EQ(nops, 0);
+    CHECK(!strcmp(gg_op_str(GG_OP_DRAW_INDEXED), "DrawIndexedInstanced") && !strcmp(gg_op_str(99), "?"));
+}
+
 TEST(gpuguard_trace_per_list)
 {
     static int cl1, cl2, rs, pso;

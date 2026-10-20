@@ -942,12 +942,167 @@ int lt_format(char *buf, int cap, double frames)
     return n ? len : 0;
 }
 
+/* ---- tempo de GPU por grupo de listas na fila direct (PASSO 83, com StutterLog; debug.ini GpuSlowMs, padrao 50,
+ * 0 = desligado). No trecho da queda do fim da corrida UMA submissao leva 1-1.6 s (passando de ~2 s: device reset).
+ * Cada ExecuteCommandLists da fila direct vira, na mesma chamada, [ts, grupo 1, ts, grupo 2, ..., ts]: ate GT_GROUPS
+ * grupos de listas seguidas, cada ts uma lista pre-gravada (EndQuery TIMESTAMP + ResolveQueryData do seu indice no
+ * buffer de leitura). Concluido (o ultimo ts do ECL escrito), loga o grupo que passou de GpuSlowMs com o resumo das
+ * listas tirado na hora do envio (gg_trace_brief: draws e pontos com mais ocorrencias, hash do PSO) e o buraco da
+ * GPU entre o fim do ECL anterior e o inicio deste (Wait de fila / fila vazia). ---- */
+static int sg_is_direct(ID3D12CommandQueue *q);
+#define GT_TS     1024       /* listas de timestamp / indices da query heap */
+#define GT_GROUPS 32
+#define GT_ENT    256
+#define GT_TOP    6
+typedef struct { void *cl0; uint32_t nl, nops, ntop, top[GT_TOP][5]; } gt_group;
+typedef struct { uint32_t ts0, ng, seq, n; LONG64 qpc; gt_group g[GT_GROUPS]; } gt_ent;
+extern uint32_t gg_trace_brief(void *cl, uint32_t *nops, uint32_t (*top)[5], uint32_t max);
+extern const char *gg_op_str(uint32_t op);
+int gt_slow_ms;
+static int gt_state;                         /* 0 = a criar, 1 = pronto, -1 = falhou */
+static ID3D12GraphicsCommandList *gt_lists[GT_TS];
+static volatile UINT64 *gt_rb;               /* buffer de leitura mapeado: GT_TS valores */
+static uint8_t gt_busy[GT_TS];
+static UINT64 gt_freq, gt_prev_end;
+static gt_ent gt_ring[GT_ENT];
+static uint32_t gt_head, gt_tail, gt_next_ts, gt_seq;
+static SRWLOCK gt_lock = SRWLOCK_INIT;
+static ID3D12CommandList *gt_buf[4096 + GT_GROUPS + 1];
+
+static int gt_init(ID3D12CommandQueue *q)
+{
+    ID3D12Device *dev = NULL;
+    ID3D12QueryHeap *qh = NULL;
+    ID3D12Resource *rb = NULL;
+    ID3D12CommandAllocator *al = NULL;
+    D3D12_QUERY_HEAP_DESC qd = { D3D12_QUERY_HEAP_TYPE_TIMESTAMP, GT_TS, 0 };
+    D3D12_HEAP_PROPERTIES hp = { D3D12_HEAP_TYPE_READBACK, D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_MEMORY_POOL_UNKNOWN, 0, 0 };
+    D3D12_RESOURCE_DESC rd = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, GT_TS * 8, 1, 1, 1, DXGI_FORMAT_UNKNOWN, { 1, 0 },
+                               D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_RESOURCE_FLAG_NONE };
+    void *p = NULL;
+    int i;
+    if (FAILED(q->lpVtbl->GetTimestampFrequency(q, &gt_freq)) || !gt_freq ||
+        FAILED(q->lpVtbl->GetDevice(q, &IID_ID3D12Device, (void **)&dev))) return -1;
+    if (FAILED(dev->lpVtbl->CreateQueryHeap(dev, &qd, &IID_ID3D12QueryHeap, (void **)&qh)) ||
+        FAILED(dev->lpVtbl->CreateCommittedResource(dev, &hp, D3D12_HEAP_FLAG_NONE, &rd, D3D12_RESOURCE_STATE_COPY_DEST, NULL,
+                                                    &IID_ID3D12Resource, (void **)&rb)) ||
+        FAILED(rb->lpVtbl->Map(rb, 0, NULL, &p)) ||
+        FAILED(dev->lpVtbl->CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_DIRECT, &IID_ID3D12CommandAllocator, (void **)&al))) {
+        dev->lpVtbl->Release(dev);
+        return -1;
+    }
+    gt_rb = p;
+    for (i = 0; i < GT_TS; i++) {
+        ID3D12GraphicsCommandList *l = NULL;
+        if (FAILED(dev->lpVtbl->CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, al, NULL,
+                                                  &IID_ID3D12GraphicsCommandList, (void **)&l))) {
+            dev->lpVtbl->Release(dev);
+            return -1;
+        }
+        l->lpVtbl->EndQuery(l, qh, D3D12_QUERY_TYPE_TIMESTAMP, i);
+        l->lpVtbl->ResolveQueryData(l, qh, D3D12_QUERY_TYPE_TIMESTAMP, i, 1, rb, (UINT64)i * 8);
+        l->lpVtbl->Close(l);
+        gt_lists[i] = l;
+        gt_rb[i] = 0;
+    }
+    dev->lpVtbl->Release(dev);   /* query heap, buffer, allocator e listas ficam ate o fim */
+    wlog("stutter: tempo de GPU por grupo de listas na fila direct (loga acima de %d ms; %d timestamps)", gt_slow_ms, GT_TS);
+    return 1;
+}
+
+static double gt_ms(UINT64 a, UINT64 b) { return b > a ? (double)(b - a) * 1000.0 / (double)gt_freq : 0.0; }
+
+/* sob gt_lock: consome os ECLs concluidos em ordem e loga os lentos */
+static void gt_poll(void)
+{
+    while (gt_tail != gt_head) {
+        gt_ent *e = &gt_ring[gt_tail % GT_ENT];
+        uint32_t i, k;
+        UINT64 t[GT_GROUPS + 1];
+        if (!gt_rb[(e->ts0 + e->ng) % GT_TS]) return;
+        for (i = 0; i <= e->ng; i++) t[i] = gt_rb[(e->ts0 + i) % GT_TS];
+        if (gt_prev_end && gt_ms(gt_prev_end, t[0]) >= gt_slow_ms)
+            wlog("stutter: GPU parada %.1f ms ANTES do ECL #%u (fila direct; Wait de fila ou nada enviado)",
+                 gt_ms(gt_prev_end, t[0]), e->seq);
+        for (i = 0; i < e->ng; i++) {
+            const gt_group *g = &e->g[i];
+            char buf[1024];
+            int len;
+            double ms = gt_ms(t[i], t[i + 1]);
+            if (ms < gt_slow_ms) continue;
+            len = snprintf(buf, sizeof buf, "stutter: GPU lenta %.1f ms no ECL #%u (%u listas; grupo %u de %u: %u listas a partir "
+                           "de %p, %u operacoes, ECL inteiro %.1f ms, enviado ha %.0f ms):", ms, e->seq, e->n, i + 1, e->ng,
+                           g->nl, g->cl0, g->nops, gt_ms(t[0], t[e->ng]), ms_of(qpc() - e->qpc));
+            for (k = 0; k < g->ntop && len < (int)sizeof buf - 90; k++)
+                len += snprintf(buf + len, sizeof buf - len, " [pso %08x x%u %s (%u,%u)]", g->top[k][0], g->top[k][1],
+                                gg_op_str(g->top[k][2]), g->top[k][3], g->top[k][4]);
+            wlog("%s", buf);
+        }
+        gt_prev_end = t[e->ng];
+        for (i = 0; i <= e->ng; i++) { gt_rb[(e->ts0 + i) % GT_TS] = 0; gt_busy[(e->ts0 + i) % GT_TS] = 0; }
+        gt_tail++;
+    }
+}
+
+/* resume as listas [a, b) no grupo: soma das operacoes e os GT_TOP pontos com mais ocorrencias entre elas */
+static void gt_group_fill(gt_group *g, ID3D12CommandList *const *l, UINT a, UINT b)
+{
+    UINT i;
+    g->cl0 = l[a]; g->nl = b - a; g->nops = 0; g->ntop = 0;
+    for (i = a; i < b; i++) {
+        uint32_t top[GT_TOP][5], nops, n = gg_trace_brief(l[i], &nops, top, GT_TOP), j, k, m;
+        g->nops += nops;
+        for (j = 0; j < n; j++) {
+            for (k = 0; k < g->ntop && g->top[k][1] >= top[j][1]; k++) {}
+            if (k >= GT_TOP) continue;
+            if (g->ntop < GT_TOP) g->ntop++;
+            for (m = g->ntop - 1; m > k; m--) memcpy(g->top[m], g->top[m - 1], sizeof *g->top);
+            memcpy(g->top[k], top[j], sizeof *top);
+        }
+    }
+}
+
+/* ECL da fila direct com timestamps; 0 = nao medido (o chamador envia normal) */
+static int gt_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
+{
+    uint32_t ng, per, i, k = 0;
+    gt_ent *e;
+    if (!n || n > 4096) return 0;
+    AcquireSRWLockExclusive(&gt_lock);
+    if (!gt_state) gt_state = gt_init(q);
+    if (gt_state < 0) { ReleaseSRWLockExclusive(&gt_lock); return 0; }
+    gt_poll();
+    per = (n + GT_GROUPS - 1) / GT_GROUPS;
+    ng = (n + per - 1) / per;
+    for (i = 0; i <= ng; i++)
+        if (gt_busy[(gt_next_ts + i) % GT_TS]) break;
+    if (i <= ng || gt_head - gt_tail >= GT_ENT) { ReleaseSRWLockExclusive(&gt_lock); return 0; }   /* anel cheio: sem medir */
+    e = &gt_ring[gt_head % GT_ENT];
+    e->ts0 = gt_next_ts; e->ng = ng; e->n = n; e->seq = ++gt_seq; e->qpc = qpc();
+    for (i = 0; i < ng; i++) {
+        UINT a = i * per, b = a + per < n ? a + per : n;
+        gt_busy[(e->ts0 + i) % GT_TS] = 1;
+        gt_buf[k++] = (ID3D12CommandList *)gt_lists[(e->ts0 + i) % GT_TS];
+        memcpy(gt_buf + k, l + a, (b - a) * sizeof *l);
+        k += b - a;
+        gt_group_fill(&e->g[i], l, a, b);
+    }
+    gt_busy[(e->ts0 + ng) % GT_TS] = 1;
+    gt_buf[k++] = (ID3D12CommandList *)gt_lists[(e->ts0 + ng) % GT_TS];
+    gt_next_ts = (gt_next_ts + ng + 1) % GT_TS;
+    gt_head++;
+    real_ecl(q, k, gt_buf);       /* sob a trava: a ordem do anel e a ordem na GPU */
+    ReleaseSRWLockExclusive(&gt_lock);
+    return 1;
+}
+
 static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
 {
     LONG64 t, dt;
     if (n) lt_hook(l[0]);
     t = qpc();
-    real_ecl(q, n, l);
+    if (!(gt_slow_ms > 0 && sg_is_direct(q) && gt_ecl(q, n, l)))
+        real_ecl(q, n, l);
     dt = qpc() - t;
     st_count(ST_ECL, dt);
     InterlockedAdd(&st_lists, (LONG)n);
@@ -1089,6 +1244,14 @@ static uint8_t sg_type(ID3D12CommandQueue *q)
 {
     LONG i, n = sg_nqueues;
     for (i = 0; i < n && i < SG_QUEUES; i++) if (sg_queues[i].q == q) return sg_queues[i].type;
+    return 0;
+}
+
+/* fila registrada no CreateCommandQueue como direct (uma desconhecida nao conta) */
+static int sg_is_direct(ID3D12CommandQueue *q)
+{
+    LONG i, n = sg_nqueues;
+    for (i = 0; i < n && i < SG_QUEUES; i++) if (sg_queues[i].q == q) return sg_queues[i].type == D3D12_COMMAND_LIST_TYPE_DIRECT;
     return 0;
 }
 
@@ -2106,6 +2269,7 @@ void stutter_install(void)
     int i, n = 0;
     st_on = dbg_int(L"StutterLog", 0) > 0;
     if (!st_on) return;
+    gt_slow_ms = dbg_int(L"GpuSlowMs", 50);
     QueryPerformanceFrequency(&st_freq);
     {
         void **f1 = (void **)(g_base + 0x26f878), **f2 = (void **)(g_base + 0x26f880);
