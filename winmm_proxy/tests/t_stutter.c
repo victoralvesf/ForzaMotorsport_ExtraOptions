@@ -185,6 +185,25 @@ TEST(stutter_queue_throttle_install)
     /* chamada que nao vem do limitador: so repassa */
     fq_real = fake_switch;
     CHECK(st_switch_c(0x10, 0x20) == 7 && fq.q == 0);
+    /* chamada do limitador: so contadores (fila lida direto); o log sai do amostrador quando o episodio acaba */
+    {
+        static uint8_t q[0x100];
+        *(uint32_t *)(q + 0xc0) = 9;
+        *(uint32_t *)(q + 0xc4) = 4;
+        CHECK(st_switch_c((uintptr_t)q, fq_ret) == 7);
+        CHECK(st_switch_c((uintptr_t)q, fq_ret) == 7);
+        CHECK(fq.q == (uintptr_t)q && fq.spins == 2 && fq.pend0 == 9 && fq.lim == 4);
+        log_capture();
+        fq_poll(fq.last);                                     /* episodio ainda ativo */
+        CHECK(!log_has("stutter: fila"));
+        fq.t0 = fq.last - st_freq.QuadPart / 10;              /* durou 100 ms */
+        fq_poll(fq.last + st_freq.QuadPart);                  /* 1 s sem voltas: acabou */
+        CHECK(log_has("girando (2 voltas)") && log_has("pendentes 9 (max 9) limite 4; candidatas: nenhuma"));
+        log_capture();
+        fq_poll(fq.last + st_freq.QuadPart * 2);              /* ja registrado */
+        CHECK(!log_has("stutter: fila"));
+        fq.q = 0;
+    }
     g_fm6_game = old6;
     VirtualFree(game, 0, MEM_RELEASE);
 }

@@ -593,6 +593,64 @@ static int st_in_game(uintptr_t a)
     return game && a >= (uintptr_t)game && a < (uintptr_t)game + 0x8000000;
 }
 
+/* ---- limitador da fila de blocos do FM6 (17_fm6.txt RESULTADO PASSO 59-61) ----
+ * game+0x195400: com pendentes [q+0xc0] > 2x limite [q+0xc4] a thread principal gira em kernelx!SwitchToThread
+ * (IAT do jogo 0x101af88, chamada em 0x195410, retorno 0x195416; rbx = fila) ate pendentes <= limite ou 1 s.
+ * Com StutterLog o slot vai para st_switch_thunk (rcx = rbx, rdx = retorno). Na thread do jogo so contadores
+ * (leituras diretas da fila, sem syscall nem lock); as candidatas a consumidora (threads do jogo com a fila ou
+ * fila-0x28 = dono em algum registrador) saem das amostras do amostrador (st_capture) e o log "stutter: fila"
+ * tambem e da thread do amostrador, quando o episodio (voltas com < 5 ms entre si) acaba e durou >= 20 ms.
+ * PASSO 61 fazia a captura na thread do jogo (Toolhelp + suspensoes > 5 ms por volta): a principal passava a
+ * parada nisso e a sessao terminou em device removed. */
+#define FQ_IAT 0x101af88
+#define FQ_CALL 0x195410
+#define FQ_GAP_MS 5
+#define FQ_MIN_MS 20
+#define FQ_CAND 6
+
+typedef struct { DWORD tid; uintptr_t start, rip, ret[ST_RETS]; const char *reg; uint8_t owner; uint32_t n; } fq_cand;
+static BOOL (WINAPI *fq_real)(void);
+static uintptr_t fq_ret;
+/* escrito so pela thread do jogo no limitador; lido pelo amostrador (diagnostico: leitura sem lock) */
+static volatile struct {
+    uintptr_t q;
+    LONG64 t0, last;
+    LONG frame, id;
+    uint32_t spins, pend0, pend_max, lim;
+} fq;
+static fq_cand fq_cands[FQ_CAND];      /* so a thread do amostrador */
+static uint32_t fq_ncand;
+static LONG fq_done = 0, fq_reports;
+
+/* registradores da amostra: fila do episodio ativo (ou o dono, fila-0x28) -> candidata */
+static void fq_note(const st_thread *t, const CONTEXT *ctx, const uintptr_t *ret)
+{
+    static const char *const names[] = { "rbx", "rsi", "rdi", "rbp", "r12", "r13", "r14", "r15" };
+    DWORD64 regs[8];
+    uintptr_t q = fq.q;
+    uint32_t k, j;
+    if (!q || fq.id == fq_done || ms_of(qpc() - fq.last) > FQ_GAP_MS) return;
+    regs[0] = ctx->Rbx; regs[1] = ctx->Rsi; regs[2] = ctx->Rdi; regs[3] = ctx->Rbp;
+    regs[4] = ctx->R12; regs[5] = ctx->R13; regs[6] = ctx->R14; regs[7] = ctx->R15;
+    for (k = 0; k < 8; k++) {
+        if (regs[k] != q && regs[k] != q - 0x28) continue;
+        for (j = 0; j < fq_ncand && fq_cands[j].tid != t->tid; j++) {}
+        if (j == fq_ncand) {
+            if (fq_ncand == FQ_CAND) return;
+            fq_ncand++;
+            fq_cands[j].tid = t->tid;
+            fq_cands[j].start = t->start;
+            fq_cands[j].n = 0;
+            fq_cands[j].rip = (uintptr_t)ctx->Rip;      /* 1a amostra */
+            memcpy(fq_cands[j].ret, ret, sizeof fq_cands[j].ret);
+            fq_cands[j].reg = names[k];
+            fq_cands[j].owner = regs[k] != q;
+        }
+        fq_cands[j].n++;
+        return;
+    }
+}
+
 /* RIP + pilha da thread i (suspensa so durante GetThreadContext e a copia) */
 static void st_capture(uint32_t i, uint8_t blocked)
 {
@@ -602,7 +660,7 @@ static void st_capture(uint32_t i, uint8_t blocked)
     SIZE_T got = 0;
     int have;
     if (SuspendThread(t->h) == (DWORD)-1) return;
-    ctx.ContextFlags = CONTEXT_CONTROL;
+    ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
     have = GetThreadContext(t->h, &ctx) &&
            ReadProcessMemory(GetCurrentProcess(), (void *)ctx.Rsp, stack, sizeof stack, &got) && got == sizeof stack;
     ResumeThread(t->h);
@@ -614,6 +672,7 @@ static void st_capture(uint32_t i, uint8_t blocked)
         s->rip = (uintptr_t)ctx.Rip;
         memset(s->ret, 0, sizeof s->ret);
         st_scan_returns(stack, 64, (const uintptr_t (*)[2])code_ranges, ncode_ranges, s->ret, ST_RETS);
+        fq_note(t, &ctx, s->ret);
     }
 }
 
@@ -730,31 +789,6 @@ static void st_report(LONG frame, double stalled_ms, double limit_ms)
     st_report_blocked();
 }
 
-/* ---- limitador da fila de blocos do FM6 (17_fm6.txt RESULTADO PASSO 59/60) ----
- * game+0x195400: com pendentes [q+0xc0] > 2x limite [q+0xc4] a thread principal gira em kernelx!SwitchToThread
- * (IAT do jogo 0x101af88, chamada em 0x195410, retorno 0x195416; rbx = fila) ate pendentes <= limite ou 1 s.
- * Com StutterLog o slot vai para st_switch_thunk (rcx = rbx, rdx = retorno): cada episodio (chamadas seguidas
- * com < 5 ms entre elas) vira "stutter: fila ..." se durar >= 20 ms, com os campos da fila, o dono (vtable em
- * q-0x28) e as threads do jogo com q ou q-0x28 em algum registrador (candidatas a consumidora). */
-#define FQ_IAT 0x101af88
-#define FQ_CALL 0x195410
-#define FQ_GAP_MS 5
-#define FQ_MIN_MS 20
-#define FQ_CAND 6
-
-typedef struct { DWORD tid; uintptr_t start, rip, ret[ST_RETS]; const char *reg; uint8_t owner; } fq_cand;
-static BOOL (WINAPI *fq_real)(void);
-static uintptr_t fq_ret;
-static struct {
-    uintptr_t q, cur, owner_vt;
-    LONG64 t0, last;
-    LONG frame;
-    uint32_t spins, pend0, pend_max, lim, ncand;
-    uint8_t d5, captured;
-    fq_cand cand[FQ_CAND];
-} fq;
-static LONG fq_reports;
-
 extern BOOL WINAPI st_switch_thunk(void);
 __asm__(
     ".text\n"
@@ -764,112 +798,62 @@ __asm__(
     "    movq (%rsp), %rdx\n"
     "    jmp st_switch_c\n");
 
-static int fq_read(uintptr_t a, void *out, SIZE_T n)
-{
-    SIZE_T got = 0;
-    return ReadProcessMemory(GetCurrentProcess(), (void *)a, out, n, &got) && got == n;
-}
-
-/* threads do jogo com q ou o dono em algum registrador (cada uma suspensa so durante GetThreadContext) */
-static void fq_capture(uintptr_t q)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    THREADENTRY32 te;
-    BOOL ok;
-    DWORD pid = GetCurrentProcessId(), me = GetCurrentThreadId();
-    static nqit_fn nqit;
-    if (!nqit) nqit = (nqit_fn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread");
-    fq.ncand = 0;
-    if (snap == INVALID_HANDLE_VALUE) return;
-    te.dwSize = sizeof te;
-    for (ok = Thread32First(snap, &te); ok && fq.ncand < FQ_CAND; ok = Thread32Next(snap, &te)) {
-        HANDLE h;
-        uintptr_t start = 0;
-        CONTEXT ctx;
-        uint64_t stack[64];
-        int have;
-        if (te.th32OwnerProcessID != pid || te.th32ThreadID == me) continue;
-        h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, te.th32ThreadID);
-        if (!h) continue;
-        if (nqit) nqit(h, 9, &start, sizeof start, NULL);
-        if (!st_in_game(start) || SuspendThread(h) == (DWORD)-1) { CloseHandle(h); continue; }
-        ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
-        have = GetThreadContext(h, &ctx) && fq_read((uintptr_t)ctx.Rsp, stack, sizeof stack);
-        ResumeThread(h);
-        CloseHandle(h);
-        if (have) {
-            static const char *const names[] = { "rbx", "rsi", "rdi", "rbp", "r12", "r13", "r14", "r15" };
-            DWORD64 regs[8];
-            int k;
-            regs[0] = ctx.Rbx; regs[1] = ctx.Rsi; regs[2] = ctx.Rdi; regs[3] = ctx.Rbp;
-            regs[4] = ctx.R12; regs[5] = ctx.R13; regs[6] = ctx.R14; regs[7] = ctx.R15;
-            for (k = 0; k < 8; k++)
-                if (regs[k] == q || regs[k] == q - 0x28) {
-                    fq_cand *c = &fq.cand[fq.ncand++];
-                    c->tid = te.th32ThreadID;
-                    c->start = start;
-                    c->rip = (uintptr_t)ctx.Rip;
-                    memset(c->ret, 0, sizeof c->ret);
-                    st_scan_returns(stack, 64, (const uintptr_t (*)[2])code_ranges, ncode_ranges, c->ret, ST_RETS);
-                    c->reg = names[k];
-                    c->owner = regs[k] != q;
-                    break;
-                }
-        }
-    }
-    CloseHandle(snap);
-}
-
-static void fq_flush(void)
-{
-    char buf[2000], one[96];
-    uint32_t i, q;
-    int len;
-    double ms = ms_of(fq.last - fq.t0);
-    if (!fq.q || ms < FQ_MIN_MS) return;
-    if (++fq_reports > 2000 && (fq_reports & (fq_reports - 1))) return;
-    st_label_any(one, fq.owner_vt);
-    len = sprintf(buf, "stutter: fila %p dono vt%s: %.1f ms girando (%u voltas) desde o quadro #%ld; pendentes %u (max %u) "
-                  "limite %u atual %p d5 %u; candidatas:", (void *)fq.q, one, ms, fq.spins, fq.frame, fq.pend0, fq.pend_max,
-                  fq.lim, (void *)fq.cur, fq.d5);
-    for (i = 0; i < fq.ncand && len < 1700; i++) {
-        fq_cand *c = &fq.cand[i];
-        st_label_any(one, c->start);
-        len += sprintf(buf + len, " [tid %lu inicio%s %s=%s rip", c->tid, one, c->reg, c->owner ? "dono" : "fila");
-        st_label_any(one, c->rip);
-        len += sprintf(buf + len, "%s <", one);
-        for (q = 0; q < ST_RETS && c->ret[q]; q++) { st_label_any(one, c->ret[q]); len += sprintf(buf + len, "%s", one); }
-        len += sprintf(buf + len, " >]");
-    }
-    if (!fq.ncand) len += sprintf(buf + len, " nenhuma");
-    wlog("%s", buf);
-}
-
+/* thread do jogo: so contadores; a fila e um objeto vivo do jogo (rbx do limitador), lida direto */
 BOOL WINAPI st_switch_c(uintptr_t q, uintptr_t ret)
 {
+    BOOL r;
     if (ret == fq_ret) {
         LONG64 now = qpc();
-        uint32_t pend = 0;
-        fq_read(q + 0xc0, &pend, 4);
+        uint32_t pend = *(volatile uint32_t *)(q + 0xc0);
         if (q != fq.q || ms_of(now - fq.last) > FQ_GAP_MS) {
-            uintptr_t vt = 0;
-            fq_flush();
-            memset(&fq, 0, sizeof fq);
             fq.q = q;
             fq.t0 = now;
             fq.frame = frame_no + 1;
-            fq.pend0 = pend;
-            fq_read(q + 0xc4, &fq.lim, 4);
-            fq_read(q + 0x60, &fq.cur, 8);
-            fq_read(q + 0xd5, &fq.d5, 1);
-            if (fq_read(q - 0x28, &vt, 8)) fq.owner_vt = vt;
+            fq.spins = 0;
+            fq.pend0 = fq.pend_max = pend;
+            fq.lim = *(volatile uint32_t *)(q + 0xc4);
+            fq.id++;
         }
         if (pend > fq.pend_max) fq.pend_max = pend;
         fq.spins++;
-        fq.last = now;
-        if (!fq.captured && ms_of(now - fq.t0) >= 10) { fq.captured = 1; fq_capture(q); }
+        r = fq_real();
+        fq.last = qpc();
+        return r;
     }
     return fq_real();
+}
+
+/* thread do amostrador, a cada volta: episodio terminado -> log (>= 20 ms) */
+static void fq_poll(LONG64 now)
+{
+    char buf[2000], one[96];
+    uint32_t i, k;
+    int len;
+    uintptr_t vt = 0, q = fq.q;
+    LONG id = fq.id;
+    double ms;
+    SIZE_T got = 0;
+    if (!q || id == fq_done || ms_of(now - fq.last) <= FQ_GAP_MS) return;
+    ms = ms_of(fq.last - fq.t0);
+    fq_done = id;
+    if (ms >= FQ_MIN_MS && (++fq_reports <= 2000 || !(fq_reports & (fq_reports - 1)))) {
+        ReadProcessMemory(GetCurrentProcess(), (void *)(q - 0x28), &vt, sizeof vt, &got);
+        st_label_any(one, vt);
+        len = sprintf(buf, "stutter: fila %p dono vt%s: %.1f ms girando (%u voltas) desde o quadro #%ld; pendentes %u (max %u) "
+                      "limite %u; candidatas:", (void *)q, one, ms, fq.spins, fq.frame, fq.pend0, fq.pend_max, fq.lim);
+        for (i = 0; i < fq_ncand && len < 1700; i++) {
+            fq_cand *c = &fq_cands[i];
+            st_label_any(one, c->start);
+            len += sprintf(buf + len, " [tid %lu inicio%s %s=%s x%u rip", c->tid, one, c->reg, c->owner ? "dono" : "fila", c->n);
+            st_label_any(one, c->rip);
+            len += sprintf(buf + len, "%s <", one);
+            for (k = 0; k < ST_RETS && c->ret[k]; k++) { st_label_any(one, c->ret[k]); len += sprintf(buf + len, "%s", one); }
+            len += sprintf(buf + len, " >]");
+        }
+        if (!fq_ncand) len += sprintf(buf + len, " nenhuma");
+        wlog("%s", buf);
+    }
+    fq_ncand = 0;
 }
 
 /* thread do amostrador, depois do 1o Present (imports do jogo ja resolvidos): confere os bytes da chamada e o slot */
@@ -921,6 +905,7 @@ static DWORD WINAPI st_sampler(void *arg)
         now = qpc();
         fs = frame_start;
         if (!fs) continue;
+        fq_poll(now);
         if (!ncode_ranges) {   /* depois do 1o Present o jogo ja esta carregado */
             uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
             if (game) { code_ranges[ncode_ranges][0] = (uintptr_t)game; code_ranges[ncode_ranges++][1] = (uintptr_t)game + 0x8000000; }
