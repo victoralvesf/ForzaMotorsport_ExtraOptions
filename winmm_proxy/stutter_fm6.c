@@ -2024,16 +2024,24 @@ int cmdalloc_age_patch(int ms)
 
 /* EXPERIMENTO RetireMargin (PASSO 81, debug.ini; padrao 0): 0x1400d9a40 poe na fila do reaper (recurso, descritor
  * ou objeto) com o valor de fence dado - enviado + 1 em 0x1400d9b10, por lote em 0x1400d9bd0 - e 0x1400d9d10 so passa
- * ao reaper quando o concluido chega nele. Somar N ao valor atrasa TODA a aposentadoria (objeto do Azimuth, slots de
- * descritor, Release D3D12) por ~N envios (~13 por quadro). A fila continua em ordem (todos ganham o mesmo N). */
+ * ao reaper quando o concluido chega nele; a fila e ordenada (insercao pelo valor). Somar N so no caminho de
+ * 0x1400d9b10 (retorno azimuth+0xd9b7f: objeto do Azimuth, slots de descritor, Release D3D12) atrasa essa
+ * aposentadoria por ~N envios (~13 por quadro). O de 0x1400d9bd0 (por lote, do submit) fica: atrasado tambem, o
+ * FM6 caiu no carregamento (PASSO 81, 1a versao). */
 #define RM_ENQUEUE_RVA 0xd9a40
+#define RM_SINGLE_RET  0xd9b7f
 typedef void (*rm_enqueue_fn)(void *dev, UINT64 fence, void *sp);
 static rm_enqueue_fn rm_orig;
 static UINT64 rm_margin;
 
+static UINT64 rm_fence(const void *ret, UINT64 fence)
+{
+    return ret == g_base + RM_SINGLE_RET ? fence + rm_margin : fence;
+}
+
 static void rm_enqueue(void *dev, UINT64 fence, void *sp)
 {
-    rm_orig(dev, fence + rm_margin, sp);
+    rm_orig(dev, rm_fence(__builtin_return_address(0), fence), sp);
 }
 
 int retire_margin_patch(int n)
