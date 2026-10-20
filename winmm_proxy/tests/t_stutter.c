@@ -735,3 +735,163 @@ TEST(stutter_blackbox_reexec_kind)
     CHECK_EQ(CX_REEXEC, 8);                         /* d3d_fm5.c usa CX_REEXEC_KIND 8 */
     CHECK(strstr(cx_names[CX_REEXEC], "reexecutada") != NULL);
 }
+
+/* AllocatorShare: aberturas da mesma thread reusam o allocator enquanto nenhuma lista dele grava; volta ao pool do
+ * Azimuth uma vez so, com o maior fence, quando aposentado e todas as aberturas devolveram */
+static fake_obj as_fakes[8];
+static int as_nfake;
+static void *as_back[8];
+static UINT64 as_back_fence[8];
+static int as_nback;
+static void **fake_as_acq(void **out, void *dev)
+{
+    static void *vt[3] = { NULL, (void *)fo_addref, (void *)fo_release };
+    (void)dev;
+    as_fakes[as_nfake].lpVtbl = vt;
+    as_fakes[as_nfake].refs = 1;
+    *out = &as_fakes[as_nfake++];
+    return out;
+}
+static void fake_as_ret(void *dev, UINT64 fence, void **a)
+{
+    (void)dev;
+    as_back[as_nback] = *a;
+    as_back_fence[as_nback++] = fence;
+    *a = NULL;
+}
+static void as_test_begin(int budget)
+{
+    memset(as_tab, 0, sizeof as_tab); as_hi = 0; as_live = 0;
+    as_nfake = 0; as_nback = 0;
+    as_orig_acq = fake_as_acq; as_orig_ret = fake_as_ret;
+    as_real_close = lpf_close; as_real_reset = lpf_reset;
+    as_on = 1; as_budget = budget;
+}
+static void as_test_end(void)
+{
+    as_on = 0;
+    as_orig_acq = NULL; as_orig_ret = NULL;
+    memset(as_tab, 0, sizeof as_tab); as_hi = 0; as_live = 0;
+}
+#define AS_L(x) ((ID3D12GraphicsCommandList *)&(x))
+TEST(stutter_alloc_share)
+{
+    static lp_fake l1, l2, l3, l4;
+    void *dev = (void *)0x1234, *a = NULL, *b = NULL, *c = NULL, *x = NULL, *p;
+    fake_obj other = { NULL, 1 };
+    as_test_begin(3);
+    /* 1a abertura: do pool; l1 grava com ele */
+    as_acquire(&a, dev);
+    CHECK(a == &as_fakes[0]);
+    CHECK_EQ(as_fakes[0].refs, 2);                     /* chamador + propria */
+    as_reset(AS_L(l1), a, NULL);
+    /* outra abertura com l1 ainda gravando: allocator novo */
+    as_acquire(&b, dev);
+    CHECK(b == &as_fakes[1]);
+    as_reset(AS_L(l2), b, NULL);
+    /* l1 fechada: a 3a abertura reusa a, sem passar pelo pool */
+    as_close(AS_L(l1));
+    as_acquire(&c, dev);
+    CHECK(c == a);
+    CHECK_EQ(as_nfake, 2);
+    CHECK_EQ(as_fakes[0].refs, 3);
+    as_reset(AS_L(l3), c, NULL);
+    /* l3 gravando: a nao serve para outra abertura */
+    as_acquire(&x, dev);
+    CHECK(x == &as_fakes[2]);
+    p = x; as_return(dev, 0, &p);                      /* devolvida gravando: volta ja ao pool */
+    CHECK_EQ(as_nback, 1);
+    /* l3 fechada; devolucoes de a (fences 7 e 5) com 2 de 3 aberturas: nada volta ao pool */
+    as_close(AS_L(l3));
+    p = a; as_return(dev, 7, &p);
+    CHECK(p == NULL);
+    p = c; as_return(dev, 5, &p);
+    CHECK_EQ(as_nback, 1);
+    CHECK_EQ(as_fakes[0].refs, 1);                     /* so a propria */
+    /* a 3a abertura de a o aposenta */
+    as_acquire(&x, dev);
+    CHECK(x == a);
+    CHECK(as_find(a) && as_find(a)->retired);
+    as_reset(AS_L(l4), x, NULL);
+    as_close(AS_L(l4));
+    p = x; as_return(dev, 6, &p);
+    CHECK_EQ(as_nback, 2);                             /* volta uma vez so, com o maior fence */
+    CHECK(as_back[1] == a);
+    CHECK_EQ(as_back_fence[1], 7);
+    CHECK_EQ(as_fakes[0].refs, 1);                     /* a propria passou ao pool */
+    CHECK(as_find(a) == NULL);
+    /* b devolvido com l2 ainda gravando (gravacao destruida): nao reusa, volta ja */
+    p = b; as_return(dev, 0, &p);
+    CHECK_EQ(as_nback, 3);
+    CHECK(as_back[2] == b);
+    CHECK_EQ(as_hi, 0);
+    CHECK_EQ(as_live, 0);
+    /* allocator que nao saiu daqui: passa direto */
+    p = &other; as_return(dev, 9, &p);
+    CHECK_EQ(as_nback, 4);
+    CHECK(as_back[3] == &other && as_back_fence[3] == 9);
+    /* desligado: tudo do pool, nada rastreado */
+    as_on = 0;
+    as_acquire(&a, dev);
+    CHECK(a == &as_fakes[3]);
+    CHECK(as_find(a) == NULL);
+    as_test_end();
+}
+
+/* outra thread nao reusa o allocator; com AS_PER_THREAD gravando, o mais usado e aposentado */
+static void *as_thr_got;
+static DWORD WINAPI as_thr(void *dev) { as_acquire(&as_thr_got, dev); return 0; }
+TEST(stutter_alloc_share_threads)
+{
+    static lp_fake l[AS_PER_THREAD + 1];
+    void *dev = (void *)0x1234, *a = NULL, *got[AS_PER_THREAD + 1];
+    HANDLE h;
+    int i;
+    as_test_begin(64);
+    as_acquire(&a, dev);
+    as_reset(AS_L(l[0]), a, NULL);
+    as_close(AS_L(l[0]));
+    h = CreateThread(NULL, 0, as_thr, dev, 0, NULL);
+    WaitForSingleObject(h, INFINITE);
+    CloseHandle(h);
+    CHECK(as_thr_got && as_thr_got != a);              /* a e da 1a thread */
+    as_test_end();
+    as_test_begin(64);
+    for (i = 0; i <= AS_PER_THREAD; i++) {             /* todas gravando ao mesmo tempo */
+        as_acquire(&got[i], dev);
+        as_reset(AS_L(l[i]), got[i], NULL);
+    }
+    CHECK_EQ(as_nfake, AS_PER_THREAD + 1);
+    CHECK_EQ(as_live, AS_PER_THREAD + 1);
+    for (i = 0; i <= AS_PER_THREAD; i++) as_close(AS_L(l[i]));
+    {
+        int retired = 0;
+        for (i = 0; i < as_hi; i++) retired += as_tab[i].a && as_tab[i].retired;
+        CHECK_EQ(retired, 1);
+    }
+    as_test_end();
+}
+
+/* os ganchos so entram com o prologo original de 0x1400dea50 e 0x1400ded10; padrao so no FM6 */
+TEST(stutter_alloc_share_setup)
+{
+    uint8_t *az = fake_azimuth(0);
+    log_capture();
+    dbgini_set(NULL);
+    as_on = 0;
+    alloc_share_setup();                               /* nao e FM6, sem ini: desligado */
+    CHECK(!as_on);
+    dbgini_set("[Debug]\nAllocatorShare=16\n");
+    alloc_share_setup();                               /* bytes zerados: nao confere */
+    CHECK(!as_on);
+    CHECK(log_has("pool de command allocators do Azimuth (azimuth+0xdea50) nao confere"));
+    memcpy(az + 0xdea50, "\x48\x89\x5c\x24\x18\x55\x56\x57\x41\x54\x41\x55\x41\x56\x41\x57", 16);
+    memcpy(az + 0xded10, "\x48\x89\x5c\x24\x10\x4c\x89\x44\x24\x18\x55\x56\x57\x41\x54", 15);
+    alloc_share_setup();
+    CHECK(as_on);
+    CHECK_EQ(as_budget, 16);
+    CHECK(log_has("AllocatorShare: aberturas de command list da mesma thread reusam o allocator (ate 16"));
+    as_on = 0;
+    as_orig_acq = NULL; as_orig_ret = NULL;
+    dbgini_set(NULL);
+}

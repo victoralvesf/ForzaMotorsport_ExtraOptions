@@ -862,6 +862,7 @@ extern int tile_nohazard_patch(int on);
 extern int retire_margin_patch(int n);
 extern void defer_release_setup(void);
 extern void list_pool_setup(void);
+extern void alloc_share_setup(void);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
 extern int fm6_imm_srv_hold_install(void);
@@ -1005,6 +1006,8 @@ static void hook_apply_patches(void *image, const void *options)
     retire_margin_patch(dbg_int(L"RetireMargin", 0));
     /* command lists reaproveitadas em vez de criadas a cada gravacao: no FM6 sempre (vazao, PASSO 74) */
     list_pool_setup();
+    /* aberturas da mesma thread dividem o command allocator: no FM6 sempre (memoria do driver, PASSO 91) */
+    alloc_share_setup();
     if (is_fm5()) {
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM5 em %p, sites do FH2 pulados", game);

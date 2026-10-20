@@ -1482,6 +1482,13 @@ static ULONG STDMETHODCALLTYPE lp_release(IUnknown *u)
     return lp_real_release(u);
 }
 
+/* allocators compartilhados (abaixo) */
+static void as_bind(void *l, void *a);
+static HRESULT STDMETHODCALLTYPE as_close(ID3D12GraphicsCommandList *l);
+static HRESULT STDMETHODCALLTYPE as_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps);
+static HRESULT (STDMETHODCALLTYPE *as_real_close)(ID3D12GraphicsCommandList *);
+static HRESULT (STDMETHODCALLTYPE *as_real_reset)(ID3D12GraphicsCommandList *, ID3D12CommandAllocator *, ID3D12PipelineState *);
+
 static HRESULT STDMETHODCALLTYPE lp_create(ID3D12Device *d, UINT mask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *a,
                                            ID3D12PipelineState *ps, REFIID riid, void **out)
 {
@@ -1503,11 +1510,193 @@ static HRESULT STDMETHODCALLTYPE lp_create(ID3D12Device *d, UINT mask, D3D12_COM
     hr = lp_real_create(d, mask, type, a, ps, riid, out);
     InterlockedAdd64(&lp_made_ticks, qpc() - t);
     InterlockedIncrement(&lp_made);
-    if (SUCCEEDED(hr) && out && *out && !hooked && !InterlockedCompareExchange(&hooked, 1, 0)) {
-        void **vt = *(void ***)*out;                  /* a mesma vtable para todos os tipos (por cima do gpuguard) */
-        vt_swap(&vt[2], (void *)lp_release, (void **)&lp_real_release);
+    if (SUCCEEDED(hr) && out && *out) {
+        as_bind(*out, a);
+        if (!hooked && !InterlockedCompareExchange(&hooked, 1, 0)) {
+            void **vt = *(void ***)*out;              /* a mesma vtable para todos os tipos (por cima do gpuguard) */
+            vt_swap(&vt[2], (void *)lp_release, (void **)&lp_real_release);
+            vt_swap(&vt[9], (void *)as_close, (void **)&as_real_close);
+            vt_swap(&vt[10], (void *)as_reset, (void **)&as_real_reset);
+        }
     }
     return hr;
+}
+
+/* ---- allocators compartilhados (PASSO 91): o Azimuth tira um command allocator do pool (0x1400dea50, com Reset)
+ * para CADA abertura de command list e o devolve (0x1400ded10, com o fence do envio) quando a lista e enviada ou a
+ * gravacao destruida. O FM6 abre 400-1200 listas por quadro -> milhares de allocators vivos com as listas em voo, e
+ * no driver AMD cada allocator usado guarda ~1.1 MB (tools\d3d12_mem_probe.c) -> ~11 GB privados na rajada do fim da
+ * 1a corrida e DEVICE_RESET ("Kernel memory failure"). Aqui as aberturas da MESMA thread reusam o mesmo allocator
+ * (sem Reset) enquanto nenhuma lista dele estiver gravando (D3D12: uma lista gravando por allocator; listas fechadas
+ * ou em voo podem conviver). Ele volta ao pool do Azimuth uma vez so, com o MAIOR fence das devolucoes, quando foi
+ * aposentado (N aberturas, ou devolvido com a lista ainda gravando) e todas as aberturas devolveram.
+ * debug.ini AllocatorShare=N (aberturas por allocator; 0/1 = desligado); FM6 padrao 64. ---- */
+#define AS_ACQ_RVA 0xdea50
+#define AS_RET_RVA 0xded10
+#define AS_MAX 1024
+#define AS_PER_THREAD 8
+typedef struct {
+    IUnknown *a;            /* referencia propria; NULL = livre */
+    void *dev, *list;       /* list: a lista gravando com ele (Reset/CreateCommandList ate o Close) */
+    DWORD tid;              /* so a thread dona o reusa */
+    LONG users, uses;       /* entregues e nao devolvidos / aberturas desde que saiu do pool */
+    UINT64 fence;
+    int busy, retired;
+} as_ent;
+typedef void **(*as_acq_fn)(void **out, void *dev);
+typedef void (*as_ret_fn)(void *dev, UINT64 fence, void **alloc);
+static as_ent as_tab[AS_MAX];
+static LONG as_hi;          /* entradas usadas abaixo deste indice */
+static SRWLOCK as_lock = SRWLOCK_INIT;
+static int as_on, as_budget;
+static as_acq_fn as_orig_acq;
+static as_ret_fn as_orig_ret;
+static volatile LONG as_shared, as_fresh, as_pushed, as_live;
+
+static as_ent *as_find(const void *a)
+{
+    LONG i;
+    for (i = 0; i < as_hi; i++) if (as_tab[i].a == a) return &as_tab[i];
+    return NULL;
+}
+
+/* tira a entrada (com a trava); devolve a referencia propria para o pool do Azimuth fora da trava */
+static IUnknown *as_take(as_ent *e, void **dev, UINT64 *fence)
+{
+    IUnknown *a = e->a;
+    *dev = e->dev; *fence = e->fence;
+    memset(e, 0, sizeof *e);
+    while (as_hi && !as_tab[as_hi - 1].a) as_hi--;
+    InterlockedDecrement(&as_live);
+    return a;
+}
+
+static void as_push(IUnknown *a, void *dev, UINT64 fence)
+{
+    void *p = a;
+    if (!a) return;
+    InterlockedIncrement(&as_pushed);
+    as_orig_ret(dev, fence, &p);
+}
+
+static void **as_acquire(void **out, void *dev)
+{
+    DWORD tid = GetCurrentThreadId();
+    as_ent *e, *cand = NULL, *oldest = NULL, *slot = NULL;
+    IUnknown *old = NULL;
+    void *odev = NULL;
+    UINT64 ofence = 0;
+    LONG i, mine = 0;
+    if (!as_on) return as_orig_acq(out, dev);
+    AcquireSRWLockExclusive(&as_lock);
+    for (i = 0; i < as_hi; i++) {
+        e = &as_tab[i];
+        if (!e->a || e->retired || e->tid != tid || e->dev != dev) continue;
+        mine++;
+        if (!e->busy && !cand) cand = e;
+        if (!oldest || e->uses > oldest->uses) oldest = e;
+    }
+    if (cand) {
+        cand->busy = 1; cand->list = NULL;
+        cand->users++;
+        if (++cand->uses >= as_budget) cand->retired = 1;
+        cand->a->lpVtbl->AddRef(cand->a);
+        *out = cand->a;
+        ReleaseSRWLockExclusive(&as_lock);
+        InterlockedIncrement(&as_shared);
+        return out;
+    }
+    ReleaseSRWLockExclusive(&as_lock);
+    as_orig_acq(out, dev);                            /* pool do Azimuth (com Reset) ou CreateCommandAllocator */
+    if (!*out) return out;
+    InterlockedIncrement(&as_fresh);
+    AcquireSRWLockExclusive(&as_lock);
+    if (mine >= AS_PER_THREAD && oldest && oldest->a && !oldest->retired && oldest->tid == tid) {
+        oldest->retired = 1;                          /* todas gravando: a mais usada sai quando as listas voltarem */
+        if (!oldest->users) old = as_take(oldest, &odev, &ofence);
+    }
+    for (i = 0; i < AS_MAX; i++) if (!as_tab[i].a) { slot = &as_tab[i]; break; }
+    if (slot) {                                       /* sem lugar: allocator comum, so do Azimuth */
+        IUnknown *a = *out;
+        a->lpVtbl->AddRef(a);
+        slot->a = a; slot->dev = dev; slot->tid = tid;
+        slot->users = 1; slot->uses = 1; slot->fence = 0; slot->busy = 1; slot->list = NULL;
+        slot->retired = as_budget <= 1;
+        if (slot - as_tab >= as_hi) as_hi = (LONG)(slot - as_tab) + 1;
+        InterlockedIncrement(&as_live);
+    }
+    ReleaseSRWLockExclusive(&as_lock);
+    as_push(old, odev, ofence);
+    return out;
+}
+
+static void as_return(void *dev, UINT64 fence, void **alloc)
+{
+    IUnknown *a = alloc ? *alloc : NULL, *done = NULL;
+    as_ent *e;
+    void *pdev = NULL;
+    UINT64 pfence = 0;
+    if (!a) { as_orig_ret(dev, fence, alloc); return; }
+    AcquireSRWLockExclusive(&as_lock);
+    e = as_find(a);
+    if (!e) { ReleaseSRWLockExclusive(&as_lock); as_orig_ret(dev, fence, alloc); return; }
+    if (fence > e->fence) e->fence = fence;
+    if (--e->users <= 0) {
+        if (e->busy) e->retired = 1;                  /* a gravacao em curso foi devolvida sem Close: nao reusa */
+        if (e->retired) done = as_take(e, &pdev, &pfence);
+    }
+    ReleaseSRWLockExclusive(&as_lock);
+    *alloc = NULL;
+    a->lpVtbl->Release(a);                            /* a do chamador; fica a propria (ou a do pool) */
+    as_push(done, pdev, pfence);
+}
+
+/* a lista l passa a gravar com o allocator a */
+static void as_bind(void *l, void *a)
+{
+    as_ent *e;
+    if (!as_on || !a) return;
+    AcquireSRWLockExclusive(&as_lock);
+    if ((e = as_find(a))) e->list = l;
+    ReleaseSRWLockExclusive(&as_lock);
+}
+
+static HRESULT STDMETHODCALLTYPE as_reset(ID3D12GraphicsCommandList *l, ID3D12CommandAllocator *a, ID3D12PipelineState *ps)
+{
+    HRESULT hr = as_real_reset(l, a, ps);
+    if (SUCCEEDED(hr)) as_bind(l, a);
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE as_close(ID3D12GraphicsCommandList *l)
+{
+    HRESULT hr = as_real_close(l);
+    LONG i;
+    if (!as_on) return hr;
+    AcquireSRWLockExclusive(&as_lock);
+    for (i = 0; i < as_hi; i++)
+        if (as_tab[i].a && as_tab[i].list == l) { as_tab[i].list = NULL; as_tab[i].busy = 0; }
+    ReleaseSRWLockExclusive(&as_lock);
+    return hr;
+}
+
+/* hook do apply_patches (fm5_patch.c) */
+int as_wanted(void) { return dbg_int(L"AllocatorShare", is_fm6() ? 64 : 0); }
+void alloc_share_setup(void)
+{
+    int n = as_wanted();
+    if (n <= 1 || as_on) return;
+    if (!hook_function(AS_ACQ_RVA, "48895c24185556574154415541564157", 16, (void *)as_acquire, (void **)&as_orig_acq)) {
+        wlog("d3d: pool de command allocators do Azimuth (azimuth+%#x) nao confere -> sem AllocatorShare", AS_ACQ_RVA);
+        return;
+    }
+    if (!hook_function(AS_RET_RVA, "48895c24104c894424185556574154", 15, (void *)as_return, (void **)&as_orig_ret)) {
+        wlog("d3d: devolucao de command allocator do Azimuth (azimuth+%#x) nao confere -> sem AllocatorShare", AS_RET_RVA);
+        return;   /* o gancho de aquisicao sem o de devolucao e inofensivo: as_on fica 0 e nada e compartilhado */
+    }
+    as_budget = n;
+    as_on = 1;
+    wlog("d3d: AllocatorShare: aberturas de command list da mesma thread reusam o allocator (ate %d por allocator)", n);
 }
 
 /* hook do apply_patches (fm5_patch.c), como o DeferRelease */
@@ -2162,6 +2351,10 @@ static void vz_poll(LONG64 now)
     len += sprintf(buf + len, " | CreateCommandList %.1f/quadro %.2f ms, reaproveitadas %.1f/quadro, guardadas %.1f/quadro, falhas %ld",
                    InterlockedExchange(&lp_made, 0) / f, ms_of(InterlockedExchange64(&lp_made_ticks, 0)) / f,
                    InterlockedExchange(&lp_reused, 0) / f, InterlockedExchange(&lp_kept, 0) / f, InterlockedExchange(&lp_failed, 0));
+    if (as_on)
+        len += sprintf(buf + len, " | allocators: do pool %.1f/quadro, reusados %.1f/quadro, devolvidos %.1f/quadro, %ld compartilhados vivos",
+                       InterlockedExchange(&as_fresh, 0) / f, InterlockedExchange(&as_shared, 0) / f,
+                       InterlockedExchange(&as_pushed, 0) / f, as_live);
     {   /* memoria do processo (PASSO 90: a queda do fim da corrida e "Kernel memory failure" com ~11 GB privados) */
         PROCESS_MEMORY_COUNTERS_EX pm;
         pm.cb = sizeof pm;
