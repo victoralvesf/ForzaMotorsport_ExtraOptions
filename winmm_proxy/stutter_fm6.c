@@ -20,6 +20,7 @@
 #include <tlhelp32.h>
 #include <intrin.h>
 #include <dxgi1_2.h>
+#include <psapi.h>
 
 extern uint8_t *g_base;
 extern uint8_t *g_game;
@@ -2158,9 +2159,17 @@ static void vz_poll(LONG64 now)
     len += sprintf(buf + len, " | ECL %.1f/quadro, listas %.0f/quadro (max %ld), %.2f ms/quadro | abertas %.0f/quadro, draws %.0f/quadro", InterlockedExchange(&vz_ecl, 0) / f, InterlockedExchange(&vz_lists, 0) / f,
                    InterlockedExchange(&vz_lists_max, 0), ms_of(InterlockedExchange64(&vz_ecl_ticks, 0)) / f, opens / f,
                    InterlockedExchange(&vz_draws, 0) / f);
-    len += sprintf(buf + len, " | CreateCommandList %.1f/quadro %.2f ms, reaproveitadas %.1f/quadro, guardadas %.1f/quadro, falhas %ld"
-                   " | CPU ms/quadro:", InterlockedExchange(&lp_made, 0) / f, ms_of(InterlockedExchange64(&lp_made_ticks, 0)) / f,
+    len += sprintf(buf + len, " | CreateCommandList %.1f/quadro %.2f ms, reaproveitadas %.1f/quadro, guardadas %.1f/quadro, falhas %ld",
+                   InterlockedExchange(&lp_made, 0) / f, ms_of(InterlockedExchange64(&lp_made_ticks, 0)) / f,
                    InterlockedExchange(&lp_reused, 0) / f, InterlockedExchange(&lp_kept, 0) / f, InterlockedExchange(&lp_failed, 0));
+    {   /* memoria do processo (PASSO 90: a queda do fim da corrida e "Kernel memory failure" com ~11 GB privados) */
+        PROCESS_MEMORY_COUNTERS_EX pm;
+        pm.cb = sizeof pm;
+        if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof pm))
+            len += sprintf(buf + len, " | memoria privada %llu MiB (pico %llu)", (unsigned long long)(pm.PrivateUsage >> 20),
+                           (unsigned long long)(pm.PeakPagefileUsage >> 20));
+    }
+    len += sprintf(buf + len, " | CPU ms/quadro:");
     if (tsc_per_ms > 0) {
         uint32_t idx[VZ_TOP_THREADS], nt = vz_top(cpu, n, idx, VZ_TOP_THREADS);
         for (i = 0; i < nt && len < 1800; i++) {
