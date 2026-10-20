@@ -207,3 +207,11 @@ TEST(stutter_queue_throttle_install)
     g_fm6_game = old6;
     VirtualFree(game, 0, MEM_RELEASE);
 }
+
+/* trecho de GPU: desde o Signal ou desde a conclusao anterior da mesma fila, o que vier depois */
+TEST(stutter_gpu_segment)
+{
+    CHECK_EQ(st_gpu_segment(100, 50, 180), 80);    /* fila ociosa: conta do Signal */
+    CHECK_EQ(st_gpu_segment(100, 150, 180), 30);   /* fila ocupada: conta da conclusao anterior */
+    CHECK_EQ(st_gpu_segment(100, 200, 180), 0);
+}

@@ -203,6 +203,28 @@ static LONG64 sum_t0;
 static volatile LONG frame_no, spikes;
 static float sum_max;
 
+/* ---- GPU por envio (PASSO 63): Signal das filas -> anel; o amostrador consulta GetCompletedValue a cada ~2 ms.
+ * Trecho de GPU = conclusao - max(Signal, conclusao anterior na mesma fila) ~ tempo que a GPU levou nesse trecho. */
+#define SG_RING 2048
+#define SG_QUEUES 8
+typedef struct { ID3D12Fence *f; UINT64 v; LONG64 t_sig; uint8_t qt; volatile LONG state; } st_sig;   /* state: 0 livre, 1 escrevendo, 2 pendente */
+static st_sig sigs[SG_RING];
+static volatile LONG sig_seq, sig_dropped, sig_waits;
+static uint32_t sig_tail;                        /* so o amostrador */
+static LONG64 sig_last_done[4];                  /* por tipo de fila (0 direct, 1 bundle, 2 compute, 3 copy) */
+static volatile LONG64 gpu_max_ticks;            /* maior trecho do intervalo (zerado no Present) */
+static volatile LONG64 gpu_max_val, gpu_sum_ticks;
+static volatile LONG gpu_max_qt, gpu_done, gpu_pend;
+static struct { ID3D12CommandQueue *q; uint8_t type; } sg_queues[SG_QUEUES];
+static volatile LONG sg_nqueues;
+
+/* duracao de um trecho de GPU: desde o Signal ou desde a conclusao anterior na fila, o que vier depois */
+LONG64 st_gpu_segment(LONG64 t_sig, LONG64 prev_done, LONG64 t_done)
+{
+    LONG64 start = t_sig > prev_done ? t_sig : prev_done;
+    return t_done > start ? t_done - start : 0;
+}
+
 static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 t0, LONG64 t1)
 {
     static const char *const kind[] = { "WFSO", "WFSOEx", "WFMO", "CondVar", "WaitOnAddress", "Sleep", "SleepEx" };
@@ -217,12 +239,18 @@ static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 
                    st_n[ST_RES], ms_of(st_ticks[ST_RES]), (long)(st_bytes >> 20), st_n[ST_ECL], st_lists,
                    ms_of(st_ticks[ST_ECL]));
     if (!nt) len += wsprintfA(buf + len, " nenhuma");
-    for (i = 0; i < nt && len < 1400; i++) {
+    for (i = 0; i < nt && len < 1300; i++) {
         st_wait *w = &waits[top[i]];
         len += sprintf(buf + len, " [%s %.1f ms tid %u%s", kind[w->kind % 7], w->us / 1000.0, w->tid,
                        w->tid == present_tid ? " P" : "");
         for (j = 0; j < w->nframes; j++) { st_label(one, w->frames[j]); len += wsprintfA(buf + len, "%s", one); }
         len += wsprintfA(buf + len, "]");
+    }
+    {
+        static const char *const qn[] = { "direct", "bundle", "compute", "copy" };
+        len += sprintf(buf + len, " | GPU: maior trecho %.1f ms (%s, valor %llu), soma %.1f ms, %ld concluidos, %ld pendentes, "
+                       "%ld Wait de fila, %ld fora do anel", ms_of(gpu_max_ticks), qn[gpu_max_qt & 3],
+                       (unsigned long long)gpu_max_val, ms_of(gpu_sum_ticks), gpu_done, gpu_pend, sig_waits, sig_dropped);
     }
     wlog("%s", buf);
 }
@@ -254,6 +282,7 @@ static void frame_tick(LONG64 before, LONG64 after)
     frame_start = after;
     for (i = 0; i < ST_NCOUNT; i++) { st_n[i] = 0; st_ticks[i] = 0; }
     st_lists = 0; st_bytes = 0;
+    gpu_max_ticks = 0; gpu_max_val = 0; gpu_sum_ticks = 0; gpu_done = 0; sig_waits = 0; sig_dropped = 0;
 }
 
 static HRESULT (STDMETHODCALLTYPE *real_present)(IDXGISwapChain *, UINT, UINT);
@@ -420,12 +449,80 @@ static void STDMETHODCALLTYPE st_ecl(ID3D12CommandQueue *q, UINT n, ID3D12Comman
     InterlockedAdd(&st_lists, (LONG)n);
 }
 
+static HRESULT (STDMETHODCALLTYPE *real_signal)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
+static HRESULT (STDMETHODCALLTYPE *real_qwait)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
+
+static uint8_t sg_type(ID3D12CommandQueue *q)
+{
+    LONG i, n = sg_nqueues;
+    for (i = 0; i < n && i < SG_QUEUES; i++) if (sg_queues[i].q == q) return sg_queues[i].type;
+    return 0;
+}
+
+static HRESULT STDMETHODCALLTYPE st_signal(ID3D12CommandQueue *q, ID3D12Fence *f, UINT64 v)
+{
+    HRESULT hr = real_signal(q, f, v);
+    if (SUCCEEDED(hr) && f) {
+        st_sig *e = &sigs[(uint32_t)InterlockedIncrement(&sig_seq) % SG_RING];
+        if (InterlockedCompareExchange(&e->state, 1, 0) == 0) {
+            f->lpVtbl->AddRef(f);                 /* solto pelo amostrador quando concluir */
+            e->f = f; e->v = v; e->t_sig = qpc(); e->qt = sg_type(q);
+            InterlockedExchange(&e->state, 2);
+        } else {
+            InterlockedIncrement(&sig_dropped);
+        }
+    }
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE st_qwait(ID3D12CommandQueue *q, ID3D12Fence *f, UINT64 v)
+{
+    InterlockedIncrement(&sig_waits);
+    return real_qwait(q, f, v);
+}
+
+/* thread do amostrador: conclusoes desde a ultima volta (anel em ordem de Signal, varrido inteiro a partir do mais
+ * antigo pendente; a cauda so anda enquanto nao houver pendente antes) */
+static void sg_poll(LONG64 now)
+{
+    uint32_t i, k, pend = 0;
+    ID3D12Fence *lastf = NULL;
+    UINT64 lastv = 0;
+    for (k = 0, i = sig_tail; k < SG_RING; k++, i = (i + 1) % SG_RING) {
+        st_sig *e = &sigs[i];
+        UINT64 done;
+        if (e->state != 2) {
+            if (!pend && e->state == 0) sig_tail = (i + 1) % SG_RING;
+            continue;
+        }
+        if (e->f != lastf) { lastf = e->f; lastv = e->f->lpVtbl->GetCompletedValue(e->f); }
+        done = lastv;
+        if (done != UINT64_MAX && done < e->v) { pend++; continue; }
+        {
+            LONG64 seg = st_gpu_segment(e->t_sig, sig_last_done[e->qt & 3], now);
+            sig_last_done[e->qt & 3] = now;
+            gpu_sum_ticks += seg;
+            gpu_done++;
+            if (seg > gpu_max_ticks) { gpu_max_ticks = seg; gpu_max_val = (LONG64)e->v; gpu_max_qt = e->qt; }
+        }
+        e->f->lpVtbl->Release(e->f);
+        e->f = NULL;
+        InterlockedExchange(&e->state, 0);
+        if (!pend) sig_tail = (i + 1) % SG_RING;
+    }
+    gpu_pend = (LONG)pend;
+}
+
 static HRESULT STDMETHODCALLTYPE st_queue(ID3D12Device *d, const D3D12_COMMAND_QUEUE_DESC *qd, REFIID r, void **o)
 {
     HRESULT hr = real_queue(d, qd, r, o);
     ID3D12CommandQueue *q = NULL;
     if (SUCCEEDED(hr) && o && *o && SUCCEEDED(((IUnknown *)*o)->lpVtbl->QueryInterface(*o, &IID_ID3D12CommandQueue, (void **)&q))) {
+        LONG k = sg_nqueues;
+        if (k < SG_QUEUES) { sg_queues[k].q = q; sg_queues[k].type = qd ? (uint8_t)(qd->Type & 3) : 0; sg_nqueues = k + 1; }
         vt_swap((void **)&q->lpVtbl->ExecuteCommandLists, st_ecl, (void **)&real_ecl);
+        vt_swap((void **)&q->lpVtbl->Signal, st_signal, (void **)&real_signal);
+        vt_swap((void **)&q->lpVtbl->Wait, st_qwait, (void **)&real_qwait);
         q->lpVtbl->Release(q);
     }
     return hr;
@@ -456,7 +553,7 @@ void stutter_device(IUnknown *obj)
         vt_swap((void **)&dev2->lpVtbl->CreatePipelineState, st_spso, (void **)&real_spso);
         dev2->lpVtbl->Release(dev2);
     }
-    wlog("stutter: device D3D12 com medicao (PSOs, recursos, ExecuteCommandLists)");
+    wlog("stutter: device D3D12 com medicao (PSOs, recursos, ExecuteCommandLists, Signal/Wait das filas)");
 }
 
 /* ---- amostrador (PASSO 58): quadro parado ha >= st_stall_ms(media) sem Present -> a cada ~2 ms o tempo de CPU de cada
@@ -906,6 +1003,7 @@ static DWORD WINAPI st_sampler(void *arg)
         fs = frame_start;
         if (!fs) continue;
         fq_poll(now);
+        sg_poll(now);
         if (!ncode_ranges) {   /* depois do 1o Present o jogo ja esta carregado */
             uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
             if (game) { code_ranges[ncode_ranges][0] = (uintptr_t)game; code_ranges[ncode_ranges++][1] = (uintptr_t)game + 0x8000000; }
