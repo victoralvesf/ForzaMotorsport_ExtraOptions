@@ -416,7 +416,9 @@ static volatile LONG rk_nvt;
 #define DR_QUEUE 16384
 #define DR_BUDGET_US 500
 int dr_on;
+int dr_hold_ms;                          /* PASSO 77: idade minima na fila antes de soltar (FM6 2000; DeferReleaseHoldMs) */
 static IUnknown *dr_q[DR_QUEUE];
+static LONG64 dr_t[DR_QUEUE];            /* qpc da entrada na fila */
 static volatile LONG dr_head, dr_tail, dr_deferred, dr_released, dr_full;
 static __thread int dr_is_reaper = -1;
 
@@ -441,6 +443,7 @@ static int dr_push(IUnknown *u)
     LONG h = dr_head;
     if (h - dr_tail >= DR_QUEUE) { InterlockedIncrement(&dr_full); return 0; }
     dr_q[h % DR_QUEUE] = u;
+    dr_t[h % DR_QUEUE] = qpc();
     InterlockedExchange(&dr_head, h + 1);    /* um so produtor (o reaper) */
     InterlockedIncrement(&dr_deferred);
     return 1;
@@ -448,6 +451,34 @@ static int dr_push(IUnknown *u)
 
 static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u);
 static ULONG rk_call_orig(IUnknown *u);
+
+/* entrou na fila em `t` e ja tem `hold_ms` (fila em ordem: o 1o novo demais para o resto) */
+int dr_old_enough(LONG64 t, LONG64 now, int hold_ms, LONG64 freq)
+{
+    return hold_ms <= 0 || (now - t) * 1000 >= (LONG64)hold_ms * freq;
+}
+
+/* caixa-preta: o que o reaper solta (recurso: dim, largura, altura, prof., mips, fmt, flags; heap: tiles, bytes) */
+static void cx_deferred(IUnknown *u)
+{
+    ID3D12Resource *r = NULL;
+    ID3D12Heap *hp = NULL;
+    uint32_t x[8] = { 0 };
+    if (SUCCEEDED(u->lpVtbl->QueryInterface(u, &IID_ID3D12Resource, (void **)&r))) {
+        D3D12_RESOURCE_DESC rd;
+        r->lpVtbl->GetDesc(r, &rd);
+        x[0] = rd.Dimension; x[1] = (uint32_t)rd.Width; x[2] = rd.Height; x[3] = rd.DepthOrArraySize;
+        x[4] = rd.MipLevels; x[5] = rd.Format; x[6] = rd.Flags; x[7] = (uint32_t)(rd.Width >> 32);
+        r->lpVtbl->Release(r);
+    } else if (SUCCEEDED(u->lpVtbl->QueryInterface(u, &IID_ID3D12Heap, (void **)&hp))) {
+        D3D12_HEAP_DESC hd;
+        hp->lpVtbl->GetDesc(hp, &hd);
+        x[0] = (uint32_t)(hd.SizeInBytes >> 16); x[1] = (uint32_t)hd.SizeInBytes; x[2] = 0xffffffffu;
+        hp->lpVtbl->Release(hp);
+    }
+    cx_set(u, 2, 0);
+    cx_add(CX_DEFER, u, NULL, x, 8);
+}
 
 static DWORD WINAPI dr_drain(void *arg)
 {
@@ -462,6 +493,7 @@ static DWORD WINAPI dr_drain(void *arg)
         t0 = qpc();
         while (dr_tail != dr_head && (qpc() - t0) * 1000000 < (LONG64)DR_BUDGET_US * st_freq.QuadPart) {
             IUnknown *u = dr_q[dr_tail % DR_QUEUE];
+            if (!dr_old_enough(dr_t[dr_tail % DR_QUEUE], qpc(), dr_hold_ms, st_freq.QuadPart)) break;
             if (st_on) { cx_set(u, 3, 0); cx_add(CX_DESTROY, u, NULL, NULL, 0); }
             rk_call_orig(u);
             InterlockedIncrement(&dr_tail);
@@ -482,7 +514,7 @@ static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u)
             if (dr_on && dr_thread_is_reaper()) {
                 ULONG c = u->lpVtbl->AddRef(u);       /* sonda: 2 = a referencia do reaper e a ultima */
                 if (c == 2 && dr_push(u)) {
-                    if (st_on) { cx_set(u, 2, 0); cx_add(CX_DEFER, u, NULL, NULL, 0); }
+                    if (st_on) cx_deferred(u);
                     rk_vts[i].orig(u);
                     return 0;
                 }
@@ -1229,11 +1261,13 @@ void defer_release_setup(void)
 {
     static int started;
     dr_on = dr_wanted();
+    dr_hold_ms = dbg_int(L"DeferReleaseHoldMs", is_fm6() ? 2000 : 0);
     if (!dr_on || started) return;
     started = 1;
     if (!st_freq.QuadPart) QueryPerformanceFrequency(&st_freq);
     CloseHandle(CreateThread(NULL, 0, dr_drain, NULL, 0, NULL));
-    wlog("d3d: DeferRelease: a ultima Release do 'Azimuth reaper' em recurso/heap fica numa fila, solta aos poucos");
+    wlog("d3d: DeferRelease: a ultima Release do 'Azimuth reaper' em recurso/heap fica numa fila, solta aos poucos depois de %d ms",
+         dr_hold_ms);
 }
 
 /* chamado pelo hook do D3D12CreateDevice (debug12_fm5.c), depois do gpuguard (estes hooks ficam por fora). Os hooks

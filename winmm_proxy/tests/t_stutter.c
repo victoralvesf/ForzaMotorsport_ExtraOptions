@@ -570,3 +570,12 @@ TEST(stutter_blackbox_tile_check)
     CHECK_EQ(cx_ring[(seq0 + 1) % CX_RING].kind, CX_HEAP);
     CHECK_EQ(cx_ring[(seq0 + 1) % CX_RING].x[0], 1024);          /* heap: tamanho em tiles */
 }
+
+TEST(stutter_defer_release_hold)
+{
+    const LONG64 f = 10000000;                       /* qpc de 10 MHz */
+    CHECK(dr_old_enough(0, 0, 0, f));                /* sem idade minima: solta ja */
+    CHECK(!dr_old_enough(0, 19990000, 2000, f));     /* 1999 ms */
+    CHECK(dr_old_enough(0, 20000000, 2000, f));      /* 2000 ms */
+    CHECK(dr_old_enough(5, 4, -1, f));
+}
