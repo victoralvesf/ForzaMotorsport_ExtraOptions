@@ -457,6 +457,7 @@ static ULONG rk_call_orig(IUnknown *u);
 static void mr_del(const void *o);
 static void pa_free(const void *res);
 static int pa_format(char *out);
+static void pa_live_report(const char *when);
 
 /* entrou na fila em `t` e ja tem `hold_ms` (fila em ordem: o 1o novo demais para o resto) */
 int dr_old_enough(LONG64 t, LONG64 now, int hold_ms, LONG64 freq)
@@ -1165,6 +1166,10 @@ void mr_report(const char *when)
     for (k = 0; k < MV_KINDS; k++)
         len += sprintf(buf + len, " %s %llu MiB/%u", mv_names[k], (unsigned long long)(vb[k] >> 20), va[k]);
     wlog("%s", buf);
+    {   /* PASSO 99: placement textures vivas a cada 60 s e na remocao do device */
+        static int ticks;
+        if (!strcmp(when, "na remocao do device") || ++ticks % 6 == 0) pa_live_report(when);
+    }
     {   /* conteudo dos blocos com guarda: a cada +256 MB deles e na remocao do device */
         static uint64_t scanned;
         int final = !strcmp(when, "na remocao do device");
@@ -1222,7 +1227,10 @@ static HRESULT STDMETHODCALLTYPE st_dheap(ID3D12Device *d, const D3D12_DESCRIPTO
 #define PA_BITS 18
 #define PA_TAB (1u << PA_BITS)
 typedef struct { ID3D12Heap *h; uint64_t used[PA_WORDS]; uint32_t free_pages; } pa_heap;
-typedef struct { const void *res; uint16_t heap; uint16_t page_hi; uint16_t page; uint16_t n; } pa_ent;
+/* PASSO 99: tambem o objeto do Azimuth entregue ao jogo, o endereco no jogo, ordem/segundo de criacao, segundo em
+   que o objeto chegou a 0 (+1; 0 = vivo), chamador (game+off), bytes estimados pelos texels e a forma da textura */
+typedef struct { const void *res, *obj; uint64_t addr; uint32_t seq, born, gone, caller, est;
+                 uint16_t heap, page_hi, page, n, w, h; uint8_t fmt, mips; } pa_ent;
 static pa_heap *pa_heaps[PA_MAX_HEAPS];
 static LONG pa_nheaps;
 static pa_ent *pa_tab;
@@ -1260,15 +1268,20 @@ int pa_find(const pa_heap *H, uint32_t n, uint32_t al)
 static uint32_t pa_slot(const void *r) { return (uint32_t)((((uintptr_t)r >> 4) * 0x9E3779B97F4A7C15ull) >> (64 - PA_BITS)); }
 
 /* com a trava */
-static void pa_put(const void *res, uint32_t heap, uint32_t page, uint32_t n)
+static pa_ent *pa_put(const void *res, uint32_t heap, uint32_t page, uint32_t n)
 {
     uint32_t i;
     if (!pa_tab) pa_tab = VirtualAlloc(NULL, PA_TAB * sizeof *pa_tab, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pa_tab) return NULL;
     for (i = pa_slot(res); pa_tab[i].res && pa_tab[i].res != res; i = (i + 1) & (PA_TAB - 1)) {}
     if (!pa_tab[i].res) pa_ntab++;
+    memset(&pa_tab[i], 0, sizeof pa_tab[i]);
     pa_tab[i].res = res; pa_tab[i].heap = (uint16_t)heap; pa_tab[i].page = (uint16_t)page;
     pa_tab[i].page_hi = (uint16_t)(page >> 16); pa_tab[i].n = (uint16_t)n;
+    return &pa_tab[i];
 }
+
+static void po_del(const void *obj, const void *res);
 
 /* ultima Release de um recurso: se era nosso, devolve a faixa */
 static void pa_free(const void *res)
@@ -1283,6 +1296,7 @@ static void pa_free(const void *res)
         pa_set(H, page, pa_tab[i].n, 0);
         InterlockedAdd64(&pa_used_pages, -(LONG64)pa_tab[i].n);
         InterlockedIncrement(&pa_freed);
+        if (pa_tab[i].obj && !pa_tab[i].gone) po_del(pa_tab[i].obj, res);
         pa_ntab--;
         for (j = (i + 1) & (PA_TAB - 1); pa_tab[j].res; j = (j + 1) & (PA_TAB - 1)) {
             h = pa_slot(pa_tab[j].res);
@@ -1304,6 +1318,265 @@ static int pa_reserve(uint32_t n, uint32_t al, uint32_t *page)
     return -1;
 }
 
+/* ---- PASSO 99 (opcao C): quem segura as placement textures placed ----
+ * Na sessao de 1 h do PASSO 98 as vivas ficam em ~43-56k mas crescem de 0.6 para 8.5 GB, e nem as solturas em massa
+ * (-31k) baixam os bytes. O wrapper do CreatePlacementTexture2D do FM6 (d3d_fm5.c) anota o endereco no jogo e o
+ * chamador (pa_note_begin) e, na volta, o objeto do Azimuth entregue ao jogo (pa_note_end); o Release comum do
+ * Azimuth (hook em d3d_fm5.c) avisa quando esse objeto chega a 0 (pa_obj_gone). A cada 60 s e na remocao do device
+ * (pa_live_report): idade, tamanho, objeto do jogo vivo/solto, mesmo endereco ou sobreposta por uma mais nova (o jogo
+ * reaproveitou a memoria e segura o objeto velho) e os chamadores/formas com mais MiB antigos. */
+static __thread int pa_t_on;
+static __thread uint64_t pa_t_addr;
+static __thread uint32_t pa_t_caller;
+static __thread const void *pa_t_res;
+static volatile LONG pa_seq;
+static ULONGLONG pa_t0;
+typedef struct { const void *obj, *res; } po_ent;          /* objeto do Azimuth -> recurso placed */
+static po_ent *po_tab;
+static volatile LONG po_n;
+
+static uint32_t pa_now(void)
+{
+    if (!pa_t0) pa_t0 = GetTickCount64();
+    return (uint32_t)((GetTickCount64() - pa_t0) / 1000);
+}
+
+/* com a trava (leitura) */
+static pa_ent *pa_get(const void *res)
+{
+    uint32_t i;
+    if (!pa_tab || !res) return NULL;
+    for (i = pa_slot(res); pa_tab[i].res && pa_tab[i].res != res; i = (i + 1) & (PA_TAB - 1)) {}
+    return pa_tab[i].res == res ? &pa_tab[i] : NULL;
+}
+
+static uint32_t po_find(const void *obj)
+{
+    uint32_t i;
+    for (i = pa_slot(obj); po_tab[i].obj && po_tab[i].obj != obj; i = (i + 1) & (PA_TAB - 1)) {}
+    return i;
+}
+
+/* com a trava */
+static void po_put(const void *obj, const void *res)
+{
+    uint32_t i;
+    if (!po_tab) po_tab = VirtualAlloc(NULL, PA_TAB * sizeof *po_tab, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!po_tab || po_n >= (LONG)(PA_TAB - PA_TAB / 8)) return;
+    i = po_find(obj);
+    if (!po_tab[i].obj) po_n++;
+    po_tab[i].obj = obj; po_tab[i].res = res;
+}
+
+static void po_del_at(uint32_t i)
+{
+    uint32_t j, h;
+    po_n--;
+    for (j = (i + 1) & (PA_TAB - 1); po_tab[j].obj; j = (j + 1) & (PA_TAB - 1)) {
+        h = pa_slot(po_tab[j].obj);
+        if (((j - h) & (PA_TAB - 1)) >= ((j - i) & (PA_TAB - 1))) { po_tab[i] = po_tab[j]; i = j; }
+    }
+    po_tab[i].obj = NULL; po_tab[i].res = NULL;
+}
+
+/* com a trava: o recurso placed morreu antes do objeto (so o par dele sai; outro objeto no mesmo endereco fica) */
+static void po_del(const void *obj, const void *res)
+{
+    uint32_t i;
+    if (!po_tab) return;
+    i = po_find(obj);
+    if (po_tab[i].obj == obj && po_tab[i].res == res) po_del_at(i);
+}
+
+/* com a trava: dados da textura recem criada; endereco/chamador se o wrapper do jogo anotou */
+static void pa_describe(pa_ent *e, const void *res, const D3D12_RESOURCE_DESC *rd)
+{
+    uint64_t est = mr_res_bytes(rd);
+    if (!e) return;
+    e->seq = (uint32_t)InterlockedIncrement(&pa_seq);
+    e->born = pa_now();
+    e->est = est > 0xffffffffull ? 0xffffffffu : (uint32_t)est;
+    e->w = rd->Width > 0xffff ? 0xffff : (uint16_t)rd->Width;
+    e->h = rd->Height > 0xffff ? 0xffff : (uint16_t)rd->Height;
+    e->fmt = (uint8_t)rd->Format; e->mips = (uint8_t)rd->MipLevels;
+    if (pa_t_on && !pa_t_res) { e->addr = pa_t_addr; e->caller = pa_t_caller; pa_t_res = res; }
+}
+
+int pa_tracking(void) { return pa_on; }
+
+void pa_note_begin(const void *addr, uintptr_t caller)
+{
+    pa_t_on = 1; pa_t_addr = (uint64_t)(uintptr_t)addr; pa_t_caller = (uint32_t)caller; pa_t_res = NULL;
+}
+
+/* volta do CreatePlacementTexture2D: liga o objeto entregue ao jogo ao recurso placed criado nessa chamada */
+void pa_note_end(const void *obj)
+{
+    const void *res = pa_t_res;
+    pa_ent *e;
+    pa_t_on = 0; pa_t_res = NULL;
+    if (!res || !obj) return;
+    AcquireSRWLockExclusive(&pa_lock);
+    if ((e = pa_get(res)) && !e->obj) { e->obj = obj; po_put(obj, res); }
+    ReleaseSRWLockExclusive(&pa_lock);
+}
+
+/* Release comum do Azimuth chegou a 0 (qualquer objeto: so os anotados contam) */
+void pa_obj_gone(const void *obj)
+{
+    uint32_t i;
+    int hit;
+    if (!po_n || !obj) return;
+    AcquireSRWLockShared(&pa_lock);
+    hit = po_tab && po_tab[po_find(obj)].obj == obj;
+    ReleaseSRWLockShared(&pa_lock);
+    if (!hit) return;
+    AcquireSRWLockExclusive(&pa_lock);
+    i = po_find(obj);
+    if (po_tab[i].obj == obj) {
+        pa_ent *e = pa_get(po_tab[i].res);
+        if (e && e->obj == obj) e->gone = pa_now() + 1;
+        po_del_at(i);
+    }
+    ReleaseSRWLockExclusive(&pa_lock);
+}
+
+/* copia de uma entrada viva para o relatorio; len = tamanho aproximado no jogo (menor entre D3D12 e texels) */
+typedef struct { uint64_t addr, len, bytes; uint32_t seq, born, gone, caller; uint16_t w, h; uint8_t fmt, mips, flags; } pa_snap;
+#define PA_OVER 1u        /* a faixa cruza a de uma textura viva mais nova */
+#define PA_SAME 2u        /* mesmo endereco de uma textura viva mais nova */
+#define PA_OLD_S 300u     /* "antiga" = 5 min */
+#define PA_GONE_S 10u
+
+static int pa_snap_addr(const void *a, const void *b)
+{
+    const pa_snap *x = a, *y = b;
+    if (x->addr != y->addr) return x->addr < y->addr ? -1 : 1;
+    return x->seq < y->seq ? -1 : x->seq > y->seq;
+}
+
+typedef struct { uint64_t key, bytes; uint32_t n; } pa_tally;
+static void pa_tally_add(pa_tally *t, int *nt, int cap, uint64_t key, uint64_t bytes)
+{
+    int i;
+    for (i = 0; i < *nt && t[i].key != key; i++) {}
+    if (i == *nt) { if (*nt == cap) return; t[i].key = key; t[i].bytes = 0; t[i].n = 0; (*nt)++; }
+    t[i].bytes += bytes; t[i].n++;
+}
+static int pa_tally_top(const pa_tally *t, int nt)
+{
+    int i, b = -1;
+    for (i = 0; i < nt; i++) if (t[i].n && (b < 0 || t[i].bytes > t[b].bytes)) b = i;
+    return b;
+}
+
+/* marca sobrepostas/mesmo endereco (s em ordem de endereco) e devolve os bytes distintos cobertos */
+uint64_t pa_mark_overlaps(pa_snap *s, uint32_t n)
+{
+    uint32_t i, j, k;
+    uint64_t uni = 0, cs = 0, ce = 0;
+    for (i = 0; i < n; i++) {
+        uint64_t end;
+        if (!s[i].addr || !s[i].len) continue;
+        end = s[i].addr + s[i].len;
+        for (j = i + 1, k = 0; j < n && s[j].addr < end && k < 4096; j++, k++) {
+            pa_snap *older = s[j].seq < s[i].seq ? &s[j] : &s[i];
+            older->flags |= PA_OVER;
+            if (s[j].addr == s[i].addr) older->flags |= PA_SAME;
+        }
+        if (s[i].addr >= ce) { uni += ce - cs; cs = s[i].addr; ce = end; }
+        else if (end > ce) ce = end;
+    }
+    return uni + (ce - cs);
+}
+
+#define PA_MIB(b) ((double)(b) / 1048576.0)
+/* duas linhas de texto (sem o prefixo) sobre as vivas; s e reordenado por endereco */
+void pa_live_lines(pa_snap *s, uint32_t n, uint32_t now, char *l1, char *l2)
+{
+    static const uint32_t age_min[] = { 0, 1, 5, 15, 30, 60 };
+    static const uint64_t sz_max[] = { 65536, 1u << 20, 4u << 20, ~0ull };
+    static const char *const sz_name[] = { "<=64K", "<=1M", "<=4M", ">4M" };
+    uint64_t age_b[6] = { 0 }, sz_b[4] = { 0 }, obj_b[4] = { 0 }, total = 0, over_b = 0, same_b = 0, held_b = 0, sum_len = 0, uni;
+    uint32_t age_n[6] = { 0 }, sz_n[4] = { 0 }, obj_n[4] = { 0 }, over_n = 0, same_n = 0, held_n = 0, with_addr = 0, i, k;
+    pa_tally callers[128], shapes[128];
+    int nc = 0, ns = 0, len;
+    qsort(s, n, sizeof *s, pa_snap_addr);
+    uni = pa_mark_overlaps(s, n);
+    for (i = 0; i < n; i++) {
+        uint32_t age = now >= s[i].born ? now - s[i].born : 0, o;
+        total += s[i].bytes;
+        for (k = 5; k && age < age_min[k] * 60; k--) {}
+        age_n[k]++; age_b[k] += s[i].bytes;
+        for (k = 0; s[i].bytes > sz_max[k]; k++) {}
+        sz_n[k]++; sz_b[k] += s[i].bytes;
+        o = !s[i].addr ? 3 : !s[i].gone ? 0 : now + 1 - s[i].gone < PA_GONE_S ? 1 : 2;
+        obj_n[o]++; obj_b[o] += s[i].bytes;
+        if (s[i].addr) { with_addr++; sum_len += s[i].len; }
+        if (s[i].flags & PA_OVER) { over_n++; over_b += s[i].bytes; }
+        if (s[i].flags & PA_SAME) { same_n++; same_b += s[i].bytes; }
+        if ((s[i].flags & PA_OVER) && !s[i].gone) { held_n++; held_b += s[i].bytes; }
+        if (age >= PA_OLD_S && s[i].addr && !s[i].gone) {
+            pa_tally_add(callers, &nc, 128, s[i].caller, s[i].bytes);
+            pa_tally_add(shapes, &ns, 128, (uint64_t)s[i].w << 32 | (uint64_t)s[i].h << 16 | (uint64_t)s[i].fmt << 8 | s[i].mips,
+                         s[i].bytes);
+        }
+    }
+    len = sprintf(l1, "%u, %.0f MiB | idade:", n, PA_MIB(total));
+    for (k = 0; k < 6; k++)
+        len += sprintf(l1 + len, " %s%u min %u/%.0f MiB", k == 5 ? ">=" : "<", k == 5 ? 60 : age_min[k + 1], age_n[k], PA_MIB(age_b[k]));
+    len += sprintf(l1 + len, " | tamanho:");
+    for (k = 0; k < 4; k++) len += sprintf(l1 + len, " %s %u/%.0f MiB", sz_name[k], sz_n[k], PA_MIB(sz_b[k]));
+    sprintf(l1 + len, " | objeto do jogo: vivo %u/%.0f MiB, solto <%us %u/%.0f MiB, solto ha mais %u/%.0f MiB, sem anotacao %u/%.0f MiB",
+            obj_n[0], PA_MIB(obj_b[0]), PA_GONE_S, obj_n[1], PA_MIB(obj_b[1]), obj_n[2], PA_MIB(obj_b[2]), obj_n[3], PA_MIB(obj_b[3]));
+    len = sprintf(l2, "endereco: %u anotadas, cobrem %.0f de %.0f MiB (aprox.); sobrepostas por mais nova %u/%.0f MiB (objeto "
+                  "vivo %u/%.0f MiB), mesmo endereco %u/%.0f MiB | antigas (>=%u min, objeto vivo) por chamador:",
+                  with_addr, PA_MIB(uni), PA_MIB(sum_len), over_n, PA_MIB(over_b), held_n, PA_MIB(held_b), same_n, PA_MIB(same_b),
+                  PA_OLD_S / 60);
+    for (k = 0; k < 6; k++) {
+        int b = pa_tally_top(callers, nc);
+        if (b < 0) break;
+        len += sprintf(l2 + len, " game+%#llx %u/%.0f MiB;", (unsigned long long)callers[b].key, callers[b].n, PA_MIB(callers[b].bytes));
+        callers[b].n = 0;
+    }
+    len += sprintf(l2 + len, " formas:");
+    for (k = 0; k < 6; k++) {
+        int b = pa_tally_top(shapes, ns);
+        uint64_t x;
+        if (b < 0) break;
+        x = shapes[b].key;
+        len += sprintf(l2 + len, " %ux%u f%u m%u %u/%.0f MiB;", (unsigned)(x >> 32), (unsigned)(x >> 16) & 0xffff,
+                       (unsigned)(x >> 8) & 0xff, (unsigned)x & 0xff, shapes[b].n, PA_MIB(shapes[b].bytes));
+        shapes[b].n = 0;
+    }
+}
+
+static void pa_live_report(const char *when)
+{
+    static char l1[1024], l2[1536];
+    pa_snap *s;
+    uint32_t n = 0, cap, i;
+    if (!pa_on || !pa_tab) return;
+    AcquireSRWLockShared(&pa_lock);
+    cap = (uint32_t)pa_ntab + 16;
+    s = malloc(cap * sizeof *s);
+    for (i = 0; s && i < PA_TAB && n < cap; i++) {
+        const pa_ent *e = &pa_tab[i];
+        uint64_t b = (uint64_t)e->n * PA_PAGE;
+        if (!e->res) continue;
+        memset(&s[n], 0, sizeof s[n]);
+        s[n].addr = e->addr; s[n].bytes = b; s[n].len = e->est && e->est < b ? e->est : b;
+        s[n].seq = e->seq; s[n].born = e->born; s[n].gone = e->gone; s[n].caller = e->caller;
+        s[n].w = e->w; s[n].h = e->h; s[n].fmt = e->fmt; s[n].mips = e->mips;
+        n++;
+    }
+    ReleaseSRWLockShared(&pa_lock);
+    if (!s) return;
+    pa_live_lines(s, n, pa_now(), l1, l2);
+    free(s);
+    wlog("stutter: placement vivas %s: %s", when, l1);
+    wlog("stutter: placement vivas %s: %s", when, l2);
+}
 
 /* a textura cabe no caminho placed? */
 int pa_wants(const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_RESOURCE_DESC *rd, const D3D12_CLEAR_VALUE *c)
@@ -1375,7 +1648,7 @@ static HRESULT pa_create(ID3D12Device *d, const D3D12_RESOURCE_DESC *rd, D3D12_R
     hr = real_placed(d, pa_heaps[hi]->h, (UINT64)page * PA_PAGE, &desc, s, NULL, r, o);
     AcquireSRWLockExclusive(&pa_lock);
     if (FAILED(hr) || !o || !*o) pa_set(pa_heaps[hi], page, n, 0);
-    else pa_put(*o, (uint32_t)hi, page, n);
+    else pa_describe(pa_put(*o, (uint32_t)hi, page, n), *o, rd);
     ReleaseSRWLockExclusive(&pa_lock);
     if (FAILED(hr)) return hr;
     InterlockedAdd64(&pa_used_pages, n);
@@ -2262,6 +2535,7 @@ int pa_wanted(void) { return dbg_int(L"PlacementPlaced", is_fm6()) > 0; }
 void placed_textures_setup(void)
 {
     pa_on = pa_wanted() && real_placed && real_heap && real_committed;
+    pa_now();                                         /* idade das placement textures conta daqui */
     if (pa_on) wlog("d3d: PlacementPlaced: placement textures committed do Azimuth (azimuth+%#x) viram placed em heaps de 64 MiB do proxy",
                     PA_RET_RVA);
 }

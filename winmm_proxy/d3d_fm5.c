@@ -18,6 +18,11 @@ extern void wlog(const char *fmt, ...);
 extern int is_fm5(void);
 extern int is_fm6(void);
 extern void game_tls_apply(void);
+/* stutter_fm6.c (PASSO 99): rastreio das placement textures placed */
+int pa_tracking(void);
+void pa_note_begin(const void *addr, uintptr_t caller);
+void pa_note_end(const void *obj);
+void pa_obj_gone(const void *obj);
 
 /* ---- RVAs no azimuth.exe ---- */
 #define RVA_RESOLVER       0x3a290   /* FARPROC resolve(ImportEntry*) : {std::string dll; std::string nome} */
@@ -834,6 +839,7 @@ static long pd_SetPrivateDataInterface(void *obj, const GUID *g, IUnknown *iface
 static ULONG pd_release_hook(void *obj)
 {
     ULONG n = orig_release(obj);
+    if (n == 0) pa_obj_gone(obj);                  /* PASSO 99: placement texture solta pelo jogo/Azimuth */
     if (n == 0 && pd_tab[pd_hash(obj)]) {          /* leitura sem lock: so filtra o caso comum */
         void *caller = __builtin_return_address(0);
         pdata **pp = &pd_tab[pd_hash(obj)];
@@ -1407,6 +1413,13 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
              "usage=%u bind=%#x cpu=%#x misc=%#x tile=%u pitch=%u addr=%p, chamador game+%#zx", desc[0], desc[1], desc[2],
              desc[3], desc[4], desc[5], desc[6], desc[7], desc[8], desc[9], desc[10], tile, pitch, addr,
              fm6_game_caller());
+    if (pa_tracking()) {   /* PASSO 99: endereco/chamador/objeto da placed (stutter_fm6.c pa_live_report) */
+        long hr;
+        pa_note_begin(addr, fm6_game_caller());
+        hr = orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
+        pa_note_end(hr >= 0 && out ? *out : NULL);
+        return hr;
+    }
     return orig_fm6_placement_tex2d(dev, desc, tile, pitch, addr, out);
 }
 

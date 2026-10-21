@@ -1206,3 +1206,104 @@ TEST(stutter_placed_create_and_free)
     real_heap = NULL; real_placed = NULL;
     pa_nheaps = 0;
 }
+
+/* PASSO 99: sobreposicao por endereco e relatorio das vivas */
+TEST(stutter_placed_live_overlaps)
+{
+    /* A 0x100000 64 KiB (seq 1), B mesmo endereco (seq 3), C dentro de A (seq 2), D longe (seq 4), E sem endereco */
+    pa_snap s[5];
+    char l1[1024], l2[1536];
+    uint64_t uni;
+    memset(s, 0, sizeof s);
+    s[0].addr = 0x100000; s[0].len = s[0].bytes = 65536; s[0].seq = 1;
+    s[1].addr = 0x100000; s[1].len = s[1].bytes = 65536; s[1].seq = 3;
+    s[2].addr = 0x108000; s[2].len = s[2].bytes = 4096;  s[2].seq = 2;
+    s[3].addr = 0x200000; s[3].len = s[3].bytes = 8192;  s[3].seq = 4;
+    s[4].len = s[4].bytes = 4096; s[4].seq = 5;
+    qsort(s, 5, sizeof *s, pa_snap_addr);
+    uni = pa_mark_overlaps(s, 5);
+    CHECK_EQ(uni, 65536 + 8192);
+    CHECK_EQ(s[0].addr, 0);                            /* sem endereco primeiro, sem marca */
+    CHECK_EQ(s[0].flags, 0);
+    CHECK_EQ(s[1].seq, 1);                             /* A: mesmo endereco de B e sob C */
+    CHECK_EQ(s[1].flags, PA_OVER | PA_SAME);
+    CHECK_EQ(s[2].seq, 3);                             /* B: a mais nova no endereco */
+    CHECK_EQ(s[2].flags, 0);
+    CHECK_EQ(s[3].seq, 2);                             /* C: B (mais nova) cobre */
+    CHECK_EQ(s[3].flags, PA_OVER);
+    CHECK_EQ(s[4].flags, 0);
+    /* idade e objeto: A nasceu em 0 e o objeto segue vivo; C solto ha 20 s; D solto ha 2 s; agora = 400 s */
+    memset(s, 0, sizeof s);
+    s[0].addr = 0x100000; s[0].len = s[0].bytes = 65536; s[0].seq = 1; s[0].caller = 0x21d6f0; s[0].w = 64; s[0].h = 64;
+    s[0].fmt = 98; s[0].mips = 7;
+    s[1].addr = 0x100000; s[1].len = s[1].bytes = 65536; s[1].seq = 3; s[1].born = 390;
+    s[2].addr = 0x108000; s[2].len = s[2].bytes = 4096;  s[2].seq = 2; s[2].born = 100; s[2].gone = 381;
+    s[3].addr = 0x200000; s[3].len = s[3].bytes = 8u << 20; s[3].seq = 4; s[3].born = 300; s[3].gone = 399;
+    s[4].len = s[4].bytes = 4096; s[4].seq = 5; s[4].born = 400;
+    pa_live_lines(s, 5, 400, l1, l2);
+    CHECK(strstr(l1, "5, 8 MiB | idade: <1 min 2/0 MiB <5 min 1/8 MiB <15 min 2/0 MiB <30 min 0/0 MiB") != NULL);
+    CHECK(strstr(l1, "tamanho: <=64K 4/0 MiB <=1M 0/0 MiB <=4M 0/0 MiB >4M 1/8 MiB") != NULL);
+    CHECK(strstr(l1, "objeto do jogo: vivo 2/0 MiB, solto <10s 1/8 MiB, solto ha mais 1/0 MiB, sem anotacao 1/0 MiB") != NULL);
+    CHECK(strstr(l2, "endereco: 4 anotadas") != NULL);
+    CHECK(strstr(l2, "sobrepostas por mais nova 2/0 MiB (objeto vivo 1/0 MiB), mesmo endereco 1/0 MiB") != NULL);
+    CHECK(strstr(l2, "por chamador: game+0x21d6f0 1/0 MiB; formas: 64x64 f98 m7 1/0 MiB;") != NULL);
+}
+
+/* PASSO 99: o wrapper anota endereco/chamador/objeto; Release do objeto a 0 marca solto; a ultima Release do recurso limpa */
+TEST(stutter_placed_obj_tracking)
+{
+    static ID3D12DeviceVtbl vt;
+    struct { ID3D12DeviceVtbl *v; } dev = { &vt };
+    D3D12_RESOURCE_DESC t = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 256, 128, 1, 9, DXGI_FORMAT_BC7_UNORM, { 1, 0 } };
+    static int obj_a, obj_b;
+    void *a = NULL, *b = NULL;
+    pa_ent *e;
+    vt.GetResourceAllocationInfo = pdv_info;
+    real_heap = pdv_heap; real_placed = pdv_placed_fn;
+    pa_nheaps = 0; pa_ntab = 0; pa_used_pages = 0; pdv_heaps = 0; pdv_placed = 0;
+    if (pa_tab) memset(pa_tab, 0, PA_TAB * sizeof *pa_tab);
+    if (po_tab) memset(po_tab, 0, PA_TAB * sizeof *po_tab);
+    po_n = 0;
+    pdv_size = 49152; pdv_align_small = 1;
+    pa_note_begin((void *)0x3ee1600, 0x21d6f0);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &a)));
+    pa_note_end(&obj_a);
+    CHECK(!pa_t_on);
+    e = pa_get(a);
+    CHECK(e != NULL);
+    CHECK_EQ(e->addr, 0x3ee1600);
+    CHECK_EQ(e->caller, 0x21d6f0);
+    CHECK(e->obj == &obj_a);
+    CHECK_EQ(e->w, 256);
+    CHECK_EQ(e->h, 128);
+    CHECK_EQ(e->fmt, DXGI_FORMAT_BC7_UNORM);
+    CHECK_EQ(e->mips, 9);
+    CHECK_EQ(e->gone, 0);
+    CHECK_EQ(po_n, 1);
+    /* sem anotacao (outro caminho): sem endereco/objeto */
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &b)));
+    e = pa_get(b);
+    CHECK_EQ(e->addr, 0);
+    CHECK(e->obj == NULL);
+    CHECK(pa_get(b)->seq > pa_get(a)->seq);
+    pa_obj_gone(&obj_b);                               /* objeto que nao e nosso: nada */
+    CHECK_EQ(po_n, 1);
+    pa_obj_gone(&obj_a);
+    CHECK_EQ(po_n, 0);
+    CHECK(pa_get(a)->gone == pa_now() + 1);
+    pa_obj_gone(&obj_a);                               /* de novo: nada */
+    CHECK(pa_get(a)->gone == pa_now() + 1);
+    pa_free(b);
+    /* recurso morre com o objeto ainda vivo: o par sai da tabela de objetos */
+    pa_note_begin((void *)0x4000000, 0x1234);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &b)));
+    pa_note_end(&obj_b);
+    CHECK_EQ(po_n, 1);
+    pa_free(b);
+    CHECK_EQ(po_n, 0);
+    pa_free(a);
+    CHECK_EQ(pa_ntab, 0);
+    CHECK_EQ(pa_used_pages, 0);
+    real_heap = NULL; real_placed = NULL;
+    pa_nheaps = 0;
+}
