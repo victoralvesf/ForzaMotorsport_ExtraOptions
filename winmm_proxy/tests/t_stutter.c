@@ -879,7 +879,7 @@ TEST(stutter_alloc_share_setup)
     log_capture();
     dbgini_set(NULL);
     as_on = 0;
-    alloc_share_setup();                               /* nao e FM6, sem ini: desligado */
+    alloc_share_setup();                               /* sem ini: desligado (tambem no FM6, PASSO 92) */
     CHECK(!as_on);
     dbgini_set("[Debug]\nAllocatorShare=16\n");
     alloc_share_setup();                               /* bytes zerados: nao confere */

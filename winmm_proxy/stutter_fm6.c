@@ -1530,7 +1530,8 @@ static HRESULT STDMETHODCALLTYPE lp_create(ID3D12Device *d, UINT mask, D3D12_COM
  * (sem Reset) enquanto nenhuma lista dele estiver gravando (D3D12: uma lista gravando por allocator; listas fechadas
  * ou em voo podem conviver). Ele volta ao pool do Azimuth uma vez so, com o MAIOR fence das devolucoes, quando foi
  * aposentado (N aberturas, ou devolvido com a lista ainda gravando) e todas as aberturas devolveram.
- * debug.ini AllocatorShare=N (aberturas por allocator; 0/1 = desligado); FM6 padrao 64. ---- */
+ * debug.ini AllocatorShare=N (aberturas por allocator; 0/1 = desligado, padrao). PASSO 92: ligado no FM6 derrubou
+ * o carregamento da corrida 2x (logo apos reexecucao de lista aninhada) e os allocators nao eram o grosso da memoria. ---- */
 #define AS_ACQ_RVA 0xdea50
 #define AS_RET_RVA 0xded10
 #define AS_MAX 1024
@@ -1681,7 +1682,7 @@ static HRESULT STDMETHODCALLTYPE as_close(ID3D12GraphicsCommandList *l)
 }
 
 /* hook do apply_patches (fm5_patch.c) */
-int as_wanted(void) { return dbg_int(L"AllocatorShare", is_fm6() ? 64 : 0); }
+int as_wanted(void) { return dbg_int(L"AllocatorShare", 0); }   /* PASSO 92: no FM6 derrubou o carregamento */
 void alloc_share_setup(void)
 {
     int n = as_wanted();
@@ -2366,10 +2367,16 @@ static void vz_poll(LONG64 now)
         PERFORMANCE_INFORMATION pi;
         pi.cb = sizeof pi;
         if (K32GetPerformanceInfo(&pi, sizeof pi))
-            len += sprintf(buf + len, ", sistema: commit %llu de %llu MiB, RAM livre %llu MiB",
+            len += sprintf(buf + len, ", sistema: commit %llu de %llu MiB, RAM livre %llu MiB, kernel paged %llu nonpaged %llu MiB",
                            (unsigned long long)pi.CommitTotal * pi.PageSize >> 20,
                            (unsigned long long)pi.CommitLimit * pi.PageSize >> 20,
-                           (unsigned long long)pi.PhysicalAvailable * pi.PageSize >> 20);
+                           (unsigned long long)pi.PhysicalAvailable * pi.PageSize >> 20,
+                           (unsigned long long)pi.KernelPaged * pi.PageSize >> 20,
+                           (unsigned long long)pi.KernelNonpaged * pi.PageSize >> 20);
+    }
+    {
+        DWORD handles = 0;
+        if (GetProcessHandleCount(GetCurrentProcess(), &handles)) len += sprintf(buf + len, ", handles %lu", handles);
     }
     len += sprintf(buf + len, " | CPU ms/quadro:");
     if (tsc_per_ms > 0) {
