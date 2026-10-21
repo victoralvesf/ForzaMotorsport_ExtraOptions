@@ -652,6 +652,22 @@ TEST(gpuguard_null_uavs_without_trace)
 
 /* tabelas por lista: tirar uma lista nao quebra a cadeia das que colidiram com ela; tabela nao enche com listas
    criadas e destruidas (PASSO 33: o fps caia ate travar) */
+/* fronteira de gravadoras na lista unificada (cmdrec_fm6.c): estado por lista de lista recem aberta */
+TEST(gpuguard_list_restart)
+{
+    static int cl, rs, crs, pso, pso2;
+    gg_cl_rs(&cl, 0, &rs, 1);
+    gg_cl_rs(&cl, 1, &crs, 1);
+    gg_cl_rs(&cl, GG_CL_PSO, &pso, 1);
+    gg_cl_gtab(&cl, 1, 0x5);
+    gg_cl_restart(&cl, &pso2);
+    CHECK(gg_cl_rs(&cl, 0, NULL, 0) == NULL);
+    CHECK(gg_cl_rs(&cl, 1, NULL, 0) == NULL);
+    CHECK(gg_cl_rs(&cl, GG_CL_PSO, NULL, 0) == &pso2);
+    CHECK_EQ(gg_cl_gtab(&cl, 1, 0), 0);
+    gg_cl_forget(&cl);
+}
+
 TEST(gpuguard_list_forget)
 {
     void *k[8];

@@ -1865,6 +1865,20 @@ static HRESULT STDMETHODCALLTYPE hook_reset_uav(ID3D12GraphicsCommandList *l, ID
     gg_cl_gtab(l, 0, 0);
     return real_reset(l, a, ps);
 }
+
+/* fronteira entre duas gravadoras reproduzidas na mesma command list real (cmdrec_fm6.c): depois do ClearState o
+   estado por lista volta ao de uma lista recem aberta (o rastreio de sites continua o da lista real) */
+void gg_cl_restart(void *cl, void *ps)
+{
+    gg_cl_rs(cl, 0, NULL, 1);
+    gg_cl_rs(cl, 1, NULL, 1);
+    gg_cl_rs(cl, GG_CL_PSO, ps, 1);
+    gg_cl_gtab(cl, 0, 0);
+    if (gg_trace_on) {
+        gg_ia_state(cl, 3, 0, 0, NULL, 0);
+        gg_gfx_set(cl, 4, 0, 0, NULL, 0);
+    }
+}
 static void STDMETHODCALLTYPE hook_draw_uav(ID3D12GraphicsCommandList *l, UINT vc, UINT ic, UINT sv, UINT si)
 {
     uint32_t arg[3] = { vc, ic, sv };

@@ -692,6 +692,90 @@ TEST(stutter_list_pool_waits_gpu)
     lp_real_create = NULL;
 }
 
+/* listas unificadas (cmdrec_fm6.c) no ECL: gravadoras seguidas -> uma lista real do proxy (criada por dentro do
+ * pool), Reset/ClearState/Close, envio + Signal do fence do proxy; sem gravadora o ECL passa direto */
+static UINT ecl_n;
+static ID3D12CommandList *ecl_l[8];
+static int ecl_clears;
+static void STDMETHODCALLTYPE ecl_spy(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
+{ (void)q; ecl_n = n; memcpy(ecl_l, l, (n < 8 ? n : 8) * sizeof *l); }
+static HRESULT STDMETHODCALLTYPE ecl_signal(ID3D12CommandQueue *q, ID3D12Fence *f, UINT64 v) { (void)q; (void)f; (void)v; return S_OK; }
+static void STDMETHODCALLTYPE ecl_clear(ID3D12GraphicsCommandList *l, ID3D12PipelineState *p) { (void)l; (void)p; ecl_clears++; }
+static int ecl_draws;
+static void STDMETHODCALLTYPE ecl_draw(ID3D12GraphicsCommandList *l, UINT v, UINT i, UINT sv, UINT si) { (void)l; (void)i; (void)sv; (void)si; ecl_draws += (int)v; }
+static ULONG STDMETHODCALLTYPE ecl_release(void *o) { (void)o; return 1; }
+static HRESULT STDMETHODCALLTYPE ecl_alloc_reset(ID3D12CommandAllocator *a) { (void)a; return S_OK; }
+static ID3D12CommandAllocatorVtbl ecl_avt;
+static struct { ID3D12CommandAllocatorVtbl *vt; } ecl_alloc = { &ecl_avt };
+static HRESULT STDMETHODCALLTYPE ecl_create_alloc(ID3D12Device *d, D3D12_COMMAND_LIST_TYPE t, REFIID r, void **o)
+{ (void)d; (void)t; (void)r; *o = &ecl_alloc; return S_OK; }
+static ID3D12DeviceVtbl ecl_dvt;
+static struct { ID3D12DeviceVtbl *vt; } ecl_dev = { &ecl_dvt };
+static HRESULT STDMETHODCALLTYPE ecl_get_device(ID3D12CommandQueue *q, REFIID r, void **o) { (void)q; (void)r; *o = &ecl_dev; return S_OK; }
+static ID3D12CommandQueueVtbl ecl_qvt;
+static struct { ID3D12CommandQueueVtbl *vt; } ecl_queue = { &ecl_qvt };
+
+TEST(stutter_ecl_merges_recorders)
+{
+    uint8_t *az = fake_azimuth(2);
+    void *r1 = NULL, *r2 = NULL;
+    ID3D12CommandList *in[3];
+    ID3D12CommandQueue *q = (ID3D12CommandQueue *)&ecl_queue;
+    void (STDMETHODCALLTYPE *old_ecl)(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *) = real_ecl;
+    HRESULT (STDMETHODCALLTYPE *old_sig)(ID3D12CommandQueue *, ID3D12Fence *, UINT64) = real_signal;
+    lpf_vt.QueryInterface = lpf_qi; lpf_vt.AddRef = lpf_addref; lpf_vt.Release = lpf_release;
+    lpf_vt.GetType = lpf_type; lpf_vt.Reset = lpf_reset; lpf_vt.Close = lpf_close; lpf_vt.ClearState = ecl_clear; lpf_vt.DrawInstanced = ecl_draw;
+    lpq_fvt.GetCompletedValue = lpq_completed;
+    ecl_avt.Reset = ecl_alloc_reset; ecl_avt.Release = (void *)ecl_release;
+    ecl_dvt.CreateCommandAllocator = ecl_create_alloc; ecl_dvt.Release = (void *)ecl_release;
+    ecl_qvt.GetDevice = ecl_get_device;
+    lpf_nmade = 0;
+    lp_real_create = lpf_create;
+    real_ecl = ecl_spy; real_signal = ecl_signal;
+    memset(sg_queues, 0, sizeof sg_queues);
+    sg_queues[0].q = q;
+    sg_queues[0].lf = (ID3D12Fence *)&lpq_fence;
+    InitializeSRWLock(&sg_queues[0].llock);
+    sg_nqueues = 1;
+    lpq_done = 0;
+    lp_on = 0;
+    dbgini_set(NULL);
+    memcpy(az + 0xdef6d, "\xff\x50\x60\xeb\x0c", 5);   /* call [rax+0x60]; jmp */
+    list_merge_setup();
+    REQUIRE(rc_on);
+    CHECK(SUCCEEDED(rc_create(NULL, NULL, &IID_ID3D12GraphicsCommandList, &r1)));
+    CHECK(SUCCEEDED(rc_create(NULL, NULL, &IID_ID3D12GraphicsCommandList, &r2)));
+    ((ID3D12GraphicsCommandList *)r1)->lpVtbl->DrawInstanced(r1, 3, 1, 0, 0);
+    ((ID3D12GraphicsCommandList *)r1)->lpVtbl->Close(r1);
+    ((ID3D12GraphicsCommandList *)r2)->lpVtbl->Close(r2);
+    in[0] = r1; in[1] = r2;
+    ecl_clears = ecl_draws = 0;
+    lp_ecl(q, 2, in);
+    CHECK_EQ(ecl_n, 1);
+    CHECK(ecl_l[0] == (ID3D12CommandList *)&lpf_made[0]);
+    CHECK_EQ(lpf_nmade, 1);
+    CHECK_EQ(lpf_made[0].resets, 1);
+    CHECK_EQ(lpf_made[0].closes, 2);                     /* a da criacao e a do fim */
+    CHECK_EQ(ecl_clears, 1);
+    CHECK_EQ(ecl_draws, 3);                              /* o draw da 1a gravadora reproduzido */
+    CHECK_EQ(sg_queues[0].lsent, 1);
+    /* lista que nao e gravadora: passa direto */
+    in[0] = (ID3D12CommandList *)&lpf_made[0];
+    lp_ecl(q, 1, in);
+    CHECK_EQ(ecl_n, 1);
+    CHECK(ecl_l[0] == (ID3D12CommandList *)&lpf_made[0]);
+    CHECK_EQ(lpf_made[0].resets, 1);
+    CHECK_EQ(sg_queues[0].lsent, 1);                     /* sem pool e sem gravadora: sem Signal do proxy */
+    ((IUnknown *)r1)->lpVtbl->Release(r1);
+    ((IUnknown *)r2)->lpVtbl->Release(r2);
+    rc_setup(NULL);
+    real_ecl = old_ecl; real_signal = old_sig;
+    sg_nqueues = 0;
+    memset(sg_queues, 0, sizeof sg_queues);
+    lp_real_create = NULL;
+    lpf_vt.ClearState = NULL; lpf_vt.DrawInstanced = NULL;
+}
+
 TEST(stutter_blackbox_tile_check)
 {
     static uint8_t res[16], heap[16], heap2[16];

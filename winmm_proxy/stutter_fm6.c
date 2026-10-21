@@ -584,7 +584,7 @@ static volatile LONG64 gpu_max_ticks;            /* maior trecho do intervalo (z
 static volatile LONG64 gpu_max_val, gpu_sum_ticks;
 static volatile LONG gpu_max_qt, gpu_done, gpu_pend;
 /* lf/lsent: fence do proxy sinalizado depois de cada ExecuteCommandLists da fila (pool de command lists, lp_ecl) */
-typedef struct { ID3D12CommandQueue *q; uint8_t type; ID3D12Fence *lf; volatile UINT64 lsent; SRWLOCK llock; } sg_queue;
+typedef struct { ID3D12CommandQueue *q; uint8_t type; ID3D12Fence *lf; volatile UINT64 lsent; SRWLOCK llock; void *rq; } sg_queue;
 static sg_queue sg_queues[SG_QUEUES];
 static volatile LONG sg_nqueues;
 
@@ -813,6 +813,16 @@ static HRESULT (STDMETHODCALLTYPE *real_queue)(ID3D12Device *, const D3D12_COMMA
 static void (STDMETHODCALLTYPE *real_ecl)(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *);
 static HRESULT (STDMETHODCALLTYPE *real_signal)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
 extern int lp_on;
+/* listas unificadas (cmdrec_fm6.c) */
+extern int rc_on;
+extern int rc_any(UINT n, ID3D12CommandList *const *l);
+extern UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l, UINT64 fence, UINT64 done,
+                     ID3D12CommandList ***outv);
+extern int rc_wants(D3D12_COMMAND_LIST_TYPE type, const void *ret);
+extern HRESULT rc_create(ID3D12Device *d, ID3D12PipelineState *ps, REFIID riid, void **out);
+extern int rc_format(char *buf, int cap, double frames);
+extern void rc_setup(void *inner);
+static void lt_hook(ID3D12CommandList *cl);
 
 static sg_queue *sg_find(ID3D12CommandQueue *q)
 {
@@ -826,12 +836,29 @@ static sg_queue *sg_find(ID3D12CommandQueue *q)
  * anterior ainda esta em voo e invalido (debug layer, erro 553: o envio e descartado) */
 static void lp_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
 {
-    sg_queue *s = lp_on ? sg_find(q) : NULL;
+    int merge = rc_any(n, l);
+    sg_queue *s = lp_on || merge ? sg_find(q) : NULL;
     HRESULT (STDMETHODCALLTYPE *sig)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
-    if (!s || !s->lf) { real_ecl(q, n, l); return; }
+    ID3D12CommandList **o = NULL;
+    UINT k;
+    if (!s || !s->lf) {
+        if (merge) {   /* fila sem fence do proxy (nao acontece): listas reais nunca reusadas, mas nada de gravadora no D3D12 */
+            static void *rq;
+            static volatile LONG logged;
+            if (!InterlockedExchange(&logged, 1)) wlog("d3d: listas unificadas: fila %p sem fence do proxy", q);
+            if ((k = rc_merge(&rq, q, n, l, UINT64_MAX, 0, &o)) != 0) real_ecl(q, k, o);
+            return;
+        }
+        real_ecl(q, n, l);
+        return;
+    }
     sig = real_signal ? real_signal : q->lpVtbl->Signal;   /* o da fila, nao o st_signal (fora da medicao) */
     AcquireSRWLockExclusive(&s->llock);
-    real_ecl(q, n, l);
+    if (!merge) real_ecl(q, n, l);
+    else if ((k = rc_merge(&s->rq, q, n, l, s->lsent + 1, s->lf->lpVtbl->GetCompletedValue(s->lf), &o)) != 0) {
+        if (st_on) lt_hook(o[0]);
+        real_ecl(q, k, o);
+    }
     if (SUCCEEDED(sig(q, s->lf, s->lsent + 1))) s->lsent++;
     ReleaseSRWLockExclusive(&s->llock);
 }
@@ -1473,7 +1500,7 @@ static void lt_hook(ID3D12CommandList *cl)
     static volatile LONG done;
     GCL *l = NULL;
     ID3D12GraphicsCommandListVtbl *v;
-    if (done || !cl || InterlockedCompareExchange(&done, 1, 0)) return;
+    if (done || !cl || rc_any(1, &cl) || InterlockedCompareExchange(&done, 1, 0)) return;   /* gravadora: vtable do proxy */
     if (FAILED(cl->lpVtbl->QueryInterface(cl, &IID_ID3D12GraphicsCommandList, (void **)&l))) return;
     v = l->lpVtbl;
     vt_swap((void **)&v->Reset, lt_Reset, (void **)&lt_real_Reset);
@@ -2040,9 +2067,11 @@ static HRESULT STDMETHODCALLTYPE lp_create(ID3D12Device *d, UINT mask, D3D12_COM
                                            ID3D12PipelineState *ps, REFIID riid, void **out)
 {
     static volatile LONG hooked;
-    IUnknown *u = lp_on && out ? lp_take((unsigned)type) : NULL;
+    IUnknown *u;
     LONG64 t;
     HRESULT hr;
+    if (rc_wants(type, __builtin_return_address(0))) return rc_create(d, ps, riid, out);   /* gravadora (cmdrec_fm6.c) */
+    u = lp_on && out ? lp_take((unsigned)type) : NULL;
     if (u) {
         ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)u;
         gg_cl_forget(u);                              /* estado por lista do gpuguard: como uma lista nova */
@@ -2262,6 +2291,13 @@ void list_pool_setup(void)
 {
     lp_on = lp_real_create && lp_wanted();
     if (lp_on) wlog("d3d: pool de command lists: a ultima Release guarda a lista, o CreateCommandList seguinte a reaproveita (Reset)");
+}
+
+/* hook do apply_patches (fm5_patch.c), depois do pool: listas unificadas (cmdrec_fm6.c; debug.ini ListMerge, padrao FM6).
+ * As listas reais delas sao criadas por dentro do pool/gravadoras (gpuguard -> D3D12) */
+void list_merge_setup(void)
+{
+    rc_setup((void *)lp_real_create);
 }
 
 /* DeferRelease (PASSO 70): no FM6 sempre (a rajada de destruicao do reaper para o quadro ~150 ms e, junto com o
@@ -2880,7 +2916,7 @@ static void vz_poll(LONG64 now)
     uint32_t top[VZ_ORIGINS], i, j, k, n = nthr;
     LONG frames, opens, other;
     double win, f;
-    char buf[2000], one[96];
+    char buf[3000], one[96];
     int len;
     if (t0 && ms_of(now - t0) < 10000) return;
     for (i = 0; i < n; i++) {
@@ -2915,6 +2951,7 @@ static void vz_poll(LONG64 now)
         len += sprintf(buf + len, " | allocators: do pool %.1f/quadro, reusados %.1f/quadro, devolvidos %.1f/quadro, %ld compartilhados vivos",
                        InterlockedExchange(&as_fresh, 0) / f, InterlockedExchange(&as_shared, 0) / f,
                        InterlockedExchange(&as_pushed, 0) / f, as_live);
+    len += rc_format(buf + len, (int)sizeof buf - len, f);
     {   /* memoria do processo (PASSO 90: a queda do fim da corrida e "Kernel memory failure" com ~11 GB privados) */
         PROCESS_MEMORY_COUNTERS_EX pm;
         pm.cb = sizeof pm;
