@@ -36,3 +36,6 @@ screenshots/
 # Claude Code local settings (per user)
 .claude/settings.local.json
 fm6_gs_dump/
+
+# Discord announcement draft (local)
+CHANGELOG.md
