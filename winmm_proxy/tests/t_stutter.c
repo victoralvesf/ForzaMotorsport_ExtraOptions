@@ -1207,6 +1207,100 @@ TEST(stutter_placed_create_and_free)
     pa_nheaps = 0;
 }
 
+/* PASSO 101: piso do tamanho no jogo (mips com blocos 4x4 nos BC) */
+TEST(stutter_placed_min_bytes)
+{
+    D3D12_RESOURCE_DESC t = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 1024, 1024, 1, 11, DXGI_FORMAT_BC7_UNORM_SRGB, { 1, 0 } };
+    CHECK_EQ(pa_min_bytes(&t), 1398128);
+    t.Width = 256; t.Height = 128; t.MipLevels = 9; t.Format = DXGI_FORMAT_BC7_UNORM;
+    CHECK_EQ(pa_min_bytes(&t), 43728);
+    t.Width = 1920; t.Height = 869; t.MipLevels = 1; t.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    CHECK_EQ(pa_min_bytes(&t), 1920 * 869 * 4);
+    t.Width = 64; t.Height = 64; t.MipLevels = 1; t.DepthOrArraySize = 6; t.Format = DXGI_FORMAT_BC1_UNORM;
+    CHECK_EQ(pa_min_bytes(&t), 64 * 64 / 2 * 6);
+}
+
+/* PASSO 101: a nova cobre a velha (objeto vivo) -> velha orfa, paginas voltam (alias), Release da orfa nao solta de novo */
+TEST(stutter_placed_reclaim)
+{
+    static ID3D12DeviceVtbl vt;
+    struct { ID3D12DeviceVtbl *v; } dev = { &vt };
+    D3D12_RESOURCE_DESC t = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 256, 128, 1, 9, DXGI_FORMAT_BC7_UNORM, { 1, 0 } };
+    static int oa, ob, oc, od, oe, of;
+    void *a = NULL, *b = NULL, *c = NULL, *d = NULL, *e = NULL, *f = NULL;
+    uint32_t free0;
+    vt.GetResourceAllocationInfo = pdv_info;
+    real_heap = pdv_heap; real_placed = pdv_placed_fn;
+    pa_nheaps = 0; pa_ntab = 0; pa_used_pages = 0; pdv_heaps = 0; pdv_placed = 0;
+    if (pa_tab) memset(pa_tab, 0, PA_TAB * sizeof *pa_tab);
+    if (po_tab) memset(po_tab, 0, PA_TAB * sizeof *po_tab);
+    po_n = 0; pi_n = 0; pi_maxlen = 0; pq_head = pq_tail = 0; pa_orphans = 0; pa_orphan_pages = 0;
+    pa_reclaim_on = 1; pa_hold_ms = 0;
+    pdv_size = 49152; pdv_align_small = 1;                 /* 12 paginas; piso no jogo 43728 bytes */
+    pa_note_begin((void *)0x3000000, 1);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &a)));
+    pa_note_end(&oa);
+    CHECK_EQ(pdv_last_off, 0);
+    CHECK_EQ(pi_n, 1);
+    /* B comeca dentro de A no jogo: A orfa; sem espera, B mora nas paginas de A */
+    pa_note_begin((void *)0x3008000, 1);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &b)));
+    pa_note_end(&ob);
+    CHECK_EQ(pdv_last_off, 0);
+    CHECK_EQ(pa_get(a)->orphan, 1);
+    CHECK_EQ(pa_get(b)->orphan, 0);
+    CHECK_EQ(pa_orphans, 1);
+    CHECK_EQ(pa_used_pages, 12);
+    CHECK(pa_obj_orphan(&oa));
+    CHECK(!pa_obj_orphan(&ob));
+    /* C longe: nada fica orfa; vai para as paginas seguintes */
+    pa_note_begin((void *)0x5000000, 1);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &c)));
+    pa_note_end(&oc);
+    CHECK_EQ(pdv_last_off, 12 * 4096);
+    CHECK_EQ(pa_orphans, 1);
+    /* a Release de A (orfa) nao devolve as paginas que agora sao de B */
+    free0 = pa_heaps[0]->free_pages;
+    pa_free(a);
+    CHECK_EQ(pa_heaps[0]->free_pages, free0);
+    CHECK_EQ(pa_used_pages, 24);
+    CHECK_EQ(pi_n, 2);
+    /* com espera: D cobre C -> C na quarentena, as paginas de C seguem ocupadas ate o prazo */
+    pa_hold_ms = 60000;
+    pa_note_begin((void *)0x5000000, 1);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &d)));
+    pa_note_end(&od);
+    CHECK_EQ(pdv_last_off, 24 * 4096);
+    CHECK_EQ(pq_head - pq_tail, 1);
+    CHECK_EQ(pa_used_pages, 24);                           /* B + D */
+    free0 = pa_heaps[0]->free_pages;
+    pq_drain(GetTickCount64(), 0);                          /* antes do prazo: nada */
+    CHECK_EQ(pa_heaps[0]->free_pages, free0);
+    pq_drain(0, 1);
+    CHECK_EQ(pa_heaps[0]->free_pages, free0 + 12);
+    CHECK_EQ(pq_head - pq_tail, 0);
+    /* objeto do jogo ja solto: nao vira orfa (o recurso sai sozinho) */
+    pa_hold_ms = 0;
+    pa_note_begin((void *)0x7000000, 1);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &e)));
+    pa_note_end(&oe);
+    pa_obj_gone(&oe);
+    pa_note_begin((void *)0x7000000, 1);
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &f)));
+    pa_note_end(&of);
+    CHECK_EQ(pa_get(e)->orphan, 0);
+    CHECK_EQ(pa_orphans, 2);
+    /* tudo solto: heap vazio, indice vazio */
+    pa_free(b); pa_free(c); pa_free(d); pa_free(e); pa_free(f);
+    CHECK_EQ(pa_used_pages, 0);
+    CHECK_EQ(pa_heaps[0]->free_pages, PA_PAGES);
+    CHECK_EQ(pi_n, 0);
+    CHECK_EQ(pa_ntab, 0);
+    pa_reclaim_on = 0; pa_hold_ms = 2000;
+    real_heap = NULL; real_placed = NULL;
+    pa_nheaps = 0;
+}
+
 /* PASSO 99: sobreposicao por endereco e relatorio das vivas */
 TEST(stutter_placed_live_overlaps)
 {

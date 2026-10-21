@@ -1229,9 +1229,10 @@ static HRESULT STDMETHODCALLTYPE st_dheap(ID3D12Device *d, const D3D12_DESCRIPTO
 typedef struct { ID3D12Heap *h; uint64_t used[PA_WORDS]; uint32_t free_pages; } pa_heap;
 /* PASSO 99: tambem o objeto do Azimuth entregue ao jogo, o endereco no jogo, ordem/segundo de criacao, segundo em
    que o objeto chegou a 0 (+1; 0 = vivo), chamador (game+off), bytes estimados pelos texels e a forma da textura;
-   PASSO 100: segundo do ultimo refresh_title_texture do objeto (+1; 0 = nunca) */
-typedef struct { const void *res, *obj; uint64_t addr; uint32_t seq, born, gone, caller, est, used;
-                 uint16_t heap, page_hi, page, n, w, h; uint8_t fmt, mips; } pa_ent;
+   PASSO 100: segundo do ultimo refresh_title_texture do objeto (+1; 0 = nunca);
+   PASSO 101: lo = piso do tamanho no jogo (texels por mip, blocos BC), orphan = paginas ja devolvidas (sobreposta) */
+typedef struct { const void *res, *obj; uint64_t addr; uint32_t seq, born, gone, caller, est, used, lo;
+                 uint16_t heap, page_hi, page, n, w, h; uint8_t fmt, mips, orphan; } pa_ent;
 static pa_heap *pa_heaps[PA_MAX_HEAPS];
 static LONG pa_nheaps;
 static pa_ent *pa_tab;
@@ -1283,6 +1284,9 @@ static pa_ent *pa_put(const void *res, uint32_t heap, uint32_t page, uint32_t n)
 }
 
 static void po_del(const void *obj, const void *res);
+static void pi_del(uint64_t addr, const void *res);
+static void pi_add(uint64_t addr, const void *res, uint64_t len);
+uint64_t pa_min_bytes(const D3D12_RESOURCE_DESC *d);
 
 /* ultima Release de um recurso: se era nosso, devolve a faixa */
 static void pa_free(const void *res)
@@ -1294,10 +1298,13 @@ static void pa_free(const void *res)
     if (pa_tab[i].res == res) {
         pa_heap *H = pa_heaps[pa_tab[i].heap];
         uint32_t page = pa_tab[i].page | (uint32_t)pa_tab[i].page_hi << 16;
-        pa_set(H, page, pa_tab[i].n, 0);
-        InterlockedAdd64(&pa_used_pages, -(LONG64)pa_tab[i].n);
+        if (!pa_tab[i].orphan) {                       /* orfa: a faixa ja voltou (pa_reclaim) */
+            pa_set(H, page, pa_tab[i].n, 0);
+            InterlockedAdd64(&pa_used_pages, -(LONG64)pa_tab[i].n);
+        }
         InterlockedIncrement(&pa_freed);
         if (pa_tab[i].obj && !pa_tab[i].gone) po_del(pa_tab[i].obj, res);
+        if (pa_tab[i].addr) pi_del(pa_tab[i].addr, res);
         pa_ntab--;
         for (j = (i + 1) & (PA_TAB - 1); pa_tab[j].res; j = (j + 1) & (PA_TAB - 1)) {
             h = pa_slot(pa_tab[j].res);
@@ -1400,7 +1407,143 @@ static void pa_describe(pa_ent *e, const void *res, const D3D12_RESOURCE_DESC *r
     e->w = rd->Width > 0xffff ? 0xffff : (uint16_t)rd->Width;
     e->h = rd->Height > 0xffff ? 0xffff : (uint16_t)rd->Height;
     e->fmt = (uint8_t)rd->Format; e->mips = (uint8_t)rd->MipLevels;
-    if (pa_t_on && !pa_t_res) { e->addr = pa_t_addr; e->caller = pa_t_caller; pa_t_res = res; }
+    est = pa_min_bytes(rd);
+    e->lo = est > 0xffffffffull ? 0xffffffffu : (uint32_t)est;
+    if (pa_t_on && !pa_t_res) {
+        e->addr = pa_t_addr; e->caller = pa_t_caller; pa_t_res = res;
+        if (e->addr) pi_add(e->addr, res, e->lo);
+    }
+}
+
+/* ---- PASSO 101: DEVOLVER AS PAGINAS DAS SOBREPOSTAS ----
+ * PASSOS 99/100: o jogo carrega texturas novas por cima da memoria de outras e segura os objetos velhos (no console
+ * so o cabecalho; aqui uma copia D3D12 cada); em 2 sessoes NENHUMA sobreposta foi usada depois de coberta. Na criacao
+ * de uma placement anotada (endereco no jogo), as vivas mais velhas (objeto do jogo vivo) cuja faixa no jogo cruza a
+ * nova viram ORFAS: o recurso D3D12 continua (Azimuth/jogo seguram o objeto e as views), mas as paginas dele voltam ao
+ * heap depois de pa_hold_ms (GPU em voo) e outras texturas passam a morar ali = alias, como a memoria do console. Se
+ * o Azimuth for usar uma orfa (refresh_title_texture), o envio e PULADO (o envio escreveria por cima da dona atual) e
+ * contado. Faixa no jogo = piso pelos texels (pa_min_bytes), para nao pegar vizinhas por engano.
+ * debug.ini PlacementReclaim (padrao 1; precisa de PlacementTrack), PlacementReclaimHoldMs (padrao 2000). */
+static int pa_reclaim_on;
+int pa_hold_ms = 2000;
+static uint64_t *pi_addr;                                  /* indice por endereco no jogo (ordem crescente) */
+static const void **pi_res;
+static uint32_t pi_n;
+static uint64_t pi_maxlen;
+typedef struct { uint64_t t; uint32_t page; uint16_t heap, n; } pq_ent;
+#define PQ_RING 65536u
+static pq_ent *pq_ring;
+static uint32_t pq_head, pq_tail;
+static volatile LONG pa_orphans, pa_orphan_uses;
+static volatile LONG64 pa_orphan_pages;
+
+/* piso do tamanho no jogo: soma dos mips (blocos 4x4 nos BC) x fatias */
+uint64_t pa_min_bytes(const D3D12_RESOURCE_DESC *d)
+{
+    uint32_t bits, bc = 0, m, mips;
+    uint64_t sum = 0, w, h, z;
+    switch (d->Format) {
+    case DXGI_FORMAT_BC1_TYPELESS: case DXGI_FORMAT_BC1_UNORM: case DXGI_FORMAT_BC1_UNORM_SRGB:
+    case DXGI_FORMAT_BC4_TYPELESS: case DXGI_FORMAT_BC4_UNORM: case DXGI_FORMAT_BC4_SNORM: bits = 4; bc = 1; break;
+    case DXGI_FORMAT_BC2_TYPELESS: case DXGI_FORMAT_BC2_UNORM: case DXGI_FORMAT_BC2_UNORM_SRGB:
+    case DXGI_FORMAT_BC3_TYPELESS: case DXGI_FORMAT_BC3_UNORM: case DXGI_FORMAT_BC3_UNORM_SRGB:
+    case DXGI_FORMAT_BC5_TYPELESS: case DXGI_FORMAT_BC5_UNORM: case DXGI_FORMAT_BC5_SNORM:
+    case DXGI_FORMAT_BC6H_TYPELESS: case DXGI_FORMAT_BC6H_UF16: case DXGI_FORMAT_BC6H_SF16:
+    case DXGI_FORMAT_BC7_TYPELESS: case DXGI_FORMAT_BC7_UNORM: case DXGI_FORMAT_BC7_UNORM_SRGB: bits = 8; bc = 1; break;
+    case DXGI_FORMAT_R8_TYPELESS: case DXGI_FORMAT_R8_UNORM: case DXGI_FORMAT_R8_UINT: case DXGI_FORMAT_R8_SNORM:
+    case DXGI_FORMAT_R8_SINT: case DXGI_FORMAT_A8_UNORM: bits = 8; break;
+    case DXGI_FORMAT_R8G8_TYPELESS: case DXGI_FORMAT_R8G8_UNORM: case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_R16_FLOAT:
+    case DXGI_FORMAT_R16_UNORM: bits = 16; break;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R32G32_TYPELESS:
+    case DXGI_FORMAT_R32G32_FLOAT: bits = 64; break;
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS: case DXGI_FORMAT_R32G32B32A32_FLOAT: case DXGI_FORMAT_R32G32B32A32_UINT: bits = 128; break;
+    default: bits = 32; break;                        /* formatos de 32 bits; os raros maiores ficam por baixo (piso) */
+    }
+    mips = d->MipLevels ? d->MipLevels : 1;
+    for (m = 0; m < mips; m++) {
+        w = d->Width >> m; h = d->Height >> m;
+        if (!w) w = 1;
+        if (!h) h = 1;
+        if (bc) { w = (w + 3) & ~3ull; h = (h + 3) & ~3ull; }
+        z = d->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? (d->DepthOrArraySize >> m ? d->DepthOrArraySize >> m : 1) : 1;
+        sum += w * h * z * bits / 8;
+    }
+    if (d->Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D) sum *= d->DepthOrArraySize ? d->DepthOrArraySize : 1;
+    return sum;
+}
+
+/* 1o indice com (endereco, recurso) >= o pedido */
+static uint32_t pi_lower(uint64_t addr, const void *res)
+{
+    uint32_t lo = 0, hi = pi_n;
+    while (lo < hi) {
+        uint32_t mid = (lo + hi) / 2;
+        if (pi_addr[mid] < addr || (pi_addr[mid] == addr && (uintptr_t)pi_res[mid] < (uintptr_t)res)) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo;
+}
+
+/* com a trava */
+static void pi_add(uint64_t addr, const void *res, uint64_t len)
+{
+    uint32_t i;
+    if (!pi_addr) {
+        pi_addr = VirtualAlloc(NULL, PA_TAB * sizeof *pi_addr, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        pi_res = VirtualAlloc(NULL, PA_TAB * sizeof *pi_res, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    }
+    if (!pi_addr || !pi_res || pi_n >= PA_TAB) return;
+    i = pi_lower(addr, res);
+    memmove(&pi_addr[i + 1], &pi_addr[i], (pi_n - i) * sizeof *pi_addr);
+    memmove(&pi_res[i + 1], &pi_res[i], (pi_n - i) * sizeof *pi_res);
+    pi_addr[i] = addr; pi_res[i] = res; pi_n++;
+    if (len > pi_maxlen) pi_maxlen = len;
+}
+
+/* com a trava */
+static void pi_del(uint64_t addr, const void *res)
+{
+    uint32_t i;
+    if (!pi_n) return;
+    i = pi_lower(addr, res);
+    if (i >= pi_n || pi_addr[i] != addr || pi_res[i] != res) return;
+    memmove(&pi_addr[i], &pi_addr[i + 1], (pi_n - i - 1) * sizeof *pi_addr);
+    memmove(&pi_res[i], &pi_res[i + 1], (pi_n - i - 1) * sizeof *pi_res);
+    pi_n--;
+}
+
+/* com a trava: devolve ao heap as faixas das orfas que ja passaram de pa_hold_ms (ou todas com force) */
+static void pq_drain(uint64_t now_ms, int force)
+{
+    while (pq_tail != pq_head) {
+        pq_ent *q = &pq_ring[pq_tail % PQ_RING];
+        if (!force && now_ms - q->t < (uint64_t)(pa_hold_ms > 0 ? pa_hold_ms : 0)) break;
+        pa_set(pa_heaps[q->heap], q->page, q->n, 0);
+        pq_tail++;
+    }
+}
+
+/* com a trava: a placement nova [addr, addr+len) no jogo deixa orfas as vivas mais velhas que ela cobre */
+static void pa_reclaim(uint64_t addr, uint64_t len, uint64_t now_ms)
+{
+    uint32_t i;
+    if (!pa_reclaim_on || !addr || !len || !pi_n) return;
+    if (!pq_ring) pq_ring = VirtualAlloc(NULL, PQ_RING * sizeof *pq_ring, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pq_ring) return;
+    for (i = pi_lower(addr > pi_maxlen ? addr - pi_maxlen : 0, NULL); i < pi_n && pi_addr[i] < addr + len; i++) {
+        pa_ent *e = pa_get(pi_res[i]);
+        if (!e || e->orphan || !e->obj || e->gone || !e->lo || e->addr + e->lo <= addr) continue;
+        if (pq_head - pq_tail >= PQ_RING) break;      /* quarentena cheia: fica para a proxima */
+        pq_ring[pq_head % PQ_RING].t = now_ms;
+        pq_ring[pq_head % PQ_RING].heap = e->heap;
+        pq_ring[pq_head % PQ_RING].page = e->page | (uint32_t)e->page_hi << 16;
+        pq_ring[pq_head % PQ_RING].n = e->n;
+        pq_head++;
+        e->orphan = 1;
+        InterlockedAdd64(&pa_used_pages, -(LONG64)e->n);
+        InterlockedAdd64(&pa_orphan_pages, e->n);
+        InterlockedIncrement(&pa_orphans);
+    }
 }
 
 static int pa_track;                                      /* debug.ini PlacementTrack (padrao 1) */
@@ -1457,8 +1600,27 @@ void pa_obj_used(const void *obj)
         e->used = pa_now() + 1;
     ReleaseSRWLockShared(&pa_lock);
 }
+/* 1 se o objeto e de uma orfa (PASSO 101): as paginas dela ja sao de outra textura */
+int pa_obj_orphan(const void *obj)
+{
+    pa_ent *e;
+    uint32_t i;
+    int r = 0;
+    if (!po_n || !obj) return 0;
+    AcquireSRWLockShared(&pa_lock);
+    if (po_tab && po_tab[i = po_find(obj)].obj == obj && (e = pa_get(po_tab[i].res)) && e->obj == obj) r = e->orphan;
+    ReleaseSRWLockShared(&pa_lock);
+    return r;
+}
 static void pa_refresh_hook(void *ctx, void *obj)
 {
+    if (pa_obj_orphan(obj)) {                         /* o envio escreveria na textura que mora ali agora */
+        LONG k = InterlockedIncrement(&pa_orphan_uses);
+        if (k <= 8 || (k & (k - 1)) == 0)
+            wlog("d3d: PlacementReclaim: refresh de placement orfa #%ld (obj %p) pulado", k, obj);
+        pa_obj_used(obj);
+        return;
+    }
     pa_orig_refresh(ctx, obj);
     pa_obj_used(obj);
 }
@@ -1630,9 +1792,13 @@ int pa_wants(const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_R
 static int pa_format(char *out)
 {
     if (!pa_on) return 0;
-    return sprintf(out, " | placed do proxy: %ld heaps de 64 MiB, %lld MiB usados, %ld vivos, +%ld -%ld, %ld no committed",
-                   pa_nheaps, (long long)(pa_used_pages * PA_PAGE >> 20), pa_ntab, InterlockedExchange(&pa_made, 0),
-                   InterlockedExchange(&pa_freed, 0), InterlockedExchange(&pa_fallback, 0));
+    int len = sprintf(out, " | placed do proxy: %ld heaps de 64 MiB, %lld MiB usados, %ld vivos, +%ld -%ld, %ld no committed",
+                      pa_nheaps, (long long)(pa_used_pages * PA_PAGE >> 20), pa_ntab, InterlockedExchange(&pa_made, 0),
+                      InterlockedExchange(&pa_freed, 0), InterlockedExchange(&pa_fallback, 0));
+    if (pa_reclaim_on)
+        len += sprintf(out + len, ", orfas %ld (%lld MiB devolvidos no total, %u na quarentena), refresh de orfa pulado %ld",
+                       pa_orphans, (long long)(pa_orphan_pages * PA_PAGE >> 20), pq_head - pq_tail, pa_orphan_uses);
+    return len;
 }
 
 /* chamada de CreateCommittedResource que vira placed: so a do title_storage do Azimuth (retorno azimuth+0xe77c0) */
@@ -1662,6 +1828,11 @@ static HRESULT pa_create(ID3D12Device *d, const D3D12_RESOURCE_DESC *rd, D3D12_R
     n = (uint32_t)((ai.SizeInBytes + PA_PAGE - 1) / PA_PAGE);
     al = (uint32_t)(ai.Alignment / PA_PAGE);
     AcquireSRWLockExclusive(&pa_lock);
+    if (pa_reclaim_on) {
+        uint64_t now_ms = GetTickCount64();
+        if (pa_t_on && !pa_t_res) pa_reclaim(pa_t_addr, pa_min_bytes(rd), now_ms);
+        if (pq_ring) pq_drain(now_ms, 0);
+    }
     hi = pa_reserve(n, al, &page);
     ReleaseSRWLockExclusive(&pa_lock);
     if (hi < 0) {                                     /* heap novo (fora da trava: criar leva ms) */
@@ -2576,11 +2747,16 @@ void placed_textures_setup(void)
     pa_on = pa_wanted() && real_placed && real_heap && real_committed;
     pa_now();                                         /* idade das placement textures conta daqui */
     pa_track = dbg_int(L"PlacementTrack", 1) > 0;
+    pa_reclaim_on = pa_on && pa_track && dbg_int(L"PlacementReclaim", 1) > 0;
+    pa_hold_ms = dbg_int(L"PlacementReclaimHoldMs", 2000);
     if (pa_on && pa_track && !pa_orig_refresh &&
         !hook_function(PA_REFRESH_RVA, "48895c24185556574154415541564157", 16, (void *)pa_refresh_hook, (void **)&pa_orig_refresh))
         wlog("d3d: PlacementPlaced: refresh_title_texture (azimuth+%#x) com bytes diferentes, sem rastreio de uso", PA_REFRESH_RVA);
     if (pa_on) wlog("d3d: PlacementPlaced: placement textures committed do Azimuth (azimuth+%#x) viram placed em heaps de 64 MiB do proxy",
                     PA_RET_RVA);
+    if (pa_reclaim_on && pa_orig_refresh)
+        wlog("d3d: PlacementReclaim: placement coberta por uma mais nova devolve as paginas depois de %d ms", pa_hold_ms);
+    else pa_reclaim_on = 0;
 }
 
 /* hook do apply_patches (fm5_patch.c) */
