@@ -409,7 +409,7 @@ static void cx_created(uint32_t kind, void *obj, const D3D12_RESOURCE_DESC *rd, 
 }
 
 /* Release das vtables de recurso/heap (uma entrada por vtable: o slot original de cada uma) */
-#define RK_VT 6
+#define RK_VT 12
 static struct { void **vt; ULONG (STDMETHODCALLTYPE *orig)(IUnknown *); } rk_vts[RK_VT];
 static volatile LONG rk_nvt;
 
@@ -454,6 +454,7 @@ static int dr_push(IUnknown *u)
 
 static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u);
 static ULONG rk_call_orig(IUnknown *u);
+static void mr_del(const void *o);
 
 /* entrou na fila em `t` e ja tem `hold_ms` (fila em ordem: o 1o novo demais para o resto) */
 int dr_old_enough(LONG64 t, LONG64 now, int hold_ms, LONG64 freq)
@@ -525,6 +526,7 @@ static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u)
             }
             t = qpc();
             r = rk_vts[i].orig(u);
+            if (!r) mr_del(u);
             d = qpc() - t;
             if (d * 5000 >= st_freq.QuadPart) rk_note(RK_RELEASE, d, NULL, 0, 0);   /* >= 0,2 ms */
             return r;
@@ -536,7 +538,12 @@ static ULONG rk_call_orig(IUnknown *u)
 {
     void **vt = *(void ***)u;
     LONG i, n = rk_nvt;
-    for (i = 0; i < n; i++) if (rk_vts[i].vt == vt) return rk_vts[i].orig(u);
+    for (i = 0; i < n; i++)
+        if (rk_vts[i].vt == vt) {
+            ULONG r = rk_vts[i].orig(u);
+            if (!r) mr_del(u);
+            return r;
+        }
     return 0;
 }
 
@@ -827,6 +834,189 @@ static void lp_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
     ReleaseSRWLockExclusive(&s->llock);
 }
 
+/* ---- objetos D3D12 vivos por tipo + mapa da memoria do processo (PASSO 94, com StutterLog): a queda do fim da
+ * corrida vem com 10-11.6 GB privados ("Kernel memory failure") e o dump mostra ~5 GB em blocos WC de 32/64 MB e
+ * ~2 GB em blocos RW com paginas de guarda, sem dizer de quem. Criacao (committed por tipo de heap, placed, reserved,
+ * heap por tipo, allocator, descriptor heap) entra numa tabela {objeto, tipo, bytes}; a ultima Release (rk_release /
+ * fila do DeferRelease) tira. A cada 10 s e na remocao do device: vivos/bytes/criados/destruidos por tipo +
+ * VirtualQuery do processo (WC, alocacoes com guarda, RW, RO, mapeada). ---- */
+enum { MR_C_DEFAULT, MR_C_UPLOAD, MR_C_READBACK, MR_C_CUSTOM, MR_PLACED, MR_RESERVED, MR_H_DEFAULT, MR_H_UPLOAD,
+       MR_H_READBACK, MR_H_CUSTOM, MR_ALLOCATOR, MR_DESC_HEAP, MR_KINDS };
+static const char *const mr_names[MR_KINDS] = { "committed DEFAULT", "committed UPLOAD", "committed READBACK",
+    "committed CUSTOM", "placed", "reserved", "heap DEFAULT", "heap UPLOAD", "heap READBACK", "heap CUSTOM",
+    "allocators", "descriptor heaps" };
+#define MR_BITS 20
+#define MR_SIZE (1u << MR_BITS)
+typedef struct { const void *o; uint32_t kind; uint64_t bytes; } mr_ent;
+static mr_ent *mr_tab;
+static LONG mr_used, mr_full;
+static SRWLOCK mr_lock = SRWLOCK_INIT;
+static volatile LONG64 mr_live[MR_KINDS], mr_live_bytes[MR_KINDS];
+static volatile LONG mr_made[MR_KINDS], mr_gone[MR_KINDS];
+
+static uint32_t mr_slot(const void *o) { return (uint32_t)((((uintptr_t)o >> 4) * 0x9E3779B97F4A7C15ull) >> (64 - MR_BITS)); }
+
+/* bytes aproximados (so para o log): buffer = largura; textura = texels x bytes do formato (BC 0.5/1) x 4/3 com mips */
+uint64_t mr_res_bytes(const D3D12_RESOURCE_DESC *d)
+{
+    uint64_t px, b;
+    if (!d) return 0;
+    if (d->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) return d->Width;
+    px = d->Width * d->Height * d->DepthOrArraySize * (d->SampleDesc.Count ? d->SampleDesc.Count : 1);
+    switch (d->Format) {
+    case DXGI_FORMAT_BC1_TYPELESS: case DXGI_FORMAT_BC1_UNORM: case DXGI_FORMAT_BC1_UNORM_SRGB:
+    case DXGI_FORMAT_BC4_TYPELESS: case DXGI_FORMAT_BC4_UNORM: case DXGI_FORMAT_BC4_SNORM: b = px / 2; break;
+    case DXGI_FORMAT_BC2_TYPELESS: case DXGI_FORMAT_BC2_UNORM: case DXGI_FORMAT_BC2_UNORM_SRGB:
+    case DXGI_FORMAT_BC3_TYPELESS: case DXGI_FORMAT_BC3_UNORM: case DXGI_FORMAT_BC3_UNORM_SRGB:
+    case DXGI_FORMAT_BC5_TYPELESS: case DXGI_FORMAT_BC5_UNORM: case DXGI_FORMAT_BC5_SNORM:
+    case DXGI_FORMAT_BC6H_TYPELESS: case DXGI_FORMAT_BC6H_UF16: case DXGI_FORMAT_BC6H_SF16:
+    case DXGI_FORMAT_BC7_TYPELESS: case DXGI_FORMAT_BC7_UNORM: case DXGI_FORMAT_BC7_UNORM_SRGB:
+    case DXGI_FORMAT_R8_TYPELESS: case DXGI_FORMAT_R8_UNORM: case DXGI_FORMAT_A8_UNORM: b = px; break;
+    case DXGI_FORMAT_R16G16B16A16_TYPELESS: case DXGI_FORMAT_R16G16B16A16_FLOAT: case DXGI_FORMAT_R32G32_TYPELESS:
+    case DXGI_FORMAT_R32G32_FLOAT: b = px * 8; break;
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS: case DXGI_FORMAT_R32G32B32A32_FLOAT: b = px * 16; break;
+    case DXGI_FORMAT_R16_TYPELESS: case DXGI_FORMAT_R16_FLOAT: case DXGI_FORMAT_R16_UNORM: case DXGI_FORMAT_D16_UNORM:
+    case DXGI_FORMAT_R8G8_TYPELESS: case DXGI_FORMAT_R8G8_UNORM: b = px * 2; break;
+    default: b = px * 4; break;
+    }
+    return d->MipLevels != 1 ? b * 4 / 3 : b;
+}
+
+uint32_t mr_heap_kind(D3D12_HEAP_TYPE t, int heap)
+{
+    uint32_t k = t == D3D12_HEAP_TYPE_UPLOAD ? 1 : t == D3D12_HEAP_TYPE_READBACK ? 2 : t == D3D12_HEAP_TYPE_CUSTOM ? 3 : 0;
+    return (heap ? MR_H_DEFAULT : MR_C_DEFAULT) + k;
+}
+
+static void mr_add(const void *o, uint32_t kind, uint64_t bytes)
+{
+    uint32_t i;
+    if (!st_on || !o || kind >= MR_KINDS) return;
+    InterlockedIncrement(&mr_made[kind]);
+    AcquireSRWLockExclusive(&mr_lock);
+    if (!mr_tab) mr_tab = VirtualAlloc(NULL, MR_SIZE * sizeof *mr_tab, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!mr_tab || mr_used >= (LONG)(MR_SIZE / 4 * 3)) { mr_full++; ReleaseSRWLockExclusive(&mr_lock); return; }
+    for (i = mr_slot(o); mr_tab[i].o && mr_tab[i].o != o; i = (i + 1) & (MR_SIZE - 1)) {}
+    if (mr_tab[i].o == o) {                           /* endereco reaproveitado sem passar pela Release */
+        InterlockedDecrement64(&mr_live[mr_tab[i].kind]);
+        InterlockedAdd64(&mr_live_bytes[mr_tab[i].kind], -(LONG64)mr_tab[i].bytes);
+    } else mr_used++;
+    mr_tab[i].o = o; mr_tab[i].kind = kind; mr_tab[i].bytes = bytes;
+    InterlockedIncrement64(&mr_live[kind]);
+    InterlockedAdd64(&mr_live_bytes[kind], (LONG64)bytes);
+    ReleaseSRWLockExclusive(&mr_lock);
+}
+
+/* remocao com deslocamento para tras (sondagem linear sem lapides) */
+static void mr_del(const void *o)
+{
+    uint32_t i, j, h;
+    if (!o || !mr_tab) return;
+    AcquireSRWLockExclusive(&mr_lock);
+    for (i = mr_slot(o); mr_tab[i].o && mr_tab[i].o != o; i = (i + 1) & (MR_SIZE - 1)) {}
+    if (mr_tab[i].o == o) {
+        InterlockedDecrement64(&mr_live[mr_tab[i].kind]);
+        InterlockedAdd64(&mr_live_bytes[mr_tab[i].kind], -(LONG64)mr_tab[i].bytes);
+        InterlockedIncrement(&mr_gone[mr_tab[i].kind]);
+        mr_used--;
+        for (j = (i + 1) & (MR_SIZE - 1); mr_tab[j].o; j = (j + 1) & (MR_SIZE - 1)) {
+            h = mr_slot(mr_tab[j].o);
+            if (((j - h) & (MR_SIZE - 1)) >= ((j - i) & (MR_SIZE - 1))) { mr_tab[i] = mr_tab[j]; i = j; }
+        }
+        mr_tab[i].o = NULL;
+    }
+    ReleaseSRWLockExclusive(&mr_lock);
+}
+
+/* VirtualQuery do processo, por alocacao (AllocationBase): WC, com pagina NOACCESS comprometida (guarda), RW, RO,
+ * mapeada; bytes comprometidos e numero de alocacoes (imagens fora) */
+enum { MV_WC, MV_GUARD, MV_RW, MV_RO, MV_OTHER, MV_MAPPED, MV_KINDS };
+static const char *const mv_names[MV_KINDS] = { "WC", "RW com guarda", "RW", "RO", "outra", "mapeada" };
+static void mv_close(uint64_t *bytes, uint32_t *allocs, uint64_t cur, int wc, int guard, int rw, int ro, DWORD type)
+{
+    int k;
+    if (!cur) return;
+    k = type == MEM_MAPPED ? MV_MAPPED : wc ? MV_WC : guard ? MV_GUARD : rw ? MV_RW : ro ? MV_RO : MV_OTHER;
+    bytes[k] += cur; allocs[k]++;
+}
+void mv_scan(uint64_t *bytes, uint32_t *allocs)
+{
+    MEMORY_BASIC_INFORMATION m;
+    uint8_t *p = NULL;
+    void *base = NULL;
+    uint64_t cur = 0;
+    int wc = 0, guard = 0, rw = 0, ro = 0;
+    DWORD type = 0;
+    memset(bytes, 0, MV_KINDS * sizeof *bytes);
+    memset(allocs, 0, MV_KINDS * sizeof *allocs);
+    while (VirtualQuery(p, &m, sizeof m) == sizeof m) {
+        if (m.State == MEM_COMMIT && m.Type != MEM_IMAGE) {
+            if (m.AllocationBase != base) {
+                mv_close(bytes, allocs, cur, wc, guard, rw, ro, type);
+                base = m.AllocationBase; cur = 0; wc = guard = rw = ro = 0; type = m.Type;
+            }
+            cur += m.RegionSize;
+            if (m.Protect & PAGE_WRITECOMBINE) wc = 1;
+            if ((m.Protect & 0xff) == PAGE_NOACCESS) guard = 1;
+            if ((m.Protect & 0xff) == PAGE_READWRITE) rw = 1;
+            if ((m.Protect & 0xff) == PAGE_READONLY) ro = 1;
+        }
+        p = (uint8_t *)m.BaseAddress + m.RegionSize;
+        if ((uintptr_t)p >= 0x7ffffffe0000ull) break;
+    }
+    mv_close(bytes, allocs, cur, wc, guard, rw, ro, type);
+}
+
+void mr_report(const char *when)
+{
+    char buf[2048];
+    int len, k;
+    uint64_t vb[MV_KINDS];
+    uint32_t va[MV_KINDS];
+    len = sprintf(buf, "stutter: memoria %s: D3D12 vivos:", when);
+    for (k = 0; k < MR_KINDS && len < 1700; k++) {
+        LONG made = InterlockedExchange(&mr_made[k], 0), gone = InterlockedExchange(&mr_gone[k], 0);
+        if (!mr_live[k] && !made) continue;
+        len += sprintf(buf + len, " [%s %lld, %llu MiB, +%ld -%ld]", mr_names[k], (long long)mr_live[k],
+                       (unsigned long long)(mr_live_bytes[k] > 0 ? mr_live_bytes[k] : 0) >> 20, made, gone);
+    }
+    if (mr_full) len += sprintf(buf + len, " (tabela cheia: %ld fora)", mr_full);
+    mv_scan(vb, va);
+    len += sprintf(buf + len, " | processo:");
+    for (k = 0; k < MV_KINDS; k++)
+        len += sprintf(buf + len, " %s %llu MiB/%u", mv_names[k], (unsigned long long)(vb[k] >> 20), va[k]);
+    wlog("%s", buf);
+}
+
+/* espera a remocao do device (a fence vai a UINT64_MAX) e grava o resumo */
+static DWORD WINAPI mr_watch(void *param)
+{
+    ID3D12Device *dev = param;
+    ID3D12Fence *fence = NULL;
+    HANDLE ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (!ev || FAILED(dev->lpVtbl->CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&fence)) ||
+        FAILED(fence->lpVtbl->SetEventOnCompletion(fence, UINT64_MAX, ev)))
+        return 0;
+    WaitForSingleObject(ev, INFINITE);
+    mr_report("na remocao do device");
+    return 0;
+}
+
+static HRESULT (STDMETHODCALLTYPE *real_alloc)(ID3D12Device *, D3D12_COMMAND_LIST_TYPE, REFIID, void **);
+static HRESULT STDMETHODCALLTYPE st_alloc(ID3D12Device *d, D3D12_COMMAND_LIST_TYPE t, REFIID r, void **o)
+{
+    HRESULT hr = real_alloc(d, t, r, o);
+    if (SUCCEEDED(hr) && o && *o) { rk_hook_release(*o); mr_add(*o, MR_ALLOCATOR, 0); }
+    return hr;
+}
+static HRESULT (STDMETHODCALLTYPE *real_dheap)(ID3D12Device *, const D3D12_DESCRIPTOR_HEAP_DESC *, REFIID, void **);
+static HRESULT STDMETHODCALLTYPE st_dheap(ID3D12Device *d, const D3D12_DESCRIPTOR_HEAP_DESC *hd, REFIID r, void **o)
+{
+    HRESULT hr = real_dheap(d, hd, r, o);
+    if (SUCCEEDED(hr) && o && *o) { rk_hook_release(*o); mr_add(*o, MR_DESC_HEAP, hd ? (uint64_t)hd->NumDescriptors * 32 : 0); }
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE st_committed(ID3D12Device *d, const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_RESOURCE_DESC *rd,
                                               D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c, REFIID r, void **o)
 {
@@ -837,7 +1027,11 @@ static HRESULT STDMETHODCALLTYPE st_committed(ID3D12Device *d, const D3D12_HEAP_
     st_count(ST_RES, dt);
     InterlockedAdd64(&st_bytes, (LONG64)st_res_bytes(rd));
     rk_note(RK_COMMITTED, dt, rd, 0, 0);
-    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_COMMITTED, *o, rd, 0); }
+    if (SUCCEEDED(hr) && o) {
+        rk_hook_release(*o);
+        mr_add(*o, mr_heap_kind(hp ? hp->Type : D3D12_HEAP_TYPE_DEFAULT, 0), mr_res_bytes(rd));
+        if (st_on) cx_created(CX_COMMITTED, *o, rd, 0);
+    }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE st_placed(ID3D12Device *d, ID3D12Heap *h, UINT64 off, const D3D12_RESOURCE_DESC *rd, D3D12_RESOURCE_STATES s,
@@ -849,7 +1043,7 @@ static HRESULT STDMETHODCALLTYPE st_placed(ID3D12Device *d, ID3D12Heap *h, UINT6
     dt = qpc() - t;
     st_count(ST_RES, dt);
     rk_note(RK_PLACED, dt, rd, 0, 0);
-    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_PLACED, *o, rd, 0); }
+    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); mr_add(*o, MR_PLACED, 0); if (st_on) cx_created(CX_PLACED, *o, rd, 0); }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE st_reserved(ID3D12Device *d, const D3D12_RESOURCE_DESC *rd, D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c,
@@ -861,7 +1055,7 @@ static HRESULT STDMETHODCALLTYPE st_reserved(ID3D12Device *d, const D3D12_RESOUR
     dt = qpc() - t;
     st_count(ST_RES, dt);
     rk_note(RK_RESERVED, dt, rd, 0, 0);
-    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_RESERVED, *o, rd, 0); }
+    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); mr_add(*o, MR_RESERVED, 0); if (st_on) cx_created(CX_RESERVED, *o, rd, 0); }
     return hr;
 }
 static HRESULT STDMETHODCALLTYPE st_heap(ID3D12Device *d, const D3D12_HEAP_DESC *hd, REFIID r, void **o)
@@ -873,7 +1067,11 @@ static HRESULT STDMETHODCALLTYPE st_heap(ID3D12Device *d, const D3D12_HEAP_DESC 
     st_count(ST_RES, dt);
     if (hd) InterlockedAdd64(&st_bytes, (LONG64)hd->SizeInBytes);
     rk_note(RK_HEAP, dt, NULL, hd ? hd->SizeInBytes : 0, hd ? (uint32_t)hd->Flags : 0);
-    if (SUCCEEDED(hr) && o) { rk_hook_release(*o); if (st_on) cx_created(CX_HEAP, *o, NULL, hd ? hd->SizeInBytes : 0); }
+    if (SUCCEEDED(hr) && o) {
+        rk_hook_release(*o);
+        mr_add(*o, mr_heap_kind(hd ? hd->Properties.Type : D3D12_HEAP_TYPE_DEFAULT, 1), hd ? hd->SizeInBytes : 0);
+        if (st_on) cx_created(CX_HEAP, *o, NULL, hd ? hd->SizeInBytes : 0);
+    }
     return hr;
 }
 
@@ -1749,6 +1947,10 @@ void stutter_device(IUnknown *obj)
     if (!st_on) { dev->lpVtbl->Release(dev); return; }
     vt_swap((void **)&dev->lpVtbl->CreateGraphicsPipelineState, st_gpso, (void **)&real_gpso);
     vt_swap((void **)&dev->lpVtbl->CreateComputePipelineState, st_cpso, (void **)&real_cpso);
+    vt_swap((void **)&dev->lpVtbl->CreateCommandAllocator, st_alloc, (void **)&real_alloc);
+    vt_swap((void **)&dev->lpVtbl->CreateDescriptorHeap, st_dheap, (void **)&real_dheap);
+    dev->lpVtbl->AddRef(dev);                         /* a do mr_watch */
+    CloseHandle(CreateThread(NULL, 0, mr_watch, dev, 0, NULL));
     dev->lpVtbl->Release(dev);
     if (SUCCEEDED(obj->lpVtbl->QueryInterface(obj, &IID_ID3D12Device1, (void **)&dev1))) {
         vt_swap((void **)&dev1->lpVtbl->CreatePipelineLibrary, st_lib, (void **)&real_lib);
@@ -2392,6 +2594,7 @@ static void vz_poll(LONG64 now)
     wlog("%s", buf);
     if (lt_format(buf, sizeof buf, f)) wlog("%s", buf);
     qp_report();
+    mr_report("10 s");
     if (!opens) return;
     {
         uint64_t cnt[VZ_ORIGINS];

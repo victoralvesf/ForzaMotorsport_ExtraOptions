@@ -895,3 +895,64 @@ TEST(stutter_alloc_share_setup)
     as_orig_acq = NULL; as_orig_ret = NULL;
     dbgini_set(NULL);
 }
+
+/* PASSO 94: objetos D3D12 vivos por tipo (entra na criacao, sai na ultima Release) */
+TEST(stutter_live_objects)
+{
+    static int objs[3000];
+    int i, on = st_on;
+    LONG64 n0 = mr_live[MR_C_UPLOAD], b0 = mr_live_bytes[MR_C_UPLOAD], p0 = mr_live[MR_PLACED];
+    st_on = 1;
+    for (i = 0; i < 3000; i++) mr_add(&objs[i], i < 1000 ? MR_C_UPLOAD : MR_PLACED, i < 1000 ? 4096 : 0);
+    CHECK_EQ(mr_live[MR_C_UPLOAD] - n0, 1000);
+    CHECK_EQ(mr_live_bytes[MR_C_UPLOAD] - b0, 1000 * 4096);
+    CHECK_EQ(mr_live[MR_PLACED] - p0, 2000);
+    mr_add(&objs[0], MR_C_UPLOAD, 4096);              /* mesmo endereco de novo: nao conta duas vezes */
+    CHECK_EQ(mr_live[MR_C_UPLOAD] - n0, 1000);
+    for (i = 0; i < 3000; i += 2) mr_del(&objs[i]);   /* remocao no meio das sondagens */
+    CHECK_EQ(mr_live[MR_C_UPLOAD] - n0, 500);
+    CHECK_EQ(mr_live[MR_PLACED] - p0, 1000);
+    for (i = 1; i < 3000; i += 2) { uint32_t j; for (j = mr_slot(&objs[i]); mr_tab[j].o != &objs[i]; j = (j + 1) & (MR_SIZE - 1)) REQUIRE(mr_tab[j].o); }
+    for (i = 1; i < 3000; i += 2) mr_del(&objs[i]);
+    CHECK_EQ(mr_live[MR_C_UPLOAD], n0);
+    CHECK_EQ(mr_live_bytes[MR_C_UPLOAD], b0);
+    CHECK_EQ(mr_live[MR_PLACED], p0);
+    mr_del(&objs[0]);                                 /* ja fora: nada */
+    CHECK_EQ(mr_live[MR_C_UPLOAD], n0);
+    st_on = on;
+}
+
+TEST(stutter_live_bytes_and_kinds)
+{
+    D3D12_RESOURCE_DESC d = { 0 };
+    d.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER; d.Width = 65536;
+    CHECK_EQ(mr_res_bytes(&d), 65536);
+    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width = 1024; d.Height = 1024; d.DepthOrArraySize = 1;
+    d.MipLevels = 1; d.SampleDesc.Count = 1; d.Format = DXGI_FORMAT_BC1_UNORM;
+    CHECK_EQ(mr_res_bytes(&d), 512 * 1024);
+    d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.MipLevels = 11;
+    CHECK_EQ(mr_res_bytes(&d), 4ull * 1024 * 1024 * 4 / 3);
+    CHECK_EQ(mr_heap_kind(D3D12_HEAP_TYPE_UPLOAD, 0), MR_C_UPLOAD);
+    CHECK_EQ(mr_heap_kind(D3D12_HEAP_TYPE_CUSTOM, 1), MR_H_CUSTOM);
+    CHECK_EQ(mr_heap_kind(D3D12_HEAP_TYPE_DEFAULT, 1), MR_H_DEFAULT);
+}
+
+/* a varredura acha uma alocacao WC e uma com pagina de guarda */
+TEST(stutter_process_memory_scan)
+{
+    uint64_t b0[MV_KINDS], b1[MV_KINDS];
+    uint32_t a0[MV_KINDS], a1[MV_KINDS];
+    uint8_t *wc, *g;
+    DWORD old;
+    mv_scan(b0, a0);
+    wc = VirtualAlloc(NULL, 1 << 20, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE | PAGE_WRITECOMBINE);
+    g = VirtualAlloc(NULL, 1 << 20, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    REQUIRE(wc && g);
+    VirtualProtect(g + 0x10000, 0x1000, PAGE_NOACCESS, &old);
+    mv_scan(b1, a1);
+    CHECK_EQ(a1[MV_WC] - a0[MV_WC], 1);
+    CHECK_EQ(b1[MV_WC] - b0[MV_WC], 1 << 20);
+    CHECK_EQ(a1[MV_GUARD] - a0[MV_GUARD], 1);
+    VirtualFree(wc, 0, MEM_RELEASE);
+    VirtualFree(g, 0, MEM_RELEASE);
+}
