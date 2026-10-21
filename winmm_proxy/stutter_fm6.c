@@ -1228,8 +1228,9 @@ static HRESULT STDMETHODCALLTYPE st_dheap(ID3D12Device *d, const D3D12_DESCRIPTO
 #define PA_TAB (1u << PA_BITS)
 typedef struct { ID3D12Heap *h; uint64_t used[PA_WORDS]; uint32_t free_pages; } pa_heap;
 /* PASSO 99: tambem o objeto do Azimuth entregue ao jogo, o endereco no jogo, ordem/segundo de criacao, segundo em
-   que o objeto chegou a 0 (+1; 0 = vivo), chamador (game+off), bytes estimados pelos texels e a forma da textura */
-typedef struct { const void *res, *obj; uint64_t addr; uint32_t seq, born, gone, caller, est;
+   que o objeto chegou a 0 (+1; 0 = vivo), chamador (game+off), bytes estimados pelos texels e a forma da textura;
+   PASSO 100: segundo do ultimo refresh_title_texture do objeto (+1; 0 = nunca) */
+typedef struct { const void *res, *obj; uint64_t addr; uint32_t seq, born, gone, caller, est, used;
                  uint16_t heap, page_hi, page, n, w, h; uint8_t fmt, mips; } pa_ent;
 static pa_heap *pa_heaps[PA_MAX_HEAPS];
 static LONG pa_nheaps;
@@ -1402,7 +1403,8 @@ static void pa_describe(pa_ent *e, const void *res, const D3D12_RESOURCE_DESC *r
     if (pa_t_on && !pa_t_res) { e->addr = pa_t_addr; e->caller = pa_t_caller; pa_t_res = res; }
 }
 
-int pa_tracking(void) { return pa_on; }
+static int pa_track;                                      /* debug.ini PlacementTrack (padrao 1) */
+int pa_tracking(void) { return pa_on && pa_track; }
 
 void pa_note_begin(const void *addr, uintptr_t caller)
 {
@@ -1441,10 +1443,33 @@ void pa_obj_gone(const void *obj)
     ReleaseSRWLockExclusive(&pa_lock);
 }
 
-/* copia de uma entrada viva para o relatorio; len = tamanho aproximado no jogo (menor entre D3D12 e texels) */
-typedef struct { uint64_t addr, len, bytes; uint32_t seq, born, gone, caller; uint16_t w, h; uint8_t fmt, mips, flags; } pa_snap;
+/* PASSO 100: o Azimuth chama refresh_title_texture (0x14014aef0) para cada title texture usada numa lista
+   (ExecuteCommandList e outros 5 sites) -> "ultimo uso" do objeto. Leitura com a trava compartilhada. */
+#define PA_REFRESH_RVA 0x14aef0
+static void (*pa_orig_refresh)(void *ctx, void *obj);
+void pa_obj_used(const void *obj)
+{
+    pa_ent *e;
+    uint32_t i;
+    if (!po_n || !obj) return;
+    AcquireSRWLockShared(&pa_lock);
+    if (po_tab && po_tab[i = po_find(obj)].obj == obj && (e = pa_get(po_tab[i].res)) && e->obj == obj)
+        e->used = pa_now() + 1;
+    ReleaseSRWLockShared(&pa_lock);
+}
+static void pa_refresh_hook(void *ctx, void *obj)
+{
+    pa_orig_refresh(ctx, obj);
+    pa_obj_used(obj);
+}
+
+/* copia de uma entrada viva para o relatorio; len = tamanho aproximado no jogo (menor entre D3D12 e texels);
+   covered = 1o segundo em que uma viva mais nova cruzou a faixa (+1; 0 = nao coberta) */
+typedef struct { uint64_t addr, len, bytes; uint32_t seq, born, gone, caller, used, covered; uint16_t w, h;
+                 uint8_t fmt, mips, flags; } pa_snap;
 #define PA_OVER 1u        /* a faixa cruza a de uma textura viva mais nova */
 #define PA_SAME 2u        /* mesmo endereco de uma textura viva mais nova */
+#define PA_VIEW 4u        /* mesmo endereco e mesma largura/altura/mips de uma mais nova (outra view dos mesmos dados?) */
 #define PA_OLD_S 300u     /* "antiga" = 5 min */
 #define PA_GONE_S 10u
 
@@ -1480,9 +1505,13 @@ uint64_t pa_mark_overlaps(pa_snap *s, uint32_t n)
         if (!s[i].addr || !s[i].len) continue;
         end = s[i].addr + s[i].len;
         for (j = i + 1, k = 0; j < n && s[j].addr < end && k < 4096; j++, k++) {
-            pa_snap *older = s[j].seq < s[i].seq ? &s[j] : &s[i];
+            pa_snap *older = s[j].seq < s[i].seq ? &s[j] : &s[i], *newer = older == &s[i] ? &s[j] : &s[i];
             older->flags |= PA_OVER;
-            if (s[j].addr == s[i].addr) older->flags |= PA_SAME;
+            if (!older->covered || newer->born + 1 < older->covered) older->covered = newer->born + 1;
+            if (s[j].addr == s[i].addr) {
+                older->flags |= PA_SAME;
+                if (s[j].w == s[i].w && s[j].h == s[i].h && s[j].mips == s[i].mips) older->flags |= PA_VIEW;
+            }
         }
         if (s[i].addr >= ce) { uni += ce - cs; cs = s[i].addr; ce = end; }
         else if (end > ce) ce = end;
@@ -1499,6 +1528,8 @@ void pa_live_lines(pa_snap *s, uint32_t n, uint32_t now, char *l1, char *l2)
     static const char *const sz_name[] = { "<=64K", "<=1M", "<=4M", ">4M" };
     uint64_t age_b[6] = { 0 }, sz_b[4] = { 0 }, obj_b[4] = { 0 }, total = 0, over_b = 0, same_b = 0, held_b = 0, sum_len = 0, uni;
     uint32_t age_n[6] = { 0 }, sz_n[4] = { 0 }, obj_n[4] = { 0 }, over_n = 0, same_n = 0, held_n = 0, with_addr = 0, i, k;
+    uint64_t use_b[3] = { 0 }, view_b = 0;
+    uint32_t use_n[3] = { 0 }, view_n = 0;
     pa_tally callers[128], shapes[128];
     int nc = 0, ns = 0, len;
     qsort(s, n, sizeof *s, pa_snap_addr);
@@ -1515,7 +1546,13 @@ void pa_live_lines(pa_snap *s, uint32_t n, uint32_t now, char *l1, char *l2)
         if (s[i].addr) { with_addr++; sum_len += s[i].len; }
         if (s[i].flags & PA_OVER) { over_n++; over_b += s[i].bytes; }
         if (s[i].flags & PA_SAME) { same_n++; same_b += s[i].bytes; }
-        if ((s[i].flags & PA_OVER) && !s[i].gone) { held_n++; held_b += s[i].bytes; }
+        if ((s[i].flags & PA_OVER) && !s[i].gone) {
+            /* 0 usada depois de coberta, 1 usada so antes, 2 nunca usada */
+            uint32_t u = !s[i].used ? 2 : s[i].used > s[i].covered ? 0 : 1;
+            held_n++; held_b += s[i].bytes;
+            use_n[u]++; use_b[u] += s[i].bytes;
+            if (s[i].flags & PA_VIEW) { view_n++; view_b += s[i].bytes; }
+        }
         if (age >= PA_OLD_S && s[i].addr && !s[i].gone) {
             pa_tally_add(callers, &nc, 128, s[i].caller, s[i].bytes);
             pa_tally_add(shapes, &ns, 128, (uint64_t)s[i].w << 32 | (uint64_t)s[i].h << 16 | (uint64_t)s[i].fmt << 8 | s[i].mips,
@@ -1530,9 +1567,11 @@ void pa_live_lines(pa_snap *s, uint32_t n, uint32_t now, char *l1, char *l2)
     sprintf(l1 + len, " | objeto do jogo: vivo %u/%.0f MiB, solto <%us %u/%.0f MiB, solto ha mais %u/%.0f MiB, sem anotacao %u/%.0f MiB",
             obj_n[0], PA_MIB(obj_b[0]), PA_GONE_S, obj_n[1], PA_MIB(obj_b[1]), obj_n[2], PA_MIB(obj_b[2]), obj_n[3], PA_MIB(obj_b[3]));
     len = sprintf(l2, "endereco: %u anotadas, cobrem %.0f de %.0f MiB (aprox.); sobrepostas por mais nova %u/%.0f MiB (objeto "
-                  "vivo %u/%.0f MiB), mesmo endereco %u/%.0f MiB | antigas (>=%u min, objeto vivo) por chamador:",
-                  with_addr, PA_MIB(uni), PA_MIB(sum_len), over_n, PA_MIB(over_b), held_n, PA_MIB(held_b), same_n, PA_MIB(same_b),
-                  PA_OLD_S / 60);
+                  "vivo %u/%.0f MiB: usadas depois de cobertas %u/%.0f MiB, so antes %u/%.0f MiB, nunca %u/%.0f MiB; mesma forma "
+                  "no mesmo endereco %u/%.0f MiB), mesmo endereco %u/%.0f MiB | antigas (>=%u min, objeto vivo) por chamador:",
+                  with_addr, PA_MIB(uni), PA_MIB(sum_len), over_n, PA_MIB(over_b), held_n, PA_MIB(held_b), use_n[0],
+                  PA_MIB(use_b[0]), use_n[1], PA_MIB(use_b[1]), use_n[2], PA_MIB(use_b[2]), view_n, PA_MIB(view_b), same_n,
+                  PA_MIB(same_b), PA_OLD_S / 60);
     for (k = 0; k < 6; k++) {
         int b = pa_tally_top(callers, nc);
         if (b < 0) break;
@@ -1556,7 +1595,7 @@ static void pa_live_report(const char *when)
     static char l1[1024], l2[1536];
     pa_snap *s;
     uint32_t n = 0, cap, i;
-    if (!pa_on || !pa_tab) return;
+    if (!pa_on || !pa_track || !pa_tab) return;
     AcquireSRWLockShared(&pa_lock);
     cap = (uint32_t)pa_ntab + 16;
     s = malloc(cap * sizeof *s);
@@ -1566,7 +1605,7 @@ static void pa_live_report(const char *when)
         if (!e->res) continue;
         memset(&s[n], 0, sizeof s[n]);
         s[n].addr = e->addr; s[n].bytes = b; s[n].len = e->est && e->est < b ? e->est : b;
-        s[n].seq = e->seq; s[n].born = e->born; s[n].gone = e->gone; s[n].caller = e->caller;
+        s[n].seq = e->seq; s[n].born = e->born; s[n].gone = e->gone; s[n].caller = e->caller; s[n].used = e->used;
         s[n].w = e->w; s[n].h = e->h; s[n].fmt = e->fmt; s[n].mips = e->mips;
         n++;
     }
@@ -2536,6 +2575,10 @@ void placed_textures_setup(void)
 {
     pa_on = pa_wanted() && real_placed && real_heap && real_committed;
     pa_now();                                         /* idade das placement textures conta daqui */
+    pa_track = dbg_int(L"PlacementTrack", 1) > 0;
+    if (pa_on && pa_track && !pa_orig_refresh &&
+        !hook_function(PA_REFRESH_RVA, "48895c24185556574154415541564157", 16, (void *)pa_refresh_hook, (void **)&pa_orig_refresh))
+        wlog("d3d: PlacementPlaced: refresh_title_texture (azimuth+%#x) com bytes diferentes, sem rastreio de uso", PA_REFRESH_RVA);
     if (pa_on) wlog("d3d: PlacementPlaced: placement textures committed do Azimuth (azimuth+%#x) viram placed em heaps de 64 MiB do proxy",
                     PA_RET_RVA);
 }

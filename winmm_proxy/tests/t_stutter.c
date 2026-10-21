@@ -1226,7 +1226,7 @@ TEST(stutter_placed_live_overlaps)
     CHECK_EQ(s[0].addr, 0);                            /* sem endereco primeiro, sem marca */
     CHECK_EQ(s[0].flags, 0);
     CHECK_EQ(s[1].seq, 1);                             /* A: mesmo endereco de B e sob C */
-    CHECK_EQ(s[1].flags, PA_OVER | PA_SAME);
+    CHECK_EQ(s[1].flags, PA_OVER | PA_SAME | PA_VIEW);   /* (forma vazia nas duas = mesma forma) */
     CHECK_EQ(s[2].seq, 3);                             /* B: a mais nova no endereco */
     CHECK_EQ(s[2].flags, 0);
     CHECK_EQ(s[3].seq, 2);                             /* C: B (mais nova) cobre */
@@ -1245,8 +1245,35 @@ TEST(stutter_placed_live_overlaps)
     CHECK(strstr(l1, "tamanho: <=64K 4/0 MiB <=1M 0/0 MiB <=4M 0/0 MiB >4M 1/8 MiB") != NULL);
     CHECK(strstr(l1, "objeto do jogo: vivo 2/0 MiB, solto <10s 1/8 MiB, solto ha mais 1/0 MiB, sem anotacao 1/0 MiB") != NULL);
     CHECK(strstr(l2, "endereco: 4 anotadas") != NULL);
-    CHECK(strstr(l2, "sobrepostas por mais nova 2/0 MiB (objeto vivo 1/0 MiB), mesmo endereco 1/0 MiB") != NULL);
+    CHECK(strstr(l2, "sobrepostas por mais nova 2/0 MiB (objeto vivo 1/0 MiB: usadas depois de cobertas 0/0 MiB, so antes 0/0 MiB, "
+                     "nunca 1/0 MiB; mesma forma no mesmo endereco 0/0 MiB), mesmo endereco 1/0 MiB") != NULL);
     CHECK(strstr(l2, "por chamador: game+0x21d6f0 1/0 MiB; formas: 64x64 f98 m7 1/0 MiB;") != NULL);
+    /* PASSO 100: A coberta por C (nasceu 100) e B (390) -> coberta em 100; B com a mesma forma de A -> outra view */
+    memset(s, 0, sizeof s);
+    s[0].addr = 0x100000; s[0].len = s[0].bytes = 65536; s[0].seq = 1; s[0].w = 64; s[0].h = 64; s[0].mips = 7; s[0].fmt = 98;
+    s[1].addr = 0x100000; s[1].len = s[1].bytes = 65536; s[1].seq = 3; s[1].born = 390; s[1].w = 64; s[1].h = 64; s[1].mips = 7;
+    s[1].fmt = 99;
+    s[2].addr = 0x108000; s[2].len = s[2].bytes = 4096;  s[2].seq = 2; s[2].born = 100;
+    qsort(s, 3, sizeof *s, pa_snap_addr);
+    pa_mark_overlaps(s, 3);
+    CHECK_EQ(s[0].seq, 1);
+    CHECK_EQ(s[0].covered, 101);
+    CHECK_EQ(s[0].flags, PA_OVER | PA_SAME | PA_VIEW);
+    CHECK_EQ(s[1].covered, 0);
+    CHECK_EQ(s[2].covered, 391);                       /* C coberta por B */
+    /* A usada em 200 (depois de coberta em 100); C usada em 395 (depois de coberta em 390) -> 2 depois */
+    memset(s, 0, sizeof s);
+    s[0].addr = 0x100000; s[0].len = s[0].bytes = 65536; s[0].seq = 1; s[0].w = 64; s[0].h = 64; s[0].mips = 7; s[0].used = 201;
+    s[1].addr = 0x100000; s[1].len = s[1].bytes = 65536; s[1].seq = 3; s[1].born = 390; s[1].w = 64; s[1].h = 64; s[1].mips = 7;
+    s[2].addr = 0x108000; s[2].len = s[2].bytes = 4096;  s[2].seq = 2; s[2].born = 100; s[2].used = 396;
+    pa_live_lines(s, 3, 400, l1, l2);
+    CHECK(strstr(l2, "usadas depois de cobertas 2/0 MiB, so antes 0/0 MiB, nunca 0/0 MiB; mesma forma no mesmo endereco 1/0 MiB") != NULL);
+    /* A usada so em 50 (antes de coberta) */
+    memset(s, 0, sizeof s);
+    s[0].addr = 0x100000; s[0].len = s[0].bytes = 65536; s[0].seq = 1; s[0].used = 51;
+    s[1].addr = 0x100000; s[1].len = s[1].bytes = 65536; s[1].seq = 2; s[1].born = 100; s[1].w = 1;
+    pa_live_lines(s, 2, 400, l1, l2);
+    CHECK(strstr(l2, "usadas depois de cobertas 0/0 MiB, so antes 1/0 MiB, nunca 0/0 MiB; mesma forma no mesmo endereco 0/0 MiB") != NULL);
 }
 
 /* PASSO 99: o wrapper anota endereco/chamador/objeto; Release do objeto a 0 marca solto; a ultima Release do recurso limpa */
@@ -1286,7 +1313,10 @@ TEST(stutter_placed_obj_tracking)
     CHECK_EQ(e->addr, 0);
     CHECK(e->obj == NULL);
     CHECK(pa_get(b)->seq > pa_get(a)->seq);
-    pa_obj_gone(&obj_b);                               /* objeto que nao e nosso: nada */
+    pa_obj_used(&obj_a);
+    CHECK(pa_get(a)->used == pa_now() + 1);
+    pa_obj_used(&obj_b);                               /* objeto que nao e nosso: nada */
+    pa_obj_gone(&obj_b);
     CHECK_EQ(po_n, 1);
     pa_obj_gone(&obj_a);
     CHECK_EQ(po_n, 0);
