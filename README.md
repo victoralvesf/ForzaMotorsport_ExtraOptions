@@ -22,7 +22,8 @@ modified on disk**, and FH2 keeps working as before.
   - **Forza Motorsport 6, package version 1.0.0.44**
 
   Each one is a game folder containing `Mount\` (with `Mount\AppxManifest.xml`) and
-  `EmbeddedXvd\`, the same layout Azimuth uses for FH2.
+  `EmbeddedXvd\`, the same layout Azimuth uses for FH2. The folder name does not matter
+  (an FM6 dump is often named `Monument_1.0.0.44_x64__8wekyb3d8bbwe`).
 
 ## Installation
 
@@ -51,7 +52,17 @@ modified on disk**, and FH2 keeps working as before.
    azimuth.exe "--game=C:\YourGamesFolder\Forza Motorsport 6" --skip-launcher
    ```
 
-The launcher's graphics settings (resolution, frame rate, etc.) also apply to FM5.
+The launcher's graphics settings (resolution, frame rate, etc.) apply only to FM5. FM6 does
+not support them for now.
+
+## Status and known issues
+
+- **Forza Motorsport 5:** menus, races, garage, DLC and Marketplace work.
+- **Forza Motorsport 6 (initial support):** boots, menus, video, audio and races work at about
+  60 fps. Known issues:
+  - the launcher's graphics settings are not applied (see above);
+  - turning on the RivaTuner (RTSS) overlay can crash the game ("device removed").
+- Rivals and online modes need Xbox Live and do not work in either game.
 
 ## Logs and troubleshooting
 

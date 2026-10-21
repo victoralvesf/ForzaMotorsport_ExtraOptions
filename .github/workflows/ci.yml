@@ -64,9 +64,9 @@ jobs:
           mkdir -p dist
           cp winmm_proxy/build/winmm.dll azimuth_fm5.ini azimuth_fm6.ini dist/
           python tools/md2txt.py README.md dist/README.txt
-          cd dist && 7z a "../azimuth-fm5-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini azimuth_fm6.ini README.txt
+          cd dist && 7z a "../azimuth-motorsport-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini azimuth_fm6.ini README.txt
 
       - name: Publicar release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "azimuth-fm5-$GITHUB_REF_NAME.zip" --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" "azimuth-motorsport-$GITHUB_REF_NAME.zip" --title "$GITHUB_REF_NAME" --generate-notes

@@ -1,7 +1,7 @@
 # Architecture
 
-This document explains how the mod makes Forza Motorsport 5 run on Azimuth. It describes the
-design in our own words. It contains no code from Azimuth or from the game.
+This document explains how the mod makes Forza Motorsport 5 and Forza Motorsport 6 run on
+Azimuth. It describes the design in our own words. It contains no code from Azimuth or from the game.
 
 ## Background
 
@@ -20,7 +20,9 @@ Two kinds of problems follow from that:
    versions: method tables have different layouts, some calls pack their arguments differently,
    some structures and enums changed, and a few runtime classes do not exist in the newer XDK.
 
-The mod solves both problems at runtime, from inside the Azimuth process.
+The mod solves both problems at runtime, from inside the Azimuth process. Forza Motorsport 6 is
+handled the same way: it gets its own game description and reuses the FM5 bridges, plus the
+FM6-specific fixes described below.
 
 ## Why a `winmm.dll` proxy
 
@@ -42,14 +44,15 @@ Every change is made in memory, after Azimuth (and later the game) has been mapp
 - Before touching any location, the proxy checks the bytes that are there against the bytes it
   expects. If anything does not match (a different `azimuth.exe` build, a different game
   version), it changes nothing and logs why.
-- The mod supports one exact `azimuth.exe` build (identified by SHA-256) and FM5 package
-  version 1.0.0.20.
+- The mod supports one exact `azimuth.exe` build (identified by SHA-256), FM5 package
+  version 1.0.0.20 and FM6 package version 1.0.0.44.
 - Hooks are small detours: the original instructions are moved to a trampoline, and the detour
   jumps to a function in the proxy that can call the original.
 
 ## Startup sequence
 
-1. **`DllMain` of the proxy.** It loads the real `winmm.dll`, reads `azimuth_fm5.ini`, opens
+1. **`DllMain` of the proxy.** It loads the real `winmm.dll`, reads `azimuth_fm5.ini`,
+   `azimuth_fm6.ini` and `debug.ini`, opens
    `azimuth_motorsport.log`, and checks that `azimuth.exe` is the expected build.
 2. **Make Azimuth accept FM5.** The proxy builds a description of FM5 in memory, in the same
    format Azimuth uses for its own games (title, expected files and hashes, languages, options).
@@ -109,12 +112,35 @@ Some runtime classes FM5 activates exist only under older names or interfaces, m
 Kinect speech recognizer. Speech cannot be emulated, so the proxy activates a stub that reports
 "no recognizer", and the game skips voice setup on its own.
 
+### Forza Motorsport 6
+
+FM6 was built with a newer XDK than FM5 but still differs from FH2. On top of the shared bridges,
+the proxy adds:
+
+- **Shaders (`shader_fm6.c`).** FM6's shaders use a console-only instruction (a three-way max)
+  that the PC Direct3D 12 runtime rejects. The proxy rewrites each one into two standard
+  instructions and rebuilds the shader container.
+- **GPU guard (`gpuguard_fm6.c`).** FM6 relies on console behavior for unset descriptor slots
+  (for example geometry shaders writing to an unbound UAV). On PC those slots are undefined and
+  cause GPU page faults, so the proxy fills them with null descriptors before the GPU reads them.
+- **Command lists (`cmdrec_fm6.c`).** Azimuth opens one Direct3D 12 command list per recorded
+  piece, and FM6 produces hundreds per frame, which exhausted kernel memory and reset the device
+  at the end of a race. Azimuth now records into CPU-only lists of the proxy, and each submission
+  replays them into a single real command list.
+- **Resource handling (`stutter_fm6.c`).** Placement textures are placed in the proxy's own heaps
+  (with pages reclaimed when the game reuses their memory), command allocators and lists are
+  pooled, tile mappings skip unneeded queue syncs, and the final releases of GPU objects are
+  spread over time. These remove frame stutters. With `StutterLog=1` in `debug.ini`, the same
+  file also logs frame spikes.
+- **Audio (`audio_fm6.c`).** FM6 plays game audio through WASAPI. The proxy wraps Azimuth's audio
+  client for logging only.
+
 ### Diagnostics (`debug12_fm5.c`)
 
 With `D3D12Debug=1` (or `2`) in `debug.ini` (section `[Debug]`), the proxy enables the Direct3D 12
 debug layer under Azimuth and writes every validation message to `azimuth_motorsport.log` as it happens.
-`debug.ini` holds development-only diagnostics (`D3D12Debug`, `DrawSkip`, `DrawSkipHashes`), applies
-to every game the proxy handles and is not shipped in the release.
+`debug.ini` holds development-only diagnostics (`D3D12Debug`, `DrawSkip`, `DrawSkipHashes`, `StutterLog`
+and overrides for the FM6 fixes), applies to every game the proxy handles and is not shipped in the release.
 
 ## Options
 
@@ -128,7 +154,10 @@ game image or by hooks:
 | `UnlockDLC` | Treats the DLC content already included in the game as owned. |
 | `EnableMarketplace` | Enables the Marketplace menu without Xbox Live (shows the DLC packs). |
 
-The Azimuth launcher's graphics settings also apply to FM5. Resolution and frame rate are passed
+`azimuth_fm6.ini`, section `[FM6]`, has `SkipIntro`, `SkipPresentationVideo` and `UnlockDLC`
+with the same meaning.
+
+The Azimuth launcher's graphics settings apply only to FM5 (FM6 does not support them for now). Resolution and frame rate are passed
 through. Car detail, shadows and reflections are mapped onto FM5's own render settings
 (`gfx_fm5.c`).
 
@@ -141,7 +170,12 @@ through. Car detail, shadows and reflections are mapped onto FM5's own render se
 | `winmm_proxy/gfx_fm5.c` | Launcher graphics options mapped onto FM5 render settings |
 | `winmm_proxy/shape_fm5.c` | Audio graph opcode translation |
 | `winmm_proxy/winrt_fm5.c` | WinRT activation stubs |
-| `winmm_proxy/debug12_fm5.c` | D3D12 debug layer hook |
+| `winmm_proxy/debug12_fm5.c` | D3D12 device creation hook and debug layer |
+| `winmm_proxy/shader_fm6.c` | FM6 console shader instruction rewrite |
+| `winmm_proxy/gpuguard_fm6.c` | FM6 null descriptors for unset slots (GPU page fault guard) |
+| `winmm_proxy/cmdrec_fm6.c` | FM6 recorder command lists merged into one real list per submission |
+| `winmm_proxy/stutter_fm6.c` | FM6 resource, allocator and command list pooling; stutter log |
+| `winmm_proxy/audio_fm6.c` | FM6 audio client wrappers (logging) |
 | `winmm_proxy/d3d_thunks.S`, `winmm_stubs.S`, `winmm_exports.def` | Generated by `tools/gen_d3d_thunks.py` and `tools/gen_winmm_stubs.py` |
 | `winmm_proxy/tests/` | Unit tests for the proxy |
 | `tools/` | Generators, the release README converter and the reverse-engineering helper scripts |
@@ -156,14 +190,15 @@ directly, so they can reach its internal functions. They run without starting th
 
 - **Always:** the patch and hook helpers, the FM5 game description layout, and the D3D, graphics
   and audio translations against fake Azimuth objects.
-- **With your own copies of `azimuth.exe` and the FM5 executable present** (they are never part of
-  the repository): the full install and FM5 patch steps run against mapped copies of the real
+- **With your own copies of `azimuth.exe` and the FM5/FM6 executables present** (they are never part of
+  the repository): the full install and FM5/FM6 patch steps run against mapped copies of the real
   binaries. Every expected original byte and every written byte is checked. Without the binaries,
   these tests are skipped.
 
 GitHub Actions (`.github/workflows/ci.yml`, Windows runner) runs the tests on every pull request.
 On a `v*` tag push, it runs the tests, then builds and publishes a release zip containing
-`winmm.dll`, `azimuth_fm5.ini`, `azimuth_fm6.ini` and `README.txt`.
+`winmm.dll`, `azimuth_fm5.ini`, `azimuth_fm6.ini` and `README.txt`
+(`azimuth-motorsport-<tag>.zip`).
 
 ## What is not in this repository
 
