@@ -2362,6 +2362,15 @@ static void vz_poll(LONG64 now)
             len += sprintf(buf + len, " | memoria privada %llu MiB (pico %llu)", (unsigned long long)(pm.PrivateUsage >> 20),
                            (unsigned long long)(pm.PeakPagefileUsage >> 20));
     }
+    {   /* commit do SISTEMA (PASSO 92: as quedas vem com a soma jogo + outros programas perto do limite) */
+        PERFORMANCE_INFORMATION pi;
+        pi.cb = sizeof pi;
+        if (K32GetPerformanceInfo(&pi, sizeof pi))
+            len += sprintf(buf + len, ", sistema: commit %llu de %llu MiB, RAM livre %llu MiB",
+                           (unsigned long long)pi.CommitTotal * pi.PageSize >> 20,
+                           (unsigned long long)pi.CommitLimit * pi.PageSize >> 20,
+                           (unsigned long long)pi.PhysicalAvailable * pi.PageSize >> 20);
+    }
     len += sprintf(buf + len, " | CPU ms/quadro:");
     if (tsc_per_ms > 0) {
         uint32_t idx[VZ_TOP_THREADS], nt = vz_top(cpu, n, idx, VZ_TOP_THREADS);
