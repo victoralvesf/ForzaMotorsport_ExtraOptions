@@ -418,6 +418,34 @@ TEST(fm6_skip_presentation_video_patches_exe)
     dump_log_on_fail();
 }
 
+/* exe real do FM6: UnlockDLC faz a consulta de posse devolver 1 e o refresh sem inventario marcar tudo comprado */
+TEST(fm6_unlock_dlc_patches_exe)
+{
+    uint8_t *game = pe_map(FM6_EXE, NULL);
+    if (!game) { test_skip("exe do FM6 ausente"); return; }
+    dbgini_set("[Debug]\nPlacementCommitted=0\n");   /* so os patches do exe do jogo */
+    log_capture();
+    ini6_set(NULL);
+    fm6_patches(game);
+    CHECK_HEX(game + 0xa8ad80, "48895c2410565741564883ec20488db9");
+    CHECK_HEX(game + 0x43be01, "488dbba000000033d2488bcfe86a000000");
+    ini6_set("[FM6]\nUnlockDLC=1\n");
+    fm6_patches(game);
+    CHECK_HEX(game + 0xa8ad80, "b801000000c35741");
+    CHECK_HEX(game + 0x43be01, "488dbba0000000b201488bcfe86a000000");
+    CHECK(log_has("FM6: UnlockDLC=1"));
+    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("FM6: SkipIntro=1"));
+    /* 2a vez: bytes ja trocados -> nada muda */
+    fm6_patches(game);
+    CHECK(log_has("FM6: UnlockDLC: sites nao conferem, ignorado"));
+    CHECK_HEX(game + 0x43be08, "b201");
+    ini6_set(NULL);
+    dbgini_set(NULL);
+    pe_unmap(game);
+    dump_log_on_fail();
+}
+
 /* D3D12Debug=5: criterio de recurso reservado do title_storage (azimuth 0x13bae0) -> xor eax,eax ; ret */
 TEST(fm6_debug5_committed_placement)
 {

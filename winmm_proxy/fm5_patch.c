@@ -67,6 +67,9 @@ static const uint32_t fm6_splash_intro_cmps[] = { 0xa06b33, 0xa06c4d, 0xa07e0c }
    e 0xce1e50 so devolve o caminho (jne da linha achada -> nop = L"") */
 #define FM6_INTRO_VIDEO_SET  0xce1c55  /* lea rcx,[rbx+0x28] ; call 0x14f490 */
 #define FM6_INTRO_VIDEO_PATH 0xce1eb4  /* test eax,eax ; jne */
+/* UnlockDLC: mesmo esquema do FM5 (CContentManager, refresh 0x43bd8c; inventario = estatico game+0x1dded30) */
+#define FM6_OFFER_OWNED      0xa8ad80  /* EntitlementManager: produto no inventario? (al); lambda 0xa40f40, UI, expansoes */
+#define FM6_OFFER_NOINV      0x43be08  /* refresh sem inventario: xor edx,edx -> 0x43be7c(raiz, 0) */
 
 uint8_t *g_base;
 static FILE *g_log;
@@ -994,6 +997,20 @@ static void fm6_patches(uint8_t *game)
             wlog("FM6: SkipPresentationVideo=1 (IntroVideo das intros de carreira vazio: IE_Blockbuster.bk2 pulado)");
         }
     }
+    if (cfg6_int(L"UnlockDLC", 0)) {
+        /* 0xa8ad80 -> mov eax,1 ; ret: todo produto conta como comprado (lambda 0xa40f40 marca node+0x29 e o
+           IsPurchased; UI 0xbda77c/0xbe4404; expansoes Porsche/NASCAR 0xd04210/0xd04298). Sem inventario o
+           refresh zera tudo via 0x43be7c(raiz, 0) -> mov dl,1. */
+        static const uint8_t ret1[6] = { 0xb8, 1, 0, 0, 0, 0xc3 }, dl1[2] = { 0xb2, 0x01 };
+        if (!bytes_match(game + FM6_OFFER_OWNED, "48895c2410565741564883ec20488db9", 16) ||
+            !bytes_match(game + FM6_OFFER_NOINV - 7, "488dbba000000033d2488bcfe86a000000", 17))
+            wlog("FM6: UnlockDLC: sites nao conferem, ignorado");
+        else {
+            write_mem(game + FM6_OFFER_OWNED, ret1, sizeof ret1);
+            write_mem(game + FM6_OFFER_NOINV, dl1, sizeof dl1);
+            wlog("FM6: UnlockDLC=1 (todas as ofertas de DLC contam como compradas)");
+        }
+    }
 }
 
 static void hook_apply_patches(void *image, const void *options)
@@ -1267,8 +1284,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
              cfg_int(L"EnableMarketplace", 0));
         wcscpy(slash ? slash + 1 : path, L"azimuth_fm6.ini");
         wcscpy(g_ini6, path);
-        wlog("config: %ls (SkipIntro=%d SkipPresentationVideo=%d)", g_ini6, cfg6_int(L"SkipIntro", 0),
-             cfg6_int(L"SkipPresentationVideo", 0));
+        wlog("config: %ls (SkipIntro=%d SkipPresentationVideo=%d UnlockDLC=%d)", g_ini6, cfg6_int(L"SkipIntro", 0),
+             cfg6_int(L"SkipPresentationVideo", 0), cfg6_int(L"UnlockDLC", 0));
         wcscpy(slash ? slash + 1 : path, L"debug.ini");
         wcscpy(g_ini_dbg, path);
         wlog("config: %ls (D3D12Debug=%d DrawSkip=%d)", g_ini_dbg, dbg_int(L"D3D12Debug", 0), dbg_int(L"DrawSkip", 0));
