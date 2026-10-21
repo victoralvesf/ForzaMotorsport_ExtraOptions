@@ -967,6 +967,155 @@ void mv_scan(uint64_t *bytes, uint32_t *allocs)
     mv_close(bytes, allocs, cur, wc, guard, rw, ro, type);
 }
 
+static HMODULE self_mod;
+/* ---- de quem sao os blocos "RW com guarda" (PASSO 95): crescem sem parar na corrida (714 MB -> 2.7 GB na queda,
+ * nunca caem = vazamento; paginas NOACCESS entre blocos = heap). Le 1 pagina em MG_EVERY dessas alocacoes
+ * (ReadProcessMemory: pagina solta no meio da leitura so falha) e conta os qwords que apontam para dentro de uma imagem
+ * (vtables/codigo: azimuth, proxy, driver, d3d12, jogo) -> os valores mais frequentes dizem que objetos enchem. ---- */
+#define MG_EVERY 16
+#define MG_MODS 256
+#define MG_BINS 8192
+#define MG_TOP 16
+typedef struct { uintptr_t lo, hi; char name[40]; uint64_t n; } mg_mod;
+typedef struct { uintptr_t v; uint64_t n; } mg_bin;
+static mg_mod mg_mods[MG_MODS];
+static int mg_nmods;
+static mg_bin mg_bins[MG_BINS];
+static uint64_t mg_other;
+
+static void mg_load_mods(void)
+{
+    HMODULE hm[MG_MODS];
+    DWORD need = 0, i, n;
+    uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+    MODULEINFO mi;
+    mg_nmods = 0;
+    if (game) {
+        mg_mods[0].lo = (uintptr_t)game; mg_mods[0].hi = (uintptr_t)game + 0x8000000;
+        strcpy(mg_mods[0].name, "game"); mg_nmods = 1;
+    }
+    if (!K32EnumProcessModules(GetCurrentProcess(), hm, sizeof hm, &need)) return;
+    n = need / sizeof *hm;
+    for (i = 0; i < n && mg_nmods < MG_MODS; i++) {
+        mg_mod *m = &mg_mods[mg_nmods];
+        if (!K32GetModuleInformation(GetCurrentProcess(), hm[i], &mi, sizeof mi)) continue;
+        m->lo = (uintptr_t)mi.lpBaseOfDll; m->hi = m->lo + mi.SizeOfImage;
+        if ((uint8_t *)hm[i] == g_base) strcpy(m->name, "azimuth");
+        else if (hm[i] == self_mod) strcpy(m->name, "winmm");
+        else if (!K32GetModuleBaseNameA(GetCurrentProcess(), hm[i], m->name, sizeof m->name)) strcpy(m->name, "?");
+        mg_nmods++;
+    }
+}
+
+int mg_mod_of(uintptr_t v)
+{
+    int i;
+    for (i = 0; i < mg_nmods; i++) if (v >= mg_mods[i].lo && v < mg_mods[i].hi) return i;
+    return -1;
+}
+
+void mg_count(uintptr_t v)
+{
+    uint32_t h = (uint32_t)((v * 0x9E3779B97F4A7C15ull) >> 51), k;
+    for (k = 0; k < 64; k++, h = (h + 1) & (MG_BINS - 1)) {
+        if (mg_bins[h].v == v) { mg_bins[h].n++; return; }
+        if (!mg_bins[h].v) { mg_bins[h].v = v; mg_bins[h].n = 1; return; }
+    }
+    mg_other++;
+}
+
+/* conta os ponteiros para imagens em uma pagina */
+void mg_page(const uint64_t *q, size_t nq)
+{
+    size_t i;
+    for (i = 0; i < nq; i++) {
+        int m;
+        if (q[i] < 0x10000 || (m = mg_mod_of((uintptr_t)q[i])) < 0) continue;
+        mg_mods[m].n++;
+        mg_count((uintptr_t)q[i]);
+    }
+}
+
+static void mg_scan_alloc(uint8_t *base, uint8_t *end, uint64_t *pages)
+{
+    static uint64_t buf[4096 / 8];
+    MEMORY_BASIC_INFORMATION m;
+    uint8_t *p = base;
+    while (p < end && VirtualQuery(p, &m, sizeof m) == sizeof m && m.AllocationBase == base) {
+        if (m.State == MEM_COMMIT && (m.Protect & 0xff) == PAGE_READWRITE) {
+            uint8_t *q;
+            for (q = (uint8_t *)m.BaseAddress; q < (uint8_t *)m.BaseAddress + m.RegionSize; q += 4096 * MG_EVERY) {
+                SIZE_T got = 0;
+                if (ReadProcessMemory(GetCurrentProcess(), q, buf, sizeof buf, &got) && got == sizeof buf) {
+                    mg_page(buf, sizeof buf / 8);
+                    (*pages)++;
+                }
+            }
+        }
+        p = (uint8_t *)m.BaseAddress + m.RegionSize;
+    }
+}
+
+void mg_report(const char *when)
+{
+    MEMORY_BASIC_INFORMATION m;
+    uint8_t *p = NULL, *base = NULL, *start = NULL;
+    int guard = 0, wc = 0, rw = 0, i, k, len;
+    uint64_t pages = 0, total = 0;
+    char buf[2048], one[96];
+    uint32_t top[MG_TOP], nt = 0;
+    mg_load_mods();
+    memset(mg_bins, 0, sizeof mg_bins);
+    mg_other = 0;
+    for (i = 0; i < mg_nmods; i++) mg_mods[i].n = 0;
+    for (;;) {
+        int ok = VirtualQuery(p, &m, sizeof m) == sizeof m && (uintptr_t)p < 0x7ffffffe0000ull;
+        if (!ok || m.AllocationBase != base) {               /* fecha a alocacao anterior */
+            if (base && guard && rw && !wc) mg_scan_alloc(base, p, &pages);
+            if (!ok) break;
+            base = m.AllocationBase; start = p; guard = wc = rw = 0;
+        }
+        if (m.State == MEM_COMMIT && m.Type == MEM_PRIVATE) {
+            if (m.Protect & PAGE_WRITECOMBINE) wc = 1;
+            if ((m.Protect & 0xff) == PAGE_NOACCESS) guard = 1;
+            if ((m.Protect & 0xff) == PAGE_READWRITE) rw = 1;
+        }
+        p = (uint8_t *)m.BaseAddress + m.RegionSize;
+    }
+    (void)start;
+    for (i = 0; i < mg_nmods; i++) total += mg_mods[i].n;
+    len = sprintf(buf, "stutter: blocos com guarda %s: %llu paginas lidas (1 em %d), %llu ponteiros para imagens; por modulo:",
+                  when, (unsigned long long)pages, MG_EVERY, (unsigned long long)total);
+    for (k = 0; k < 8; k++) {                                /* os 8 modulos com mais ponteiros */
+        int best = -1;
+        for (i = 0; i < mg_nmods; i++)
+            if (mg_mods[i].n && (best < 0 || mg_mods[i].n > mg_mods[best].n)) best = i;
+        if (best < 0) break;
+        len += sprintf(buf + len, " %s %.0f%%", mg_mods[best].name, mg_mods[best].n * 100.0 / (total ? total : 1));
+        mg_mods[best].n = 0;
+    }
+    wlog("%s", buf);
+    for (k = 0; k < MG_TOP; k++) {                           /* os valores mais frequentes */
+        uint32_t best = MG_BINS;
+        for (i = 0; i < MG_BINS; i++) {
+            uint32_t j;
+            for (j = 0; j < nt && top[j] != (uint32_t)i; j++) {}
+            if (j < nt || !mg_bins[i].v) continue;
+            if (best == MG_BINS || mg_bins[i].n > mg_bins[best].n) best = (uint32_t)i;
+        }
+        if (best == MG_BINS) break;
+        top[nt++] = best;
+    }
+    len = sprintf(buf, "stutter: blocos com guarda %s: valores mais frequentes:", when);
+    for (k = 0; k < (int)nt && len < 1800; k++) {
+        int mi = mg_mod_of(mg_bins[top[k]].v);
+        sprintf(one, " %s+%#llx x%llu;", mi >= 0 ? mg_mods[mi].name : "?",
+                (unsigned long long)(mg_bins[top[k]].v - (mi >= 0 ? mg_mods[mi].lo : 0)), (unsigned long long)mg_bins[top[k]].n);
+        len += sprintf(buf + len, "%s", one);
+    }
+    wlog("%s", buf);
+}
+
 void mr_report(const char *when)
 {
     char buf[2048];
@@ -986,6 +1135,14 @@ void mr_report(const char *when)
     for (k = 0; k < MV_KINDS; k++)
         len += sprintf(buf + len, " %s %llu MiB/%u", mv_names[k], (unsigned long long)(vb[k] >> 20), va[k]);
     wlog("%s", buf);
+    {   /* conteudo dos blocos com guarda: a cada +256 MB deles e na remocao do device */
+        static uint64_t scanned;
+        int final = !strcmp(when, "na remocao do device");
+        if (final || vb[MV_GUARD] >= scanned + (256ull << 20)) {
+            scanned = vb[MV_GUARD];
+            mg_report(when);
+        }
+    }
 }
 
 /* espera a remocao do device (a fence vai a UINT64_MAX) e grava o resumo */
@@ -2029,7 +2186,6 @@ static uint32_t nthr;
 static st_sample samples[ST_SAMPLES];
 static uint32_t nsamples, nblocked_ticks;
 static double tsc_per_ms;
-static HMODULE self_mod;
 static uintptr_t code_ranges[3][2];
 static uint32_t ncode_ranges;
 

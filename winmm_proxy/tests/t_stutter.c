@@ -956,3 +956,46 @@ TEST(stutter_process_memory_scan)
     VirtualFree(wc, 0, MEM_RELEASE);
     VirtualFree(g, 0, MEM_RELEASE);
 }
+
+/* PASSO 95: ponteiros para imagens dentro de uma pagina contam por modulo e por valor */
+TEST(stutter_guard_block_pointers)
+{
+    uint64_t page[8];
+    uint8_t *az = fake_azimuth(0);
+    int i, n0;
+    mg_load_mods();
+    REQUIRE(mg_nmods > 0);
+    memset(mg_bins, 0, sizeof mg_bins);
+    for (i = 0; i < mg_nmods; i++) mg_mods[i].n = 0;
+    page[0] = (uint64_t)(uintptr_t)GetModuleHandleW(L"kernel32.dll") + 0x1000;
+    page[1] = page[0];
+    page[2] = 0x1234;                                  /* fora de imagem */
+    page[3] = 0;
+    page[4] = (uint64_t)(uintptr_t)GetModuleHandleW(L"ntdll.dll") + 0x2000;
+    page[5] = page[6] = page[7] = 7;
+    mg_page(page, 8);
+    n0 = mg_mod_of((uintptr_t)page[0]);
+    REQUIRE(n0 >= 0);
+    CHECK_EQ(mg_mods[n0].n, 2);
+    CHECK(mg_mod_of(0x1234) < 0);
+    for (i = 0; i < MG_BINS && mg_bins[i].v != (uintptr_t)page[0]; i++) {}
+    REQUIRE(i < MG_BINS);
+    CHECK_EQ(mg_bins[i].n, 2);
+    (void)az;
+}
+
+TEST(stutter_guard_block_report)
+{
+    uint8_t *g = VirtualAlloc(NULL, 1 << 20, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    uintptr_t k32 = (uintptr_t)GetModuleHandleW(L"kernel32.dll") + 0x1230;
+    DWORD old;
+    int i;
+    REQUIRE(g);
+    for (i = 0; i < (1 << 20) / 8; i++) ((uintptr_t *)g)[i] = k32;
+    VirtualProtect(g + 0x80000, 0x1000, PAGE_NOACCESS, &old);
+    log_capture();
+    mg_report("teste");
+    CHECK(log_has("stutter: blocos com guarda teste:"));
+    CHECK(log_has("+0x1230 x"));
+    VirtualFree(g, 0, MEM_RELEASE);
+}
