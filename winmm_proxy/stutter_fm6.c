@@ -455,6 +455,8 @@ static int dr_push(IUnknown *u)
 static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u);
 static ULONG rk_call_orig(IUnknown *u);
 static void mr_del(const void *o);
+static void pa_free(const void *res);
+static int pa_format(char *out);
 
 /* entrou na fila em `t` e ja tem `hold_ms` (fila em ordem: o 1o novo demais para o resto) */
 int dr_old_enough(LONG64 t, LONG64 now, int hold_ms, LONG64 freq)
@@ -526,7 +528,7 @@ static ULONG STDMETHODCALLTYPE rk_release(IUnknown *u)
             }
             t = qpc();
             r = rk_vts[i].orig(u);
-            if (!r) mr_del(u);
+            if (!r) { mr_del(u); pa_free(u); }
             d = qpc() - t;
             if (d * 5000 >= st_freq.QuadPart) rk_note(RK_RELEASE, d, NULL, 0, 0);   /* >= 0,2 ms */
             return r;
@@ -541,7 +543,7 @@ static ULONG rk_call_orig(IUnknown *u)
     for (i = 0; i < n; i++)
         if (rk_vts[i].vt == vt) {
             ULONG r = rk_vts[i].orig(u);
-            if (!r) mr_del(u);
+            if (!r) { mr_del(u); pa_free(u); }
             return r;
         }
     return 0;
@@ -841,10 +843,10 @@ static void lp_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
  * fila do DeferRelease) tira. A cada 10 s e na remocao do device: vivos/bytes/criados/destruidos por tipo +
  * VirtualQuery do processo (WC, alocacoes com guarda, RW, RO, mapeada). ---- */
 enum { MR_C_DEFAULT, MR_C_UPLOAD, MR_C_READBACK, MR_C_CUSTOM, MR_PLACED, MR_RESERVED, MR_H_DEFAULT, MR_H_UPLOAD,
-       MR_H_READBACK, MR_H_CUSTOM, MR_ALLOCATOR, MR_DESC_HEAP, MR_KINDS };
+       MR_H_READBACK, MR_H_CUSTOM, MR_ALLOCATOR, MR_DESC_HEAP, MR_PA, MR_KINDS };
 static const char *const mr_names[MR_KINDS] = { "committed DEFAULT", "committed UPLOAD", "committed READBACK",
     "committed CUSTOM", "placed", "reserved", "heap DEFAULT", "heap UPLOAD", "heap READBACK", "heap CUSTOM",
-    "allocators", "descriptor heaps" };
+    "allocators", "descriptor heaps", "placed do proxy" };
 #define MR_BITS 20
 #define MR_SIZE (1u << MR_BITS)
 typedef struct { const void *o; uint32_t kind; uint64_t bytes; } mr_ent;
@@ -1130,6 +1132,7 @@ void mr_report(const char *when)
                        (unsigned long long)(mr_live_bytes[k] > 0 ? mr_live_bytes[k] : 0) >> 20, made, gone);
     }
     if (mr_full) len += sprintf(buf + len, " (tabela cheia: %ld fora)", mr_full);
+    len += pa_format(buf + len);
     mv_scan(vb, va);
     len += sprintf(buf + len, " | processo:");
     for (k = 0; k < MV_KINDS; k++)
@@ -1174,11 +1177,200 @@ static HRESULT STDMETHODCALLTYPE st_dheap(ID3D12Device *d, const D3D12_DESCRIPTO
     return hr;
 }
 
+/* ---- placement textures PLACED em heaps do proxy (PASSO 97, opcao A): com PlacementCommitted o Azimuth cria cada
+ * placement texture do FM6 com CreateCommittedResource (0x1400e7720, chamada em azimuth+0xe77bd) -> ~49k recursos
+ * committed vivos na corrida, ~10 KiB de memoria NONPAGED do kernel cada (tools\d3d12_kernel_probe.c; o FH2 tem 300).
+ * Aqui essas chamadas (reconhecidas pelo retorno azimuth+0xe77c0; heap DEFAULT, textura sem RT/DS/MSAA, ate 16 MB)
+ * viram CreatePlacedResource em heaps de 64 MB do proxy (so texturas nao RT/DS; 0.1 KiB nonpaged por recurso).
+ * Paginas de 4 KiB num bitmap por heap; alinhamento de 4 KiB se o driver aceitar (small placement), senao 64 KiB.
+ * A faixa volta ao heap na ultima Release do recurso (rk_release); heaps nunca sao destruidos. Qualquer falha cai no
+ * committed original. debug.ini PlacementPlaced=0/1 (FM6 padrao 1). ---- */
+#define PA_RET_RVA 0xe77c0
+#define PA_HEAP_BYTES (64ull << 20)
+#define PA_PAGE 4096u
+#define PA_PAGES ((uint32_t)(PA_HEAP_BYTES / PA_PAGE))
+#define PA_WORDS (PA_PAGES / 64)
+#define PA_MAX_HEAPS 512
+#define PA_MAX_RES (16ull << 20)
+#define PA_BITS 18
+#define PA_TAB (1u << PA_BITS)
+typedef struct { ID3D12Heap *h; uint64_t used[PA_WORDS]; uint32_t free_pages; } pa_heap;
+typedef struct { const void *res; uint16_t heap; uint16_t page_hi; uint16_t page; uint16_t n; } pa_ent;
+static pa_heap *pa_heaps[PA_MAX_HEAPS];
+static LONG pa_nheaps;
+static pa_ent *pa_tab;
+static LONG pa_ntab;
+static SRWLOCK pa_lock = SRWLOCK_INIT;
+static int pa_on;
+static volatile LONG pa_made, pa_fallback, pa_freed;
+static volatile LONG64 pa_used_pages;
+
+static int pa_bit(const pa_heap *H, uint32_t p) { return (int)((H->used[p >> 6] >> (p & 63)) & 1); }
+static void pa_set(pa_heap *H, uint32_t p, uint32_t n, int on)
+{
+    uint32_t i;
+    for (i = p; i < p + n; i++) {
+        if (on) H->used[i >> 6] |= 1ull << (i & 63);
+        else H->used[i >> 6] &= ~(1ull << (i & 63));
+    }
+    if (on) H->free_pages -= n; else H->free_pages += n;
+}
+
+/* 1a faixa livre de n paginas alinhada a `al` paginas; -1 se nao ha */
+int pa_find(const pa_heap *H, uint32_t n, uint32_t al)
+{
+    uint32_t p = 0, k;
+    if (!n || n > PA_PAGES || H->free_pages < n) return -1;
+    while (p + n <= PA_PAGES) {
+        if (!(p & 63) && H->used[p >> 6] == ~0ull) { p += 64; continue; }
+        for (k = 0; k < n && !pa_bit(H, p + k); k++) {}
+        if (k == n) return (int)p;
+        p = (p + k + 1 + al - 1) / al * al;
+    }
+    return -1;
+}
+
+static uint32_t pa_slot(const void *r) { return (uint32_t)((((uintptr_t)r >> 4) * 0x9E3779B97F4A7C15ull) >> (64 - PA_BITS)); }
+
+/* com a trava */
+static void pa_put(const void *res, uint32_t heap, uint32_t page, uint32_t n)
+{
+    uint32_t i;
+    if (!pa_tab) pa_tab = VirtualAlloc(NULL, PA_TAB * sizeof *pa_tab, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    for (i = pa_slot(res); pa_tab[i].res && pa_tab[i].res != res; i = (i + 1) & (PA_TAB - 1)) {}
+    if (!pa_tab[i].res) pa_ntab++;
+    pa_tab[i].res = res; pa_tab[i].heap = (uint16_t)heap; pa_tab[i].page = (uint16_t)page;
+    pa_tab[i].page_hi = (uint16_t)(page >> 16); pa_tab[i].n = (uint16_t)n;
+}
+
+/* ultima Release de um recurso: se era nosso, devolve a faixa */
+static void pa_free(const void *res)
+{
+    uint32_t i, j, h;
+    if (!pa_tab || !res) return;
+    AcquireSRWLockExclusive(&pa_lock);
+    for (i = pa_slot(res); pa_tab[i].res && pa_tab[i].res != res; i = (i + 1) & (PA_TAB - 1)) {}
+    if (pa_tab[i].res == res) {
+        pa_heap *H = pa_heaps[pa_tab[i].heap];
+        uint32_t page = pa_tab[i].page | (uint32_t)pa_tab[i].page_hi << 16;
+        pa_set(H, page, pa_tab[i].n, 0);
+        InterlockedAdd64(&pa_used_pages, -(LONG64)pa_tab[i].n);
+        InterlockedIncrement(&pa_freed);
+        pa_ntab--;
+        for (j = (i + 1) & (PA_TAB - 1); pa_tab[j].res; j = (j + 1) & (PA_TAB - 1)) {
+            h = pa_slot(pa_tab[j].res);
+            if (((j - h) & (PA_TAB - 1)) >= ((j - i) & (PA_TAB - 1))) { pa_tab[i] = pa_tab[j]; i = j; }
+        }
+        pa_tab[i].res = NULL;
+    }
+    ReleaseSRWLockExclusive(&pa_lock);
+}
+
+/* reserva n paginas alinhadas num heap existente; devolve o indice do heap e a pagina */
+static int pa_reserve(uint32_t n, uint32_t al, uint32_t *page)
+{
+    LONG i, nh = pa_nheaps;
+    for (i = 0; i < nh; i++) {
+        int p = pa_find(pa_heaps[i], n, al);
+        if (p >= 0) { pa_set(pa_heaps[i], (uint32_t)p, n, 1); *page = (uint32_t)p; return (int)i; }
+    }
+    return -1;
+}
+
+
+/* a textura cabe no caminho placed? */
+int pa_wants(const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_RESOURCE_DESC *rd, const D3D12_CLEAR_VALUE *c)
+{
+    return hp && hp->Type == D3D12_HEAP_TYPE_DEFAULT && hf == D3D12_HEAP_FLAG_NONE && rd && !c &&
+           (rd->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D || rd->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) &&
+           !(rd->Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) &&
+           rd->SampleDesc.Count <= 1;
+}
+
+/* resumo para a linha "stutter: memoria" */
+static int pa_format(char *out)
+{
+    if (!pa_on) return 0;
+    return sprintf(out, " | placed do proxy: %ld heaps de 64 MiB, %lld MiB usados, %ld vivos, +%ld -%ld, %ld no committed",
+                   pa_nheaps, (long long)(pa_used_pages * PA_PAGE >> 20), pa_ntab, InterlockedExchange(&pa_made, 0),
+                   InterlockedExchange(&pa_freed, 0), InterlockedExchange(&pa_fallback, 0));
+}
+
+/* chamada de CreateCommittedResource que vira placed: so a do title_storage do Azimuth (retorno azimuth+0xe77c0) */
+int pa_redirect(const void *ret, const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_RESOURCE_DESC *rd,
+                const D3D12_CLEAR_VALUE *c)
+{
+    return pa_on && ret == (const void *)(g_base + PA_RET_RVA) && pa_wants(hp, hf, rd, c);
+}
+
+/* S_OK com *o = recurso placed; senao HRESULT de falha (o chamador cai no committed) */
+static HRESULT pa_create(ID3D12Device *d, const D3D12_RESOURCE_DESC *rd, D3D12_RESOURCE_STATES s, REFIID r, void **o)
+{
+    D3D12_RESOURCE_DESC desc = *rd;
+    D3D12_RESOURCE_ALLOCATION_INFO ai;
+    uint32_t n, al, page = 0;
+    int hi;
+    HRESULT hr;
+    desc.Alignment = D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT;
+    d->lpVtbl->GetResourceAllocationInfo(d, &ai, 0, 1, &desc);
+    if (ai.SizeInBytes == UINT64_MAX || ai.Alignment != D3D12_SMALL_RESOURCE_PLACEMENT_ALIGNMENT) {
+        desc.Alignment = 0;
+        d->lpVtbl->GetResourceAllocationInfo(d, &ai, 0, 1, &desc);
+    }
+    if (ai.SizeInBytes == UINT64_MAX || !ai.SizeInBytes || ai.SizeInBytes > PA_MAX_RES ||
+        ai.Alignment > D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT || ai.Alignment < PA_PAGE)
+        return E_NOTIMPL;
+    n = (uint32_t)((ai.SizeInBytes + PA_PAGE - 1) / PA_PAGE);
+    al = (uint32_t)(ai.Alignment / PA_PAGE);
+    AcquireSRWLockExclusive(&pa_lock);
+    hi = pa_reserve(n, al, &page);
+    ReleaseSRWLockExclusive(&pa_lock);
+    if (hi < 0) {                                     /* heap novo (fora da trava: criar leva ms) */
+        D3D12_HEAP_DESC hd;
+        ID3D12Heap *h = NULL;
+        pa_heap *H;
+        memset(&hd, 0, sizeof hd);
+        hd.SizeInBytes = PA_HEAP_BYTES;
+        hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+        if (pa_nheaps >= PA_MAX_HEAPS || !(H = calloc(1, sizeof *H))) return E_OUTOFMEMORY;
+        hr = real_heap(d, &hd, &IID_ID3D12Heap, (void **)&h);
+        if (FAILED(hr)) { free(H); return hr; }
+        H->h = h; H->free_pages = PA_PAGES;
+        AcquireSRWLockExclusive(&pa_lock);
+        if (pa_nheaps < PA_MAX_HEAPS) { pa_heaps[pa_nheaps] = H; pa_nheaps++; H = NULL; }
+        hi = pa_reserve(n, al, &page);
+        ReleaseSRWLockExclusive(&pa_lock);
+        if (H) { h->lpVtbl->Release(h); free(H); }
+        if (hi < 0) return E_OUTOFMEMORY;
+    }
+    hr = real_placed(d, pa_heaps[hi]->h, (UINT64)page * PA_PAGE, &desc, s, NULL, r, o);
+    AcquireSRWLockExclusive(&pa_lock);
+    if (FAILED(hr) || !o || !*o) pa_set(pa_heaps[hi], page, n, 0);
+    else pa_put(*o, (uint32_t)hi, page, n);
+    ReleaseSRWLockExclusive(&pa_lock);
+    if (FAILED(hr)) return hr;
+    InterlockedAdd64(&pa_used_pages, n);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE st_committed(ID3D12Device *d, const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_RESOURCE_DESC *rd,
                                               D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c, REFIID r, void **o)
 {
     HRESULT hr;
-    LONG64 t = qpc(), dt;
+    LONG64 t, dt;
+    if (o && pa_redirect(__builtin_return_address(0), hp, hf, rd, c)) {
+        hr = pa_create(d, rd, s, r, o);
+        if (SUCCEEDED(hr)) {
+            InterlockedIncrement(&pa_made);
+            rk_hook_release(*o);
+            mr_add(*o, MR_PA, mr_res_bytes(rd));
+            return hr;
+        }
+        InterlockedIncrement(&pa_fallback);
+    }
+    t = qpc();
     hr = real_committed(d, hp, hf, rd, s, c, r, o);
     dt = qpc() - t;
     st_count(ST_RES, dt);
@@ -2034,6 +2226,15 @@ static HRESULT STDMETHODCALLTYPE as_close(ID3D12GraphicsCommandList *l)
         if (as_tab[i].a && as_tab[i].list == l) { as_tab[i].list = NULL; as_tab[i].busy = 0; }
     ReleaseSRWLockExclusive(&as_lock);
     return hr;
+}
+
+/* hook do apply_patches (fm5_patch.c): placement textures placed (PASSO 97) */
+int pa_wanted(void) { return dbg_int(L"PlacementPlaced", is_fm6()) > 0; }
+void placed_textures_setup(void)
+{
+    pa_on = pa_wanted() && real_placed && real_heap && real_committed;
+    if (pa_on) wlog("d3d: PlacementPlaced: placement textures committed do Azimuth (azimuth+%#x) viram placed em heaps de 64 MiB do proxy",
+                    PA_RET_RVA);
 }
 
 /* hook do apply_patches (fm5_patch.c) */

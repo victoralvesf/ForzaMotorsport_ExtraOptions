@@ -999,3 +999,126 @@ TEST(stutter_guard_block_report)
     CHECK(log_has("+0x1230 x"));
     VirtualFree(g, 0, MEM_RELEASE);
 }
+
+/* PASSO 97: placement textures placed em heaps do proxy */
+TEST(stutter_placed_bitmap)
+{
+    static pa_heap H;
+    memset(&H, 0, sizeof H);
+    H.free_pages = PA_PAGES;
+    CHECK_EQ(pa_find(&H, 3, 1), 0);
+    pa_set(&H, 0, 3, 1);
+    CHECK_EQ(H.free_pages, PA_PAGES - 3);
+    CHECK_EQ(pa_find(&H, 1, 1), 3);
+    CHECK_EQ(pa_find(&H, 16, 16), 16);                 /* alinhada a 64 KiB: pula 3..15 */
+    pa_set(&H, 16, 16, 1);
+    pa_set(&H, 0, 3, 0);
+    CHECK_EQ(pa_find(&H, 16, 16), 0);
+    CHECK_EQ(pa_find(&H, 17, 16), 32);                 /* 0..15 livre mas 16..31 ocupado */
+    pa_set(&H, 0, PA_PAGES, 1);
+    H.free_pages = 0;
+    CHECK_EQ(pa_find(&H, 1, 1), -1);
+    H.free_pages = 1;
+    pa_set(&H, PA_PAGES - 1, 1, 0);
+    H.free_pages = 1;
+    CHECK_EQ(pa_find(&H, 1, 1), (int)PA_PAGES - 1);
+    CHECK_EQ(pa_find(&H, 1, 16), -1);
+}
+
+TEST(stutter_placed_wants)
+{
+    D3D12_HEAP_PROPERTIES def = { D3D12_HEAP_TYPE_DEFAULT }, up = { D3D12_HEAP_TYPE_UPLOAD };
+    D3D12_RESOURCE_DESC t = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 256, 256, 1, 9, DXGI_FORMAT_BC1_UNORM, { 1, 0 } };
+    D3D12_RESOURCE_DESC b = { D3D12_RESOURCE_DIMENSION_BUFFER, 0, 65536, 1, 1, 1, DXGI_FORMAT_UNKNOWN, { 1, 0 } };
+    D3D12_CLEAR_VALUE cv;
+    uint8_t *az = fake_azimuth(0);
+    int on = pa_on;
+    pa_on = 1;
+    CHECK(pa_wants(&def, D3D12_HEAP_FLAG_NONE, &t, NULL));
+    CHECK(!pa_wants(&up, D3D12_HEAP_FLAG_NONE, &t, NULL));
+    CHECK(!pa_wants(&def, D3D12_HEAP_FLAG_NONE, &b, NULL));
+    CHECK(!pa_wants(&def, D3D12_HEAP_FLAG_NONE, &t, &cv));
+    t.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    CHECK(!pa_wants(&def, D3D12_HEAP_FLAG_NONE, &t, NULL));
+    t.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    CHECK(pa_wants(&def, D3D12_HEAP_FLAG_NONE, &t, NULL));
+    t.SampleDesc.Count = 4;
+    CHECK(!pa_wants(&def, D3D12_HEAP_FLAG_NONE, &t, NULL));
+    t.SampleDesc.Count = 1;
+    CHECK(pa_redirect(az + 0xe77c0, &def, D3D12_HEAP_FLAG_NONE, &t, NULL));
+    CHECK(!pa_redirect(az + 0xe77c1, &def, D3D12_HEAP_FLAG_NONE, &t, NULL));   /* outro chamador */
+    pa_on = 0;
+    CHECK(!pa_redirect(az + 0xe77c0, &def, D3D12_HEAP_FLAG_NONE, &t, NULL));
+    pa_on = on;
+}
+
+/* device falso: GetResourceAllocationInfo (tamanho/alinhamento escolhidos pelo teste), CreateHeap, CreatePlacedResource */
+static UINT64 pdv_size, pdv_align_small;
+static int pdv_heaps, pdv_placed;
+static UINT64 pdv_last_off;
+static D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE pdv_info(ID3D12Device *d, D3D12_RESOURCE_ALLOCATION_INFO *ret, UINT m, UINT n,
+                                                                   const D3D12_RESOURCE_DESC *rd)
+{
+    (void)d; (void)m; (void)n;
+    ret->SizeInBytes = pdv_size;
+    ret->Alignment = rd->Alignment == 4096 && pdv_align_small ? 4096 : 65536;
+    return ret;
+}
+static fake_obj pdv_heap_objs[8], pdv_res[64];
+static HRESULT STDMETHODCALLTYPE pdv_heap(ID3D12Device *d, const D3D12_HEAP_DESC *hd, REFIID r, void **o)
+{
+    static void *vt[3] = { NULL, (void *)fo_addref, (void *)fo_release };
+    (void)d; (void)r;
+    if (hd->SizeInBytes != PA_HEAP_BYTES || hd->Flags != D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES) return E_INVALIDARG;
+    pdv_heap_objs[pdv_heaps].lpVtbl = vt; pdv_heap_objs[pdv_heaps].refs = 1;
+    *o = &pdv_heap_objs[pdv_heaps++];
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE pdv_placed_fn(ID3D12Device *d, ID3D12Heap *h, UINT64 off, const D3D12_RESOURCE_DESC *rd,
+                                               D3D12_RESOURCE_STATES s, const D3D12_CLEAR_VALUE *c, REFIID r, void **o)
+{
+    (void)d; (void)h; (void)rd; (void)s; (void)c; (void)r;
+    pdv_last_off = off;
+    *o = &pdv_res[pdv_placed++];
+    return S_OK;
+}
+TEST(stutter_placed_create_and_free)
+{
+    static ID3D12DeviceVtbl vt;
+    struct { ID3D12DeviceVtbl *v; } dev = { &vt };
+    D3D12_RESOURCE_DESC t = { D3D12_RESOURCE_DIMENSION_TEXTURE2D, 0, 128, 128, 1, 8, DXGI_FORMAT_BC1_UNORM, { 1, 0 } };
+    void *a = NULL, *b = NULL, *c = NULL;
+    vt.GetResourceAllocationInfo = pdv_info;
+    real_heap = pdv_heap; real_placed = pdv_placed_fn;
+    pa_nheaps = 0; pa_ntab = 0; pa_used_pages = 0; pdv_heaps = 0; pdv_placed = 0;
+    if (pa_tab) memset(pa_tab, 0, PA_TAB * sizeof *pa_tab);
+    /* 12 KiB com small placement: 3 paginas, heap novo */
+    pdv_size = 12288; pdv_align_small = 1;
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &a)));
+    CHECK_EQ(pdv_heaps, 1);
+    CHECK_EQ(pdv_last_off, 0);
+    /* 100 KiB sem small placement: alinhada a 64 KiB -> offset 64 KiB, 25 paginas */
+    pdv_size = 102400; pdv_align_small = 0;
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &b)));
+    CHECK_EQ(pdv_last_off, 65536);
+    CHECK_EQ(pa_used_pages, 3 + 25);
+    CHECK_EQ(pa_ntab, 2);
+    /* grande demais: cai no committed */
+    pdv_size = PA_MAX_RES + 1;
+    CHECK(FAILED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &c)));
+    /* a ultima Release devolve a faixa; a proxima de 12 KiB volta para o offset 0 */
+    pa_free(a);
+    CHECK_EQ(pa_used_pages, 25);
+    CHECK_EQ(pa_ntab, 1);
+    pa_free(a);                                        /* de novo: nada */
+    CHECK_EQ(pa_used_pages, 25);
+    pdv_size = 12288; pdv_align_small = 1;
+    CHECK(SUCCEEDED(pa_create((ID3D12Device *)&dev, &t, D3D12_RESOURCE_STATE_COMMON, &IID_ID3D12Resource, &c)));
+    CHECK_EQ(pdv_last_off, 0);
+    CHECK_EQ(pdv_heaps, 1);
+    pa_free(b); pa_free(c);
+    CHECK_EQ(pa_used_pages, 0);
+    CHECK_EQ(pa_heaps[0]->free_pages, PA_PAGES);
+    real_heap = NULL; real_placed = NULL;
+    pa_nheaps = 0;
+}
