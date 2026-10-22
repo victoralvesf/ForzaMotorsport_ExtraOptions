@@ -341,6 +341,13 @@ TEST(debug12_hooks_switch)
     CHECK(!memcmp(az + 0x567df, call, 2));
     CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);
     memcpy(az + 0x567df, call, 6);
+    memcpy(az + 0x567df, call, 6);
+    log_capture();
+    dbgini_set("[Debug]\nD3D12Hooks=2\n");                   /* bisseccao: com gancho, so o gpuguard */
+    CHECK_EQ(debug12_install(), 1);
+    CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);
+    CHECK(log_has("D3D12Hooks=2 -> so os hooks do gpuguard"));
+    memcpy(az + 0x567df, call, 6);
     dbgini_set(NULL);                                         /* padrao: com gancho */
     CHECK_EQ(debug12_install(), 1);
     CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);

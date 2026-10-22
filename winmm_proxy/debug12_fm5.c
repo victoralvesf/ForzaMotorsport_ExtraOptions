@@ -163,6 +163,8 @@ static void enable_debug_layer(void)
     wlog("debug12: debug layer do D3D12 ativada (modo %d)", g_mode);
 }
 
+static int g_hooks = 1;                 /* debug.ini D3D12Hooks (debug12_install) */
+
 HRESULT WINAPI debug12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level, REFIID riid, void **out)
 {
     HRESULT hr;
@@ -170,8 +172,8 @@ HRESULT WINAPI debug12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level,
     /* o que estiver na IAT agora: d3d12.dll ou o hook do RenderDoc (device embrulhado, capturado com a trava) */
     hr = (*(create_device_fn *)(g_base + RVA_IAT_D3D12_CREATE_DEVICE))(adapter, level, riid, out);
     if (SUCCEEDED(hr) && out && *out) {
-        gpuguard_install((IUnknown *)*out);
-        stutter_device((IUnknown *)*out);   /* StutterLog=1 (stutter_fm6.c); por fora dos hooks do gpuguard */
+        if (g_hooks != 3) gpuguard_install((IUnknown *)*out);
+        if (g_hooks != 2) stutter_device((IUnknown *)*out);   /* StutterLog=1 (stutter_fm6.c); por fora dos hooks do gpuguard */
     }
     if (!g_mode) return hr;
     if (g_mode >= 3 && SUCCEEDED(hr) && out && *out) {
@@ -216,8 +218,10 @@ int debug12_install(void)
         if (dbg_str(L"DrawSkipHashes", hashes, sizeof hashes)) gg_parse_hashes(hashes);
     }
     /* diagnostico (overlays como o RivaTuner): D3D12Hooks=0 deixa o D3D12CreateDevice sem gancho -> nenhum hook do
-       proxy no D3D12 (gpuguard, pool de listas, DeferRelease, gravadoras, placement); so sem D3D12Debug */
-    if (!g_mode && !dbg_int(L"D3D12Hooks", 1)) {
+       proxy no D3D12 (gpuguard, pool de listas, DeferRelease, gravadoras, placement); 2 = so o gpuguard, 3 = so os do
+       stutter_fm6.c; so sem D3D12Debug */
+    g_hooks = g_mode ? 1 : dbg_int(L"D3D12Hooks", 1);
+    if (!g_hooks) {
         wlog("debug12: D3D12Hooks=0 -> D3D12CreateDevice sem gancho (nenhum hook do proxy no D3D12)");
         return 1;
     }
@@ -237,5 +241,7 @@ int debug12_install(void)
     memcpy(call + 2, &disp, 4);
     VirtualProtect(call + 2, 4, old, &old);
     wlog("debug12: hook no call %#x do D3D12CreateDevice (D3D12Debug=%d)", RVA_CALL_D3D12_CREATE_DEVICE, g_mode);
+    if (g_hooks == 2 || g_hooks == 3)
+        wlog("debug12: D3D12Hooks=%d -> so os hooks %s no D3D12", g_hooks, g_hooks == 2 ? "do gpuguard" : "do stutter_fm6.c");
     return 1;
 }
