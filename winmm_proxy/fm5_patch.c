@@ -464,6 +464,8 @@ static uint8_t *fps_game;
 uint8_t *g_game;           /* base do exe do FM5 (setado em fm5_patches) */
 uint8_t *g_fm6_game;       /* base do exe do FM6 (setado no apply_patches; pilhas do gpuguard_fm6.c) */
 static int fps_force;
+static const char *fps_tag = "FM5";
+static uintptr_t fps_queue_ret = 0x6828d0;   /* retorno da chamada do executor da fila (FM5; FM6 = 0, nao mapeado) */
 
 /* stub: rbx (preservado) = no da fila do executor 0x682860 ({fn, rcx, rdx, ?, next}) quando chamado de la */
 void fm5_frame_set_sync(uint8_t *frame, uint32_t mode, uintptr_t rbx, uintptr_t ret);
@@ -481,10 +483,15 @@ void fm5_frame_set_sync(uint8_t *frame, uint32_t mode, uintptr_t rbx, uintptr_t 
     if (InterlockedExchange(&last, (LONG)mode) != (LONG)mode) {
         uintptr_t g = (uintptr_t)fps_game, fn = 0;
         MEMORY_BASIC_INFORMATION mi;
-        if (ret - g == 0x6828d0 && VirtualQuery((void *)rbx, &mi, sizeof mi) && mi.State == MEM_COMMIT)
+        if (fps_queue_ret && ret - g == fps_queue_ret && VirtualQuery((void *)rbx, &mi, sizeof mi) &&
+            mi.State == MEM_COMMIT)
             fn = *(uintptr_t *)rbx - g;
-        wlog("FM5: fps: modo de present %u -> %u (chamador game+%#llx, fn da fila game+%#llx, limitador [+0x500]=%u)",
-             mode, v, (unsigned long long)(ret - g), (unsigned long long)fn, frame[0x500]);
+        if (fps_queue_ret)
+            wlog("%s: fps: modo de present %u -> %u (chamador game+%#llx, fn da fila game+%#llx, limitador [+0x500]=%u)",
+                 fps_tag, mode, v, (unsigned long long)(ret - g), (unsigned long long)fn, frame[0x500]);
+        else
+            wlog("%s: fps: modo de present %u -> %u (chamador game+%#llx)", fps_tag, mode, v,
+                 (unsigned long long)(ret - g));
     }
     *(uint32_t *)(frame + 0xa0) = v;
 }
@@ -538,10 +545,45 @@ static void fm5_frame_rate(uint8_t *game, uint32_t fps)
             return;
         }
     fps_game = game;
+    fps_tag = "FM5";
+    fps_queue_ret = 0x6828d0;
     fps_force = fps >= 60;
     for (i = 0; i < 2; i++) write_mem(game + vtbls[i] + 0x180, &fn, 8);
     wlog("FM5: fps: frame_rate %u -> %s", fps, fps_force ? "present sempre com intervalo 1" : "original");
     if (fps > 60) fm5_frame_unlock(game, fps);
+}
+
+/* FPS no FM6: mesma cadeia do FM5 com outros enderecos. O Present (Frame11 slot 0x158 = 0x207868) le [frame+0xa0]:
+   0 -> SyncInterval 1, 1 -> 2 (30 fps), outro -> 0; setter Frame/Frame11 slot 0x1a0 = 0x849940 (mesma funcao
+   dobrada nas vtables de PresentationView slot 0x98: so os slots do Frame sao trocados). Nao ha o limitador de
+   espera ativa do FM5 no relogio do Frame (frame+0x4d8 so e gravado depois do Present) -> > 60 sem patch. */
+#define FM6_FRAME_VTBL     0x19f4008  /* .?AVFrame@@ */
+#define FM6_FRAME11_VTBL   0x19f38e8  /* .?AVFrame11@@ */
+#define FM6_FRAME_SET_SYNC 0x849940
+#define FM6_FRAME_PRESENT  0x207868
+
+static void fm6_frame_rate(uint8_t *game, uint32_t fps)
+{
+    static const uint32_t vtbls[] = { FM6_FRAME_VTBL, FM6_FRAME11_VTBL };
+    void *fn = (void *)fm5_frame_set_sync_stub;
+    size_t i;
+    if (!bytes_match(game + FM6_FRAME_SET_SYNC, "8991a0000000c3", 7) ||
+        !bytes_match(game + FM6_FRAME_PRESENT + 0x1b, "8b89a000000085c90f84", 10) ||
+        *(uint8_t **)(game + FM6_FRAME11_VTBL + 0x158) != game + FM6_FRAME_PRESENT) {
+        wlog("FM6: fps: setter/Present nao conferem, ignorado");
+        return;
+    }
+    for (i = 0; i < 2; i++)
+        if (*(uint8_t **)(game + vtbls[i] + 0x1a0) != game + FM6_FRAME_SET_SYNC) {
+            wlog("FM6: fps: vtable %#x slot 0x1a0 nao confere, ignorado", vtbls[i]);
+            return;
+        }
+    fps_game = game;
+    fps_tag = "FM6";
+    fps_queue_ret = 0;
+    fps_force = fps >= 60;
+    for (i = 0; i < 2; i++) write_mem(game + vtbls[i] + 0x1a0, &fn, 8);
+    wlog("FM6: fps: frame_rate %u -> %s", fps, fps_force ? "present sempre com intervalo 1" : "original");
 }
 
 extern void fm5_car_detail(uint8_t *game, int level);
@@ -1049,6 +1091,7 @@ static void hook_apply_patches(void *image, const void *options)
         fm6_graphics_protect_install();
         /* audio_fm6_game_hooks(game): desligado - suspeito de travar o carregamento (17_fm6.txt PASSO 53) */
         fm6_patches(game);
+        fm6_frame_rate(game, *(const uint32_t *)((const uint8_t *)options + 0xc));
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;
         return;

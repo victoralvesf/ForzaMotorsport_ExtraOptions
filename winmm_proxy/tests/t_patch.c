@@ -473,6 +473,37 @@ TEST(fm6_unlock_dlc_patches_exe)
     dump_log_on_fail();
 }
 
+/* exe real do FM6: frame_rate >= 60 troca o setter do modo de present (slot 0x1a0) do Frame/Frame11 pelo do proxy;
+   o mesmo setter nas vtables de PresentationView fica intacto */
+TEST(fm6_frame_rate_patches_exe)
+{
+    uint8_t *game = pe_map(FM6_EXE, NULL), frame[0x600] = { 0 };
+    if (!game) { test_skip("exe do FM6 ausente"); return; }
+    log_capture();
+    CHECK(*(uint8_t **)(game + 0x19f38e8 + 0x1a0) == game + 0x849940);
+    fm6_frame_rate(game, 60);
+    CHECK(*(void **)(game + 0x19f4008 + 0x1a0) == (void *)fm5_frame_set_sync_stub);
+    CHECK(*(void **)(game + 0x19f38e8 + 0x1a0) == (void *)fm5_frame_set_sync_stub);
+    CHECK(*(uint8_t **)(game + 0x1a089f0 + 0x98) == game + 0x849940);   /* PresentationView11 */
+    CHECK(log_has("FM6: fps: frame_rate 60 -> present sempre com intervalo 1"));
+    CHECK(fps_force && fps_queue_ret == 0);
+    fm5_frame_set_sync(frame, 1, 0, (uintptr_t)game + 0x1234);
+    CHECK_EQ(*(uint32_t *)(frame + 0xa0), 0);    /* 30 fps pedido -> 60 */
+    CHECK(log_has("FM6: fps: modo de present 1 -> 0 (chamador game+0x1234)"));
+    /* 2a vez: slots ja trocados -> nada muda */
+    fm6_frame_rate(game, 30);
+    CHECK(log_has("FM6: fps: vtable 0x19f4008 slot 0x1a0 nao confere, ignorado"));
+    CHECK(fps_force);
+    pe_unmap(game);
+    game = pe_map(FM6_EXE, NULL);
+    fm6_frame_rate(game, 30);                     /* 30: setter trocado sem forcar */
+    CHECK(!fps_force);
+    fm5_frame_set_sync(frame, 1, 0, 0);
+    CHECK_EQ(*(uint32_t *)(frame + 0xa0), 1);
+    pe_unmap(game);
+    dump_log_on_fail();
+}
+
 /* D3D12Debug=5: criterio de recurso reservado do title_storage (azimuth 0x13bae0) -> xor eax,eax ; ret */
 TEST(fm6_debug5_committed_placement)
 {
