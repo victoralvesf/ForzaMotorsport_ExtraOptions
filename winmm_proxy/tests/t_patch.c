@@ -326,6 +326,26 @@ TEST(cfg_int_reads_ini)
     CHECK_EQ(cfg_int(L"SkipIntro", 0), 0);
 }
 
+/* D3D12Hooks=0 (diagnostico de overlays): o call do D3D12CreateDevice fica como esta; padrao: aponta para o proxy */
+extern int debug12_install(void);
+TEST(debug12_hooks_switch)
+{
+    static const uint8_t call[6] = { 0xff, 0x15, 0x83, 0x90, 0x21, 0x00 };
+    uint8_t *az = fake_azimuth(0);
+    memcpy(az + 0x567df, call, 6);
+    dbgini_set("[Debug]\nD3D12Hooks=0\n");
+    CHECK_EQ(debug12_install(), 1);
+    CHECK(!memcmp(az + 0x567df, call, 6));
+    dbgini_set("[Debug]\nD3D12Hooks=0\nD3D12Debug=1\n");     /* debug layer precisa do gancho */
+    CHECK_EQ(debug12_install(), 1);
+    CHECK(!memcmp(az + 0x567df, call, 2));
+    CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);
+    memcpy(az + 0x567df, call, 6);
+    dbgini_set(NULL);                                         /* padrao: com gancho */
+    CHECK_EQ(debug12_install(), 1);
+    CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);
+}
+
 /* debug.ini: so a secao [Debug] vale (D3D12Debug, DrawSkip, DrawSkipHashes); o azimuth_fm5.ini nao conta */
 TEST(dbg_reads_debug_ini)
 {

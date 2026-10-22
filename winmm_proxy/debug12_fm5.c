@@ -215,6 +215,12 @@ int debug12_install(void)
         char hashes[1024];
         if (dbg_str(L"DrawSkipHashes", hashes, sizeof hashes)) gg_parse_hashes(hashes);
     }
+    /* diagnostico (overlays como o RivaTuner): D3D12Hooks=0 deixa o D3D12CreateDevice sem gancho -> nenhum hook do
+       proxy no D3D12 (gpuguard, pool de listas, DeferRelease, gravadoras, placement); so sem D3D12Debug */
+    if (!g_mode && !dbg_int(L"D3D12Hooks", 1)) {
+        wlog("debug12: D3D12Hooks=0 -> D3D12CreateDevice sem gancho (nenhum hook do proxy no D3D12)");
+        return 1;
+    }
     /* call qword [rip+0x219083] (-> IAT 0x26f868) */
     if (!bytes_match(call, "ff1583902100", 6)) {
         wlog("debug12: call do D3D12CreateDevice em %#x nao confere; trava e debug layer NAO ativadas",
