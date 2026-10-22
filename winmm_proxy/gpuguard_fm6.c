@@ -66,14 +66,10 @@ int gg_va_poisoned(uint64_t va)
     return (hi & 0xffff) == 0xbeef && ((uint32_t)va >> 20) == 0xdea;
 }
 
-/* registra um heap (substitui os que se sobrepoem: memoria reaproveitada de um heap solto) */
-void gg_heap_add(uintptr_t start, uint32_t count, uint32_t inc, uint64_t gpu)
+/* tira os heaps que se sobrepoem a [start, end) (chamado com heap_lock exclusivo) */
+static void heap_drop(uintptr_t start, uintptr_t end)
 {
     int i;
-    volatile LONG *bits = (volatile LONG *)calloc((count + 31) / 32, sizeof(LONG));
-    uintptr_t end = start + (uintptr_t)count * inc;
-    if (!bits || !inc) { free((void *)bits); return; }
-    AcquireSRWLockExclusive(&heap_lock);
     for (i = 0; i < nheaps; i++) {
         if (heaps[i].start < end && start < heaps[i].start + (uintptr_t)heaps[i].count * heaps[i].inc) {
             free((void *)heaps[i].bits);
@@ -82,8 +78,25 @@ void gg_heap_add(uintptr_t start, uint32_t count, uint32_t inc, uint64_t gpu)
             i--;
         }
     }
+}
+
+/* registra um heap (substitui os que se sobrepoem: memoria reaproveitada de um heap solto) */
+void gg_heap_add(uintptr_t start, uint32_t count, uint32_t inc, uint64_t gpu)
+{
+    volatile LONG *bits = (volatile LONG *)calloc((count + 31) / 32, sizeof(LONG));
+    if (!bits || !inc) { free((void *)bits); return; }
+    AcquireSRWLockExclusive(&heap_lock);
+    heap_drop(start, start + (uintptr_t)count * inc);
     if (nheaps < GG_MAX_HEAPS) heaps[nheaps++] = (gg_heap){ start, count, inc, bits, gpu, calloc(count, sizeof(gg_desc)) };
     else free((void *)bits);
+    ReleaseSRWLockExclusive(&heap_lock);
+}
+
+/* heap de outro modulo (gg_ours): fica desconhecido, e um registro velho no mesmo endereco sai */
+void gg_heap_forget(uintptr_t start, uint32_t count, uint32_t inc)
+{
+    AcquireSRWLockExclusive(&heap_lock);
+    heap_drop(start, start + (uintptr_t)count * inc);
     ReleaseSRWLockExclusive(&heap_lock);
 }
 
@@ -595,6 +608,54 @@ static uint32_t known_frames(void **out, uint32_t max)
     return k;
 }
 
+/* SizeOfImage do cabecalho PE (fallback se a base nao tiver cabecalho, como as imagens falsas dos testes) */
+static uintptr_t image_size(const uint8_t *b, uintptr_t fallback)
+{
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)b;
+    const IMAGE_NT_HEADERS64 *nt;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return fallback;
+    nt = (const IMAGE_NT_HEADERS64 *)(b + dos->e_lfanew);
+    return nt->Signature == IMAGE_NT_SIGNATURE ? nt->OptionalHeader.SizeOfImage : fallback;
+}
+
+/* o chamador (endereco de retorno) e o Azimuth, o jogo ou o proxy? As vtables do D3D12 sao as mesmas para qualquer
+   modulo: o overlay do RivaTuner (RTSSHooks64 desenha pelo d3d11on12 no device do Azimuth) cria root signatures,
+   heaps de descritores e command lists pelos nossos ganchos; esses ficam fora das correcoes (UAVs nulos, SRV nulo
+   em slot nunca gravado, pool de command lists), feitas so para o que o Azimuth cria */
+static int in_self(const void *ret)
+{
+    static const uint8_t *self;
+    static uintptr_t self_size;
+    const uint8_t *p = ret;
+    if (!self) {
+        HMODULE m = NULL;
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCWSTR)(void *)in_self, &m) && m) {
+            self_size = image_size((const uint8_t *)m, 0);
+            self = (const uint8_t *)m;
+        }
+    }
+    return self && p >= self && p < self + self_size;
+}
+
+int gg_ours(const void *ret)
+{
+    const uint8_t *p = ret;
+    if (in_self(ret)) return 1;
+    if (g_base && p >= g_base && p < g_base + image_size(g_base, 0x1000000)) return 1;
+    return g_fm6_game && p >= g_fm6_game && p < g_fm6_game + 0x8000000;
+}
+
+/* gg_ours do 1o chamador fora do proxy: os ganchos de criacao podem estar por baixo de outro gancho nosso (o
+   CreateDescriptorHeap do stutter_fm6.c com StutterLog) e o proxy nao cria heaps de descritores nem root signatures */
+static int gg_caller_ours(void)
+{
+    void *f[8];
+    USHORT n = RtlCaptureStackBackTrace(1, 8, f, NULL), i;
+    for (i = 0; i < n; i++) if (!in_self(f[i])) return gg_ours(f[i]);
+    return 1;
+}
+
 /* grava no log os pontos de chamada guardados de uma lista (dred_watch) */
 void gg_trace_dump(void *cl)
 {
@@ -707,6 +768,15 @@ static HRESULT STDMETHODCALLTYPE hook_rootsig(ID3D12Device *dev, UINT mask, cons
     ID3D12VersionedRootSignatureDeserializer *ds = NULL;
     const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *vd;
     if (FAILED(hr) || !out || !*out) return hr;
+    if (!gg_caller_ours()) {   /* overlay (gg_ours): sem tabelas -> sem SRV/UAV nulos nas listas dele */
+        static volatile LONG foreign;
+        uint32_t none[1] = { 0 };
+        gg_rs_add(*out, none, 0);                  /* registro velho no mesmo endereco fica sem tabelas */
+        gg_rs_set_uav(*out, 0);
+        if (InterlockedIncrement(&foreign) <= 4)
+            wlog("gpuguard: root signature %p criada fora do Azimuth -> sem correcoes", *out);
+        return hr;
+    }
     if (!deser) deser = (PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER)
         GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12CreateVersionedRootSignatureDeserializer");
     if (deser && SUCCEEDED(deser(blob, len, &IID_ID3D12VersionedRootSignatureDeserializer, (void **)&ds))) {
@@ -1035,19 +1105,26 @@ static void bind_null_uavs(ID3D12GraphicsCommandList *l)
 static HRESULT STDMETHODCALLTYPE hook_heap(ID3D12Device *dev, const D3D12_DESCRIPTOR_HEAP_DESC *d, REFIID riid, void **out)
 {
     D3D12_DESCRIPTOR_HEAP_DESC big;
-    int extra = d && gg_null_uav_heap(d);
+    int ours = gg_caller_ours(), extra = ours && d && gg_null_uav_heap(d);
     HRESULT hr;
     ID3D12DescriptorHeap *heap = NULL;
     if (extra) { big = *d; big.NumDescriptors += GG_NULL_UAVS; }
     hr = real_heap(dev, extra ? &big : d, riid, out);
     if (SUCCEEDED(hr) && out && *out && d && d->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV &&
         SUCCEEDED(((IUnknown *)*out)->lpVtbl->QueryInterface(*out, &IID_ID3D12DescriptorHeap, (void **)&heap))) {
-        static volatile LONG shown;
+        static volatile LONG shown, foreign;
         D3D12_CPU_DESCRIPTOR_HANDLE s;
         D3D12_GPU_DESCRIPTOR_HANDLE g = { 0 };
         heap->lpVtbl->GetCPUDescriptorHandleForHeapStart(heap, &s);
         if (d->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(heap, &g);
         heap->lpVtbl->Release(heap);
+        if (!ours) {
+            gg_heap_forget(s.ptr, d->NumDescriptors, res_inc);
+            if (InterlockedIncrement(&foreign) <= 4)
+                wlog("gpuguard: heap CBV/SRV/UAV x%u (flags %u) criado fora do Azimuth -> sem correcoes", d->NumDescriptors,
+                     (unsigned)d->Flags);
+            return hr;
+        }
         gg_heap_add(s.ptr, d->NumDescriptors, res_inc, g.ptr);
         if (extra) null_uavs_fill(dev, s.ptr + (uintptr_t)d->NumDescriptors * res_inc, g.ptr + (uint64_t)d->NumDescriptors * res_inc);
         if (InterlockedIncrement(&shown) <= 4)

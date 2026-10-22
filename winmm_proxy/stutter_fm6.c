@@ -2486,6 +2486,7 @@ static HRESULT (STDMETHODCALLTYPE *lp_real_create)(ID3D12Device *, UINT, D3D12_C
 static volatile LONG lp_made, lp_reused, lp_kept, lp_failed;
 static volatile LONG64 lp_made_ticks;
 extern int gg_cl_forget(void *cl);
+extern int gg_ours(const void *ret);
 
 /* guarda u (ja com so a referencia do pool) se houver lugar; devolve 1 se guardou */
 int lp_put(IUnknown *u, unsigned type)
@@ -2525,9 +2526,10 @@ IUnknown *lp_take(unsigned type)
     return u;
 }
 
+/* listas de outro modulo (gg_ours, gpuguard_fm6.c: o overlay do RTSS via d3d11on12) nao entram nem saem do pool */
 static ULONG STDMETHODCALLTYPE lp_release(IUnknown *u)
 {
-    if (lp_on) {
+    if (lp_on && gg_ours(__builtin_return_address(0))) {
         ULONG c = u->lpVtbl->AddRef(u);              /* sonda: 2 = a referencia do chamador e a ultima */
         if (c == 2 && lp_put(u, (unsigned)((ID3D12CommandList *)u)->lpVtbl->GetType((ID3D12CommandList *)u))) {
             lp_real_release(u);                       /* fica a do pool */
@@ -2554,7 +2556,7 @@ static HRESULT STDMETHODCALLTYPE lp_create(ID3D12Device *d, UINT mask, D3D12_COM
     LONG64 t;
     HRESULT hr;
     if (rc_wants(type, __builtin_return_address(0))) return rc_create(d, ps, riid, out);   /* gravadora (cmdrec_fm6.c) */
-    u = lp_on && out ? lp_take((unsigned)type) : NULL;
+    u = lp_on && out && gg_ours(__builtin_return_address(0)) ? lp_take((unsigned)type) : NULL;
     if (u) {
         ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)u;
         gg_cl_forget(u);                              /* estado por lista do gpuguard: como uma lista nova */

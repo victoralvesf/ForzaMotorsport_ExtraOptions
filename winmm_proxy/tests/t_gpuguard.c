@@ -826,3 +826,40 @@ TEST(gpuguard_odd_args)
     CHECK(!gg_odd_args(GG_OP_COPY_TEXTURE, bad_ei));   /* copia: arg = destino, nunca absurdo aqui */
     CHECK(!gg_odd_args(GG_OP_CLEAR_RTV, bad_ei));
 }
+
+TEST(gpuguard_ours)
+{
+    uint8_t *fake_az = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);   /* fora do tests.exe */
+    uint8_t *saved = g_base, *saved_game = g_fm6_game;
+    const void *k32 = (const void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "Sleep");
+    g_base = NULL; g_fm6_game = NULL;
+    CHECK(gg_ours((const void *)gg_ours));                    /* o proprio proxy (aqui: tests.exe) */
+    CHECK(!gg_ours(k32));                                     /* outro modulo (overlay, d3d11on12) */
+    CHECK(!gg_ours(fake_az + 0x10));
+    g_base = fake_az;                                         /* sem cabecalho PE: 16 MB a partir da base */
+    CHECK(gg_ours(fake_az + 0x10));
+    CHECK(!gg_ours(k32));
+    g_base = NULL; g_fm6_game = fake_az;
+    CHECK(gg_ours(fake_az + 0x7fffff0));
+    CHECK(!gg_ours(fake_az + 0x8000000));
+    CHECK(!gg_ours(NULL));
+    g_base = saved; g_fm6_game = saved_game;
+    VirtualFree(fake_az, 0, MEM_RELEASE);
+}
+
+TEST(gpuguard_heap_forget)
+{
+    static uint8_t mem[64 * 32];
+    uintptr_t a = (uintptr_t)mem;
+    gg_heap_reset();
+    gg_heap_add(a, 64, 32, 0);
+    gg_mark(a, 1);
+    CHECK_EQ(gg_written(a + 32), 0);
+    gg_heap_forget(a + 16 * 32, 8, 32);                      /* heap do overlay no endereco de um heap solto */
+    CHECK_EQ(gg_written(a), (unsigned long long)-1);          /* registro velho saiu: sem opiniao, nada vira SRV nulo */
+    CHECK_EQ(gg_written(a + 16 * 32), (unsigned long long)-1);
+    gg_heap_add(a, 16, 32, 0);
+    gg_heap_forget(a + 16 * 32, 8, 32);                      /* sem sobreposicao: fica */
+    CHECK_EQ(gg_written(a), 0);
+    gg_heap_reset();
+}
