@@ -487,6 +487,8 @@ TEST(fm6_frame_rate_patches_exe)
     CHECK(*(uint8_t **)(game + 0x1a089f0 + 0x98) == game + 0x849940);   /* PresentationView11 */
     CHECK(log_has("FM6: fps: frame_rate 60 -> present sempre com intervalo 1"));
     CHECK(fps_force && fps_queue_ret == 0);
+    CHECK_HEX(game + 0x3fe908, "ff2500000000");   /* getter do FrameRate dos cenarios */
+    CHECK(!log_has("getter do FrameRate"));
     fm5_frame_set_sync(frame, 1, 0, (uintptr_t)game + 0x1234);
     CHECK_EQ(*(uint32_t *)(frame + 0xa0), 0);    /* 30 fps pedido -> 60 */
     CHECK(log_has("FM6: fps: modo de present 1 -> 0 (chamador game+0x1234)"));
@@ -496,11 +498,33 @@ TEST(fm6_frame_rate_patches_exe)
     CHECK(fps_force);
     pe_unmap(game);
     game = pe_map(FM6_EXE, NULL);
-    fm6_frame_rate(game, 30);                     /* 30: setter trocado sem forcar */
+    fm6_frame_rate(game, 30);                     /* 30: setter trocado sem forcar, getter sem hook */
     CHECK(!fps_force);
+    CHECK_HEX(game + 0x3fe908, "40574883ec4048c7442420feffffff48895c2458");
     fm5_frame_set_sync(frame, 1, 0, 0);
     CHECK_EQ(*(uint32_t *)(frame + 0xa0), 1);
     pe_unmap(game);
+    dump_log_on_fail();
+}
+
+/* getter do FrameRate do FM6: 30 do cenario (pre-corrida, replay...) vira 60 so com frame_rate >= 60 */
+static uint32_t fake_frame_rate_val;
+static uint32_t fake_get_frame_rate(void *mgr, int idx) { (void)mgr; (void)idx; return fake_frame_rate_val; }
+
+TEST(fm6_get_frame_rate_scenario)
+{
+    log_capture();
+    fm6_get_frame_rate_orig = fake_get_frame_rate;
+    fps_force = 1;
+    fake_frame_rate_val = 30;
+    CHECK_EQ(fm6_get_frame_rate(NULL, 0), 60);
+    CHECK(log_has("FM6: fps: FrameRate do cenario 30 -> 60"));
+    fake_frame_rate_val = 60;
+    CHECK_EQ(fm6_get_frame_rate(NULL, 0), 60);
+    fps_force = 0;
+    fake_frame_rate_val = 30;
+    CHECK_EQ(fm6_get_frame_rate(NULL, 0), 30);
+    fm6_get_frame_rate_orig = NULL;
     dump_log_on_fail();
 }
 

@@ -562,6 +562,23 @@ static void fm5_frame_rate(uint8_t *game, uint32_t fps)
 #define FM6_FRAME_SET_SYNC 0x849940
 #define FM6_FRAME_PRESENT  0x207868
 
+/* Os cenarios de render (Mount\media\renderscenarios\*.xml) tem <FrameRate value="30"/> em PreRace, 321, PostRace,
+   Replay, PhotoMode, FrontEnd e CarSelect (Race/Global 60). O valor (controle id 1, settings+0x58) e lido pelo getter
+   0x3fe908 (mgr, idx): override [mgr+0xb0], 3 camadas de cenario, padrao [mgr+0x678]. Consumidores (0x124171,
+   0x15a787, 0x15ad48) so testam == 30; a animacao pre-corrida fica a 30 mesmo com o modo de present 0. Com
+   frame_rate >= 60 o hook devolve 60 no lugar de 30 (o mesmo que o cenario Race). */
+#define FM6_GET_FRAME_RATE 0x3fe908
+int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp_out);
+static uint32_t (*fm6_get_frame_rate_orig)(void *mgr, int idx);
+
+static uint32_t fm6_get_frame_rate(void *mgr, int idx)
+{
+    static volatile LONG last = -1;
+    uint32_t v = fm6_get_frame_rate_orig(mgr, idx), r = (fps_force && v == 30) ? 60 : v;
+    if (InterlockedExchange(&last, (LONG)v) != (LONG)v) wlog("FM6: fps: FrameRate do cenario %u -> %u", v, r);
+    return r;
+}
+
 static void fm6_frame_rate(uint8_t *game, uint32_t fps)
 {
     static const uint32_t vtbls[] = { FM6_FRAME_VTBL, FM6_FRAME11_VTBL };
@@ -584,6 +601,9 @@ static void fm6_frame_rate(uint8_t *game, uint32_t fps)
     fps_force = fps >= 60;
     for (i = 0; i < 2; i++) write_mem(game + vtbls[i] + 0x1a0, &fn, 8);
     wlog("FM6: fps: frame_rate %u -> %s", fps, fps_force ? "present sempre com intervalo 1" : "original");
+    if (fps_force && !hook_at(game + FM6_GET_FRAME_RATE, "40574883ec4048c7442420feffffff48895c2458", 20,
+                              (void *)fm6_get_frame_rate, (void **)&fm6_get_frame_rate_orig))
+        wlog("FM6: fps: getter do FrameRate %#x nao confere, cenarios a 30 ficam", FM6_GET_FRAME_RATE);
 }
 
 extern void fm5_car_detail(uint8_t *game, int level);
