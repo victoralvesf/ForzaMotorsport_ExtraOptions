@@ -3174,10 +3174,13 @@ static FARPROC import_fallback(const uint8_t *entry)
 }
 
 /* DXGIXSetVLineNotification(contador, linha, evento): no console o evento e sinalizado quando o scanout
-   passa pela linha. Aqui: uma thread sinaliza os eventos registrados a 60 Hz (prazo por QPC). */
+   passa pela linha. Aqui: uma thread sinaliza os eventos registrados a 60 Hz (prazo por QPC). O FM6 espera esse
+   evento a cada quadro (Frame11 slot 0x108, framesperrender 1) -> com frame_rate > 60 a taxa e a do launcher. */
 #define VLINE_N 2
 static HANDLE vline_event[VLINE_N];
-static volatile LONG vline_started;
+static volatile LONG vline_started, vline_hz = 60;
+
+void fm6_vline_rate(uint32_t hz) { InterlockedExchange(&vline_hz, (LONG)(hz ? hz : 60)); }
 
 static DWORD WINAPI vline_thread(void *arg)
 {
@@ -3189,7 +3192,7 @@ static DWORD WINAPI vline_thread(void *arg)
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&next);
     for (;;) {
-        next.QuadPart += f.QuadPart / 60;
+        next.QuadPart += f.QuadPart / vline_hz;
         QueryPerformanceCounter(&now);
         if (next.QuadPart < now.QuadPart) next = now;
         due.QuadPart = -(LONGLONG)((next.QuadPart - now.QuadPart) * 10000000 / f.QuadPart);
@@ -3206,7 +3209,7 @@ static HRESULT fm6_DXGIXSetVLineNotification(UINT counter, UINT line, HANDLE eve
 {
     if (counter >= VLINE_N) return E_INVALIDARG;
     vline_event[counter] = event;
-    wlog("d3d: DXGIXSetVLineNotification(%u, linha %u, evento %p) -> 60 Hz", counter, line, event);
+    wlog("d3d: DXGIXSetVLineNotification(%u, linha %u, evento %p) -> %ld Hz", counter, line, event, vline_hz);
     if (event && !InterlockedExchange(&vline_started, 1)) CloseHandle(CreateThread(NULL, 0, vline_thread, NULL, 0, NULL));
     return S_OK;
 }

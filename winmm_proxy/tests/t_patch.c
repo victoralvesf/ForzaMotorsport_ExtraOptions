@@ -489,6 +489,7 @@ TEST(fm6_frame_rate_patches_exe)
     CHECK(fps_force && fps_queue_ret == 0);
     CHECK_HEX(game + 0x3fe908, "ff2500000000");   /* getter do FrameRate dos cenarios */
     CHECK(!log_has("getter do FrameRate"));
+    CHECK_HEX(game + 0x25d011, "80bb71250000000f85f0287000");   /* 60: passo fixo 1/59.94 mantido */
     fm5_frame_set_sync(frame, 1, 0, (uintptr_t)game + 0x1234);
     CHECK_EQ(*(uint32_t *)(frame + 0xa0), 0);    /* 30 fps pedido -> 60 */
     CHECK(log_has("FM6: fps: modo de present 1 -> 0 (chamador game+0x1234)"));
@@ -503,6 +504,15 @@ TEST(fm6_frame_rate_patches_exe)
     CHECK_HEX(game + 0x3fe908, "40574883ec4048c7442420feffffff48895c2458");
     fm5_frame_set_sync(frame, 1, 0, 0);
     CHECK_EQ(*(uint32_t *)(frame + 0xa0), 1);
+    pe_unmap(game);
+    /* 180: vline na taxa do launcher e simulacao com dt medido (jne do passo fixo -> nop) */
+    game = pe_map(FM6_EXE, NULL);
+    fm6_frame_rate(game, 180);
+    CHECK_HEX(game + 0x25d011, "80bb7125000000660f1f440000");
+    CHECK(log_has("FM6: fps: vline a 180 Hz, simulacao com dt medido"));
+    fm6_frame_rate(game, 180);                    /* 2a vez: bytes ja trocados -> nada muda */
+    CHECK_HEX(game + 0x25d011, "80bb7125000000660f1f440000");
+    fm6_vline_rate(60);
     pe_unmap(game);
     dump_log_on_fail();
 }

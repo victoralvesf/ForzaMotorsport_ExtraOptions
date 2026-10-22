@@ -542,6 +542,11 @@ TEST(fm6_vline_notification_signals)
     t0 = GetTickCount();
     while (GetTickCount() - t0 < 200) if (WaitForSingleObject(ev, 100) == WAIT_OBJECT_0) n++;
     CHECK(n >= 6 && n <= 16);                        /* 200 ms a 60 Hz ~ 12 */
+    fm6_vline_rate(180);                             /* frame_rate 180 (fm6_frame_unlock) */
+    t0 = GetTickCount(); n = 0;
+    while (GetTickCount() - t0 < 200) if (WaitForSingleObject(ev, 100) == WAIT_OBJECT_0) n++;
+    CHECK(n >= 24 && n <= 44);                       /* 200 ms a 180 Hz ~ 36 */
+    fm6_vline_rate(60);
     CHECK_EQ(fm6_DXGIXSetVLineNotification(0, 0, NULL), S_OK);
     Sleep(40);
     ResetEvent(ev);

@@ -579,6 +579,26 @@ static uint32_t fm6_get_frame_rate(void *mgr, int idx)
     return r;
 }
 
+/* > 60 fps no FM6 (cont. 4): o loop espera a cada quadro o evento de vline (Frame11 slot 0x108 = 0x25cc90, chamado
+   por 0x25cc5c se !unlockframerate e framesperrender == 1), que o proxy sinaliza a 60 Hz -> passa a ser frame_rate.
+   O dt da simulacao (0x25cfbc) e medido (limitado a [0, 0.2 s]) mas, com lockupdatetimeto60fps (opcoes +0x2571,
+   ligado pelo carregador em 0xa3a9f0), e o passo fixo 1/59.94 (0x15d61b0) -> jne em 0x25d018 vira nop (sempre dt
+   medido, como o EB em 0x5d130a do FM5). */
+#define FM6_STEP_BRANCH    0x25d011
+extern void fm6_vline_rate(uint32_t hz);
+
+static void fm6_frame_unlock(uint8_t *game, uint32_t fps)
+{
+    static const uint8_t nop6[6] = { 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00 };
+    if (!bytes_match(game + FM6_STEP_BRANCH, "80bb71250000000f85f0287000", 13)) {
+        wlog("FM6: fps: passo fixo %#x nao confere, fps > 60 ignorado", FM6_STEP_BRANCH);
+        return;
+    }
+    write_mem(game + FM6_STEP_BRANCH + 7, nop6, sizeof nop6);
+    fm6_vline_rate(fps);
+    wlog("FM6: fps: vline a %u Hz, simulacao com dt medido", fps);
+}
+
 static void fm6_frame_rate(uint8_t *game, uint32_t fps)
 {
     static const uint32_t vtbls[] = { FM6_FRAME_VTBL, FM6_FRAME11_VTBL };
@@ -604,6 +624,7 @@ static void fm6_frame_rate(uint8_t *game, uint32_t fps)
     if (fps_force && !hook_at(game + FM6_GET_FRAME_RATE, "40574883ec4048c7442420feffffff48895c2458", 20,
                               (void *)fm6_get_frame_rate, (void **)&fm6_get_frame_rate_orig))
         wlog("FM6: fps: getter do FrameRate %#x nao confere, cenarios a 30 ficam", FM6_GET_FRAME_RATE);
+    if (fps > 60) fm6_frame_unlock(game, fps);
 }
 
 extern void fm5_car_detail(uint8_t *game, int level);
