@@ -490,12 +490,15 @@ TEST(fm6_frame_rate_patches_exe)
     CHECK_HEX(game + 0x3fe908, "ff2500000000");   /* getter do FrameRate dos cenarios */
     CHECK(!log_has("getter do FrameRate"));
     CHECK_HEX(game + 0x25d011, "80bb71250000000f85f0287000");   /* 60: passo fixo 1/59.94 mantido */
+    CHECK(*(void **)(game + 0x19f38e8 + 0x158) == (void *)fm6_present_hook);      /* medicao de fps */
+    CHECK(*(void **)(game + 0x19f38e8 + 0x108) == (void *)fm6_vline_wait_hook);
+    CHECK(fm6_present_orig == (fm6_vcall4)(game + 0x207868) && fm6_vline_wait_orig == (fm6_vcall4)(game + 0x25cc90));
     fm5_frame_set_sync(frame, 1, 0, (uintptr_t)game + 0x1234);
     CHECK_EQ(*(uint32_t *)(frame + 0xa0), 0);    /* 30 fps pedido -> 60 */
     CHECK(log_has("FM6: fps: modo de present 1 -> 0 (chamador game+0x1234)"));
     /* 2a vez: slots ja trocados -> nada muda */
     fm6_frame_rate(game, 30);
-    CHECK(log_has("FM6: fps: vtable 0x19f4008 slot 0x1a0 nao confere, ignorado"));
+    CHECK(log_has("FM6: fps: setter/Present nao conferem, ignorado"));
     CHECK(fps_force);
     pe_unmap(game);
     game = pe_map(FM6_EXE, NULL);
@@ -514,6 +517,30 @@ TEST(fm6_frame_rate_patches_exe)
     CHECK_HEX(game + 0x25d011, "80bb7125000000660f1f440000");
     fm6_vline_rate(60);
     pe_unmap(game);
+    dump_log_on_fail();
+}
+
+/* medicao de fps do FM6: 1 s de quadros a 30 fps (Present 1 ms, vline 20 ms) loga os tempos medios */
+static uintptr_t fake_vcall(void *a, void *b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 7; }
+
+TEST(fm6_fps_meter_logs)
+{
+    LONGLONG f, t = 1000000;
+    int i;
+    log_capture();
+    QueryPerformanceFrequency(&fm6_qpf);
+    f = fm6_qpf.QuadPart;
+    fm6_fps_sample(t - f / 1000, t);
+    for (i = 0; i < 31; i++) {
+        InterlockedAdd64(&fm6_wait_sum, f / 50);
+        t += f / 30;
+        fm6_fps_sample(t - f / 1000, t);
+    }
+    CHECK(log_has("FM6: fps 30 (quadro 33.33 ms: Present 1.00 ms, espera do vline 20.00 ms)"));
+    fm6_present_orig = fm6_vline_wait_orig = fake_vcall;
+    CHECK_EQ(fm6_present_hook(0, 0, 0, 0), 7);
+    CHECK_EQ(fm6_vline_wait_hook(0, 0, 0, 0), 7);
+    fm6_present_orig = fm6_vline_wait_orig = NULL;
     dump_log_on_fail();
 }
 

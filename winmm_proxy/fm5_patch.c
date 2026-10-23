@@ -599,6 +599,74 @@ static void fm6_frame_unlock(uint8_t *game, uint32_t fps)
     wlog("FM6: fps: vline a %u Hz, simulacao com dt medido", fps);
 }
 
+/* Medicao de fps do FM6 (diagnostico, sempre ligado com o fps instalado): o FM6 chama o Present do host direto (sem o
+   fm5_DXGIXPresentArray). Frame11 slot 0x158 (Present, render thread) e slot 0x108 (espera do vline, thread do loop)
+   passam por wrappers que somam o tempo; a cada 1 s, se o fps muda > 3, loga quadro/Present/vline em ms. */
+#define FM6_FRAME_VLINE_WAIT 0x25cc90
+typedef uintptr_t (*fm6_vcall4)(void *, void *, void *, void *);
+static fm6_vcall4 fm6_present_orig, fm6_vline_wait_orig;
+static LARGE_INTEGER fm6_qpf;
+static volatile LONG64 fm6_wait_sum;
+
+static uintptr_t fm6_vline_wait_hook(void *a, void *b, void *c, void *d)
+{
+    LARGE_INTEGER t0, t1;
+    uintptr_t r;
+    QueryPerformanceCounter(&t0);
+    r = fm6_vline_wait_orig(a, b, c, d);
+    QueryPerformanceCounter(&t1);
+    InterlockedAdd64(&fm6_wait_sum, t1.QuadPart - t0.QuadPart);
+    return r;
+}
+
+/* uma amostra por Present: [t0, t1] = dentro do Present; t1 do anterior -> t0 = resto do quadro */
+static void fm6_fps_sample(LONGLONG t0, LONGLONG t1)
+{
+    static LONGLONG win0, prev1, in_sum;
+    static LONG n, last_fps;
+    if (!fm6_qpf.QuadPart) QueryPerformanceFrequency(&fm6_qpf);
+    if (!win0) { win0 = prev1 = t1; return; }
+    in_sum += t1 - t0;
+    n++;
+    prev1 = t1;
+    if (t1 - win0 >= fm6_qpf.QuadPart) {
+        double ms = 1000.0 / fm6_qpf.QuadPart;
+        LONG fps = (LONG)(n * (double)fm6_qpf.QuadPart / (t1 - win0) + 0.5);
+        LONG64 w = InterlockedExchange64(&fm6_wait_sum, 0);
+        if (fps < last_fps - 3 || fps > last_fps + 3) {
+            wlog("FM6: fps %ld (quadro %.2f ms: Present %.2f ms, espera do vline %.2f ms)", fps,
+                 (t1 - win0) * ms / n, in_sum * ms / n, w * ms / n);
+            last_fps = fps;
+        }
+        win0 = t1; n = 0; in_sum = 0;
+    }
+}
+
+static uintptr_t fm6_present_hook(void *a, void *b, void *c, void *d)
+{
+    LARGE_INTEGER t0, t1;
+    uintptr_t r;
+    QueryPerformanceCounter(&t0);
+    r = fm6_present_orig(a, b, c, d);
+    QueryPerformanceCounter(&t1);
+    fm6_fps_sample(t0.QuadPart, t1.QuadPart);
+    return r;
+}
+
+static void fm6_fps_meter(uint8_t *game)
+{
+    void *p = (void *)fm6_present_hook, *w = (void *)fm6_vline_wait_hook;
+    if (*(uint8_t **)(game + FM6_FRAME11_VTBL + 0x108) != game + FM6_FRAME_VLINE_WAIT ||
+        !bytes_match(game + FM6_FRAME_VLINE_WAIT, "4053", 2)) {
+        wlog("FM6: fps: slot 0x108 (vline) nao confere, sem medicao");
+        return;
+    }
+    fm6_present_orig = (fm6_vcall4)(game + FM6_FRAME_PRESENT);
+    fm6_vline_wait_orig = (fm6_vcall4)(game + FM6_FRAME_VLINE_WAIT);
+    write_mem(game + FM6_FRAME11_VTBL + 0x158, &p, 8);
+    write_mem(game + FM6_FRAME11_VTBL + 0x108, &w, 8);
+}
+
 static void fm6_frame_rate(uint8_t *game, uint32_t fps)
 {
     static const uint32_t vtbls[] = { FM6_FRAME_VTBL, FM6_FRAME11_VTBL };
@@ -625,6 +693,7 @@ static void fm6_frame_rate(uint8_t *game, uint32_t fps)
                               (void *)fm6_get_frame_rate, (void **)&fm6_get_frame_rate_orig))
         wlog("FM6: fps: getter do FrameRate %#x nao confere, cenarios a 30 ficam", FM6_GET_FRAME_RATE);
     if (fps > 60) fm6_frame_unlock(game, fps);
+    fm6_fps_meter(game);
 }
 
 extern void fm5_car_detail(uint8_t *game, int level);
