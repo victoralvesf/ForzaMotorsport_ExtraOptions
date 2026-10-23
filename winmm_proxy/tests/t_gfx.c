@@ -163,3 +163,75 @@ TEST(gfx_levels_on_fm5_exe)
         pe_unmap(g);
     }
 }
+
+/* ------------------------------------------------------------------------ */
+/* FM6: car_detail (faixas por classe, 5 distancias, variantes noite/chuva)  */
+/* ------------------------------------------------------------------------ */
+static int32_t fake_i6[6];
+static float fake_f5[5];
+static void *fake_get_i6(void *mgr, void *out, int idx) { (void)mgr; (void)idx; memcpy(out, fake_i6, 24); return out; }
+static void *fake_get_f5(void *mgr, void *out, int idx) { (void)mgr; (void)idx; memcpy(out, fake_f5, 20); return out; }
+
+TEST(fm6_car_lod_thresholds_per_level)
+{
+    int32_t out[6];
+    static const int32_t xml[6] = { 0, 3, 4, 4, 7, 25 };   /* Global.xml */
+    fm6_orig_thr[0] = fm6_orig_thr[1] = fm6_orig_thr[2] = fake_get_i6;
+    memcpy(fake_i6, xml, 24);
+    fm6_car_level = 0; fm6_get_thr0(NULL, out, 0);
+    CHECK(out[0] == 0 && out[1] == 0 && out[2] == 3 && out[3] == 4 && out[4] == 11 && out[5] == 25);
+    fm6_car_level = 2; fm6_get_thr1(NULL, out, 0);
+    CHECK(out[0] == 3 && out[1] == 4 && out[2] == 4 && out[3] == 7 && out[4] == 14 && out[5] == 25);
+    fm6_car_level = 3; fm6_get_thr2(NULL, out, 0);
+    CHECK(out[0] == 64 && out[1] == 3 && out[2] == 4 && out[3] == 4 && out[4] == 7 && out[5] == 99);
+}
+
+TEST(fm6_car_lod_distances_and_focus)
+{
+    float out[5];
+    int32_t mm[2];
+    static const float xml[5] = { 15, 35, 60, 100, 300 };
+    fm6_orig_dist[0] = fm6_orig_dist[1] = fm6_orig_dist[2] = (getter_fn)fake_get_f5;
+    memcpy(fake_f5, xml, 20);
+    fm6_car_level = 0; fm6_get_dist0(NULL, out, 0);
+    CHECK(out[0] == 15 * 0.6f && out[4] == 300 * 0.6f);
+    fm6_car_level = 3; fm6_get_dist2(NULL, out, 0);
+    CHECK(out[0] == 60 && out[3] == 400 && out[4] == 1200);
+    fm6_orig_focus = fake_get_i4;
+    fake_i4[0] = 1; fake_i4[1] = 6;
+    fm6_get_focus(NULL, mm, 0);
+    CHECK(mm[0] == 0 && mm[1] == 0);              /* carro focado sempre no LOD0 */
+    fake_i4[0] = -1; fake_i4[1] = -1;
+    fm6_get_focus(NULL, mm, 0);
+    CHECK(mm[0] == -1 && mm[1] == -1);            /* LOD S (-1) fica */
+}
+
+TEST(fm6_car_detail_on_fm6_exe)
+{
+    static const uint32_t getters[] = { 0x43fe54, 0xe48e24, 0x20d01c, 0x18ca6c, 0xdb802c, 0x18cbac, 0x445d2c };
+    int level;
+    size_t i;
+    for (level = 0; level < 4; level++) {
+        uint8_t *g = pe_map(FM6_EXE, NULL);
+        if (!g) { test_skip(FM6_EXE " ausente"); return; }
+        for (i = 0; i < 7; i++) CHECK_HEX(g + getters[i], "40574883ec4048c7442420feffffff48895c2458");
+        log_capture();
+        fm6_car_detail(g, level);
+        CHECK(!log_has("nao confere"));
+        if (level == 1) {
+            CHECK(log_has("FM6: car_detail 1 (default): LODs originais"));
+            CHECK_HEX(g + 0x43fe54, "40574883ec40");
+        } else {
+            CHECK(hooked_to(g + 0x43fe54, (void *)fm6_get_thr0));
+            CHECK(hooked_to(g + 0xe48e24, (void *)fm6_get_thr1));
+            CHECK(hooked_to(g + 0x20d01c, (void *)fm6_get_thr2));
+            CHECK(hooked_to(g + 0x18ca6c, (void *)fm6_get_dist0));
+            CHECK(hooked_to(g + 0xdb802c, (void *)fm6_get_dist1));
+            CHECK(hooked_to(g + 0x18cbac, (void *)fm6_get_dist2));
+            CHECK_EQ(level >= 2, hooked_to(g + 0x445d2c, (void *)fm6_get_focus));
+            CHECK_HEX((uint8_t *)fm6_orig_thr[0], "40574883ec4048c7442420feffffff48895c2458");
+            CHECK(*(uint8_t **)((uint8_t *)fm6_orig_thr[0] + 20 + 6) == g + 0x43fe54 + 20);
+        }
+        pe_unmap(g);
+    }
+}
