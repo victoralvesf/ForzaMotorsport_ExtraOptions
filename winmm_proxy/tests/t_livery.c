@@ -95,3 +95,19 @@ TEST(livery_log_install_on_fm6_exe)
     liv_log = 0;
     pe_unmap(g);
 }
+
+TEST(livery_placement_textures_logged)
+{
+    static const UINT big[12] = { 4096, 2048, 13, 1, 98, 1, 0, 0, 8, 0, 0, 0 };
+    static const UINT small[12] = { 1024, 1024, 11, 1, 98, 1, 0, 0, 8, 0, 0, 0 };
+    log_capture();
+    liv_note_placement(big, 13, 4096, (void *)0x1000, 0x1234);
+    CHECK(!log_has("livery:"));                   /* so com LiveryLog */
+    liv_log = 1;
+    liv_note_placement(small, 13, 1024, (void *)0x1000, 0x1234);
+    CHECK(!log_has("livery:"));
+    liv_note_placement(big, 13, 4096, (void *)0x1000, 0x1234);
+    CHECK(log_has("livery: placement texture #1 4096x2048 mips 13 arr 1 fmt 98 bind 0x8 misc 0 tile 13 pitch 4096"));
+    CHECK(log_has("caller game+0x1234"));
+    liv_log = 0;
+}

@@ -27,6 +27,7 @@ extern void liv_note_dispatch(UINT x, UINT y, UINT z);
 extern void liv_note_texture(const UINT *d, long hr);
 extern int liv_in_window(void);
 extern int liv_log;
+extern void liv_note_placement(const UINT *d, UINT tile, UINT pitch, const void *addr, uintptr_t caller);
 /* stutter_fm6.c (PASSO 99): rastreio das placement textures placed */
 int pa_tracking(void);
 void pa_note_begin(const void *addr, uintptr_t caller);
@@ -1416,6 +1417,7 @@ static __attribute__((noinline)) uintptr_t fm6_game_caller(void)
 static ptex2d_fn orig_fm6_placement_tex2d;
 static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
 {
+    if (liv_log) liv_note_placement(desc, tile, pitch, addr, fm6_game_caller());
     if (desc && !az_placement_tex2d_ok(desc) && fm6_placement_uav_only(desc)) {
         static volatile LONG n;
         LONG k = InterlockedIncrement(&n);

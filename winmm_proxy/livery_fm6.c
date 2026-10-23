@@ -80,6 +80,20 @@ void liv_note_texture(const UINT *d, long hr)
              d[2], d[4], d[8], d[7], d[10], hr, GetCurrentThreadId());
 }
 
+/* Plotagem de fabrica (carros de corrida): nao passa pelo render acima; e uma textura pronta do carro
+   (media\cars\<carro>.zip Textures\Livery\Swatches\*_livery_NNN_DIFF_*.swatchbin) criada como placement texture
+   pelo streaming. Loga as grandes (lado >= 2048): tamanho, mips, formato, tile mode e chamador. */
+void liv_note_placement(const UINT *d, UINT tile, UINT pitch, const void *addr, uintptr_t caller)
+{
+    static volatile LONG n;
+    LONG k;
+    if (!liv_log || !d || (d[0] < 2048 && d[1] < 2048)) return;
+    k = InterlockedIncrement(&n);
+    if (k <= 256 || (k & (k - 1)) == 0)
+        wlog("livery: placement texture #%ld %ux%u mips %u arr %u fmt %u bind %#x misc %#x tile %u pitch %u addr %p, "
+             "caller game+%#zx", k, d[0], d[1], d[2], d[3], d[4], d[8], d[10], tile, pitch, addr, caller);
+}
+
 static uint64_t hook_sections(void *mgr, uint64_t lowq, uint64_t a3, uint64_t a4)
 {
     LARGE_INTEGER f, t0, t1;
