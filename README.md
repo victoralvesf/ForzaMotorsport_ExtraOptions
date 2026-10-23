@@ -53,18 +53,20 @@ modified on disk**, and FH2 keeps working as before.
    ```
 
 The launcher's graphics settings (resolution, frame rate, etc.) apply to FM5. On FM6 the
-**resolution** and the **frame rate** are applied for now. The resolution works like on FM5: the game
+**resolution**, the **frame rate** and **car detail** are applied for now. The resolution works like on FM5: the game
 renders at the chosen size (e.g. 1440p) and the menus, HUD and tuning charts are scaled to fill the screen.
 With the frame rate, menus, pre-race, post-race and replays run at the chosen
 rate instead of dropping to 30, and rates above 60 (120, 144, 180...) work up to your
-monitor's refresh rate, with the game speed unchanged.
+monitor's refresh rate, with the game speed unchanged. Car detail changes the cars' level of detail
+like on FM5: higher levels keep more cars at better LODs, from farther away, and show your own car at
+full detail outside the cockpit; low lowers it for more performance.
 
 ## Status and known issues
 
 - **Forza Motorsport 5:** menus, races, garage, DLC and Marketplace work.
 - **Forza Motorsport 6 (initial support):** boots, menus, video, audio and races work, at the
-  launcher's resolution and frame rate (60 or higher). Known issues:
-  - the launcher's graphics settings other than resolution and frame rate are not applied (see above);
+  launcher's resolution, frame rate (60 or higher) and car detail. Known issues:
+  - the launcher's graphics settings other than resolution, frame rate and car detail are not applied (see above);
   - very heavy scenes (e.g. some pre-race shots) can still drop below the chosen frame rate;
   - turning on the RivaTuner (RTSS) overlay can crash the game ("device removed").
 - Rivals and online modes need Xbox Live and do not work in either game.
