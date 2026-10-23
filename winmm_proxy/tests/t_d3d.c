@@ -623,6 +623,8 @@ static long fake_fm6_create_srv(void *dev, void *res, const UINT *desc, void **o
     return 0;
 }
 
+static void fake_fm6_getdesc(void *tex, UINT *d) { (void)tex; memset(d, 0, 12 * 4); d[5] = 2; d[6] = 0xffffffff; }
+
 static uint32_t create_sc_desc[12];
 static long fake_create_sc_cw(void *factory, void *device, void *window, const uint32_t *desc, void *ro, void **out)
 {
@@ -649,6 +651,7 @@ TEST(fm6_create_device_uses_azimuth_device)
     *(void **)(az + RVA_VTBL_GET + 6) = (void *)fake_vtbl_get;
     for (i = 0; i < 0x10e; i++) fm6_type_tab[0xe][i] = fm6_type_tab[5][i] = (void *)(uintptr_t)(0x100 + i);
     fm6_type_tab[0xe][0x11] = (void *)fake_create_sc_cw;                     /* CreateSwapChainForCoreWindow */
+    fm6_type_tab[0xc][0xc] = (void *)fake_fm6_getdesc;                       /* Texture2D GetDesc (Azimuth 0xc) */
     CHECK_EQ(fm6_D3D11CreateDevice(NULL, 1, NULL, 0x4000000, &lv, 1, 0x20011, &dev, &level, &ctx), 0);
     CHECK_HEX((uint8_t *)createx_desc, "0b000100" "00000004" "00000000" "00000000" "00000000" "00000000"
                                        "3f000000" "00000000" "00000000" "00000000" "00000000");
@@ -669,6 +672,21 @@ TEST(fm6_create_device_uses_azimuth_device)
         CHECK_HEX((uint8_t *)create_tex_desc, "80070000" "38040000" "01000000" "01000000" "1a000000" "02000000"
                                               "ffffffff" "00000000" "28000000" "00000000" "00000400" "00000000");
         CHECK_EQ(tex[6], 2);
+        {   /* GetDesc do Texture2D (FM6 slot 0xd): o jogo (resolve game+0x40b7aa) ve {2, 2}; o Azimuth, o padrao */
+            uint8_t *game = t_rwx(0x10000), *saved = g_fm6_game;
+            UINT d[12];
+            void (*getdesc)(void *, UINT *) = (void (*)(void *, UINT *))fm6_type_tab[0xc][0xd];
+            CHECK(getdesc == fm6_tex2d_GetDesc);
+            g_fm6_game = game;
+            getdesc(t, d);
+            CHECK_EQ(d[6], 0xffffffff);
+            ((void (*)(void *, UINT *))t_call_from(game + 0x8000, (void *)getdesc))(t, d);
+            CHECK_EQ(d[5], 2);
+            CHECK_EQ(d[6], 2);
+            ((void (*)(void *, UINT *))t_call_from(game + 0x8000, (void *)getdesc))((void *)0x1234, d);
+            CHECK_EQ(d[6], 0xffffffff);                                      /* textura desconhecida */
+            g_fm6_game = saved;
+        }
         CHECK_EQ(((long (*)(void *, const UINT *, const void *, void **))fm6_dev_vt[5])(fm6_dev, one, NULL, &t), 0);
         CHECK_HEX((uint8_t *)create_tex_desc, "40000000" "40000000" "01000000" "01000000" "1c000000" "01000000"
                                               "00000000" "00000000" "08000000" "00000000" "00000000" "00000000");

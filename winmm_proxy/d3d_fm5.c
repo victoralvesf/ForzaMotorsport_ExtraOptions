@@ -464,13 +464,19 @@ static int msaa_q_get(void *tex, UINT *q)
 
 typedef void (*tex2d_getdesc_fn)(void *tex, UINT *d);
 static tex2d_getdesc_fn orig_tex2d_getdesc;
+
+/* devolve o Quality pedido so a chamadas do exe do jogo [game, game + size); Azimuth/proxy veem o do D3D12 */
+static void msaa_q_fix(void *tex, UINT *d, const uint8_t *ret, const uint8_t *game, size_t size)
+{
+    UINT q;
+    if (d && d[5] > 1 && d[6] == 0xffffffff && game && ret >= game && ret < game + size && msaa_q_get(tex, &q))
+        d[6] = q;
+}
+
 static void tex2d_GetDesc(void *tex, UINT *d)
 {
-    const uint8_t *ret = __builtin_return_address(0);
-    UINT q;
     orig_tex2d_getdesc(tex, d);
-    if (d && d[5] > 1 && d[6] == 0xffffffff && ret >= g_game && ret < g_game + FM5_IMAGE_SIZE && msaa_q_get(tex, &q))
-        d[6] = q;
+    msaa_q_fix(tex, d, __builtin_return_address(0), g_game, FM5_IMAGE_SIZE);
 }
 
 static long dev_CreateTexture2D(void *dev, const UINT *desc, const void *init, void **out)
@@ -1295,6 +1301,7 @@ static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
     memcpy(d, desc, 12 * sizeof(UINT));
     d[6] = 0xffffffff;
     hr = orig_fm6_create_tex2d(dev, d, init, out);
+    if (hr >= 0 && out && *out) msaa_q_set(*out, desc[6]);
     wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> padrao, bind=%#x misc=%#x) hr=%#lx tex=%p",
          d[0], d[1], d[4], d[5], desc[6], d[8], d[10], hr, out ? *out : NULL);
     if (hr >= 0 && out && *out) alias_track_ex(desc, *out, 0);
@@ -2900,6 +2907,17 @@ static int fm6_ctx_install(void)
     return 1;
 }
 
+/* GetDesc do Texture2D no layout do FM6 (slot 0xd): o resolve MSAA do FM6 (game+0x40b7aa, desc lido por
+   game+0x19070c) so desenha com SampleDesc {2, 2} / {4, 3}, como o do FM5 (cont. 23); com o Quality do D3D12
+   (0xffffffff) pulava -> thumbnails da garagem (GarageThumbnail bigThumb/smallThumb) pretos. */
+#define FM6_IMAGE_SIZE 0x1fc8000
+static tex2d_getdesc_fn orig_fm6_tex2d_getdesc;
+static void fm6_tex2d_GetDesc(void *tex, UINT *d)
+{
+    orig_fm6_tex2d_getdesc(tex, d);
+    msaa_q_fix(tex, d, __builtin_return_address(0), g_fm6_game, FM6_IMAGE_SIZE);
+}
+
 /* Objetos do FM6 (umd.dll do OS "era" contra o do FH2): ID3D11DeviceChild ganha um metodo no slot 8 (xor eax,eax;
    ret, logo apos o SetPrivateDataInterfaceGraphics; o mesmo do contexto) -> recurso FM6 9 GetType, 0xc GetDescriptor,
    0xd GetDesc; e IDXGIObject NAO tem o SetPrivateDataInterfaceGraphics (Set 3, SetI 4, Get 5, GetParent 6) ->
@@ -2948,10 +2966,13 @@ static void fm6_object_layouts(void)
     if (done) return;
     done = 1;
     for (t = 0; t < NTYPES; t++) fm6_layout_table(get(t), type_kind[t]);
+    orig_fm6_tex2d_getdesc = (tex2d_getdesc_fn)get(0xc)[0xd];
+    get(0xc)[0xd] = (void *)fm6_tex2d_GetDesc;
     factory = get(0xe);
     orig_fm6_create_sc_cw = (create_sc_cw_fn)factory[0x10];
     factory[0x10] = (void *)fm6_CreateSwapChainForCoreWindow;
-    wlog("d3d: vtables dos objetos no layout do FM6 (DeviceChild +slot 8, DXGI sem o slot 5)");
+    wlog("d3d: vtables dos objetos no layout do FM6 (DeviceChild +slot 8, DXGI sem o slot 5, GetDesc do Texture2D "
+         "com o Quality do MSAA do jogo)");
 }
 
 /* FM6 (OS "era", XDK posterior ao do FH2): D3D11CreateDevice(0, 1, 0, 0x4000000, {0xb100}, 1, 0x20011, ...) em
