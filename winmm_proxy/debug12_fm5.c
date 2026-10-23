@@ -10,7 +10,9 @@
  * UINT64_MAX) e grava no log as ultimas listas com a contagem de operacoes e, de cada uma, os pontos de chamada de
  * Dispatch/CopyTextureRegion/draws/ClearRenderTargetView guardados pela trava (gpuguard_fm6.c, gg_trace_*).
  * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c): o device nasce
- * antes do apply_patches, quando o jogo ainda nao e conhecido.
+ * antes do apply_patches, quando o jogo ainda nao e conhecido. No Wine/Proton (vkd3d-proton) a trava fica desligada
+ * por padrao (D3D12Hooks=3): ela corrige comportamentos do driver da AMD no Windows e, no RADV, os descritores e root
+ * views nulos dela davam page fault em VA 0 (issue de usuario Linux, 2026-10-23).
  */
 #define INITGUID
 #include <windows.h>
@@ -165,6 +167,14 @@ static void enable_debug_layer(void)
 
 static int g_hooks = 1;                 /* debug.ini D3D12Hooks (debug12_install) */
 
+/* Wine/Proton: a ntdll dele exporta wine_get_version (ponteiro trocavel pelos testes) */
+static int on_wine(void)
+{
+    HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+    return nt && GetProcAddress(nt, "wine_get_version");
+}
+int (*debug12_wine)(void) = on_wine;
+
 HRESULT WINAPI debug12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level, REFIID riid, void **out)
 {
     HRESULT hr;
@@ -220,7 +230,11 @@ int debug12_install(void)
     /* diagnostico (overlays como o RivaTuner): D3D12Hooks=0 deixa o D3D12CreateDevice sem gancho -> nenhum hook do
        proxy no D3D12 (gpuguard, pool de listas, DeferRelease, gravadoras, placement); 2 = so o gpuguard, 3 = so os do
        stutter_fm6.c; so sem D3D12Debug */
-    g_hooks = g_mode ? 1 : dbg_int(L"D3D12Hooks", 1);
+    g_hooks = g_mode ? 1 : dbg_int(L"D3D12Hooks", -1);
+    if (g_hooks < 0) {
+        g_hooks = debug12_wine() ? 3 : 1;
+        if (g_hooks == 3) wlog("debug12: Wine/Proton -> gpuguard desligado (D3D12Hooks=3 por padrao; D3D12Hooks=1 liga)");
+    }
     if (!g_hooks) {
         wlog("debug12: D3D12Hooks=0 -> D3D12CreateDevice sem gancho (nenhum hook do proxy no D3D12)");
         return 1;

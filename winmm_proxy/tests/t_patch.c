@@ -351,6 +351,39 @@ TEST(debug12_hooks_switch)
     dbgini_set(NULL);                                         /* padrao: com gancho */
     CHECK_EQ(debug12_install(), 1);
     CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);
+    CHECK(!log_has("Wine/Proton"));
+}
+
+/* Wine/Proton: sem D3D12Hooks no debug.ini o padrao e 3 (sem gpuguard); a chave explicita e o D3D12Debug valem */
+extern int (*debug12_wine)(void);
+static int fake_wine(void) { return 1; }
+TEST(debug12_wine_default)
+{
+    static const uint8_t call[6] = { 0xff, 0x15, 0x83, 0x90, 0x21, 0x00 };
+    uint8_t *az = fake_azimuth(0);
+    int (*real)(void) = debug12_wine;
+    debug12_wine = fake_wine;
+    memcpy(az + 0x567df, call, 6);
+    log_capture();
+    dbgini_set(NULL);
+    CHECK_EQ(debug12_install(), 1);
+    CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);       /* gancho fica (hooks do stutter) */
+    CHECK(log_has("Wine/Proton -> gpuguard desligado"));
+    CHECK(log_has("D3D12Hooks=3 -> so os hooks do stutter_fm6.c"));
+    memcpy(az + 0x567df, call, 6);
+    log_capture();
+    dbgini_set("[Debug]\nD3D12Hooks=1\n");                 /* explicito: gpuguard ligado */
+    CHECK_EQ(debug12_install(), 1);
+    CHECK(!log_has("Wine/Proton"));
+    CHECK(!log_has("D3D12Hooks=3"));
+    memcpy(az + 0x567df, call, 6);
+    log_capture();
+    dbgini_set("[Debug]\nD3D12Debug=3\n");                 /* diagnostico: todos os hooks */
+    CHECK_EQ(debug12_install(), 1);
+    CHECK(!log_has("Wine/Proton"));
+    memcpy(az + 0x567df, call, 6);
+    dbgini_set(NULL);
+    debug12_wine = real;
 }
 
 /* debug.ini: so a secao [Debug] vale (D3D12Debug, DrawSkip, DrawSkipHashes); o azimuth_fm5.ini nao conta */
