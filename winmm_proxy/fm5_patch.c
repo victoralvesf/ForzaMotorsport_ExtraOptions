@@ -460,6 +460,46 @@ static void fm5_ui_viewport(uint8_t *game, const ResSites *rs, uint32_t w, uint3
     wlog("%s: resolucao: viewport da UI escalado para %ux%u", rs->tag, w, h);
 }
 
+/* Graficos da UI do FM6 (PASSO 107 cont. 1; relacao de marchas da tunagem): 0xcff4e8 calcula a posicao/tamanho do
+   grafico no espaco da UI (1920x1080) e chama o SetViewport do proprio renderizador ([rdi+0x1a0] slot 0x30,
+   rdx = {int x, y, w, h; float minz, maxz}) -> fora da correcao do viewport da UI, ficava no lugar de 1080p.
+   Em 0xcff5c5 (mov rax,[rcx] ; 2 stores do retangulo ; call [rax+0x30]) os stores ficam e o call vira
+   call [rip -> slot no padding 0x7520] = fm6_chart_vcall, que escala o retangulo como fm5_ui_vcall. */
+#define FM6_CHART_VP       0xcff5c5
+#define FM6_CHART_SLOT     0x7520    /* padding cc depois de um ret (18 bytes) */
+
+static uintptr_t fm6_chart_vcall(void *obj, const int32_t *r)
+{
+    typedef uintptr_t (*vc_fn)(void *, const void *);
+    static volatile LONG logged;
+    int32_t v[6];
+    memcpy(v, r, sizeof v);
+    v[0] = (int32_t)(r[0] * ui_sx + 0.5f); v[2] = (int32_t)((r[0] + r[2]) * ui_sx + 0.5f) - v[0];
+    v[1] = (int32_t)(r[1] * ui_sy + 0.5f); v[3] = (int32_t)((r[1] + r[3]) * ui_sy + 0.5f) - v[1];
+    if (InterlockedIncrement(&logged) <= 2)
+        wlog("FM6: grafico da UI %d,%d %dx%d -> %d,%d %dx%d", r[0], r[1], r[2], r[3], v[0], v[1], v[2], v[3]);
+    return ((vc_fn)(*(void ***)obj)[0x30 / 8])(obj, v);
+}
+
+static void fm6_chart_viewport(uint8_t *game)
+{
+    static const uint8_t pad[8] = { 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc };
+    void *fn = (void *)fm6_chart_vcall;
+    uint8_t code[18] = { 0xc5, 0xf8, 0x29, 0x44, 0x24, 0x30,      /* vmovaps [rsp+0x30], xmm0 */
+                         0xc5, 0xfb, 0x11, 0x4c, 0x24, 0x40,      /* vmovsd [rsp+0x40], xmm1 */
+                         0xff, 0x15 };                            /* call [rip -> slot] */
+    int32_t rel;
+    if (!bytes_match(game + FM6_CHART_VP, "488b01c5f829442430c5fb114c2440ff5030", 18) ||
+        memcmp(game + FM6_CHART_SLOT, pad, 8)) {
+        wlog("FM6: resolucao: site do viewport dos graficos da UI nao confere, ignorado");
+        return;
+    }
+    write_mem(game + FM6_CHART_SLOT, &fn, 8);
+    rel = (int32_t)(FM6_CHART_SLOT - (FM6_CHART_VP + 18));   memcpy(code + 14, &rel, 4);
+    write_mem(game + FM6_CHART_VP, code, sizeof code);
+    wlog("FM6: resolucao: viewport dos graficos da UI escalado");
+}
+
 static void game_resolution(uint8_t *game, const ResSites *rs, uint32_t height, uint32_t width)
 {
     if (!height && !width) return;
@@ -506,6 +546,7 @@ static void fm5_resolution(uint8_t *game, uint32_t height, uint32_t width)
 static void fm6_resolution(uint8_t *game, uint32_t height, uint32_t width)
 {
     game_resolution(game, &fm6_res_sites, height, width);
+    if (ui_game == game && ui_sites == &fm6_res_sites) fm6_chart_viewport(game);
 }
 
 /* FPS (PASSO 10): o Present do FM5 (Frame11 slot 0x138 = 0x7146e0) le [frame+0xa0]: 0 -> SyncInterval 1 (60 fps),

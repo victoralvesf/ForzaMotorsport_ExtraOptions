@@ -528,6 +528,14 @@ static void ui6_fake_setvp(void *obj, uint32_t n, const float *vp, uintptr_t r9)
     memcpy(ui6_seen, vp, sizeof ui6_seen);
 }
 
+static int32_t chart_seen[6];
+static uintptr_t chart_fake_setvp(void *obj, const int32_t *r)
+{
+    (void)obj;
+    memcpy(chart_seen, r, sizeof chart_seen);
+    return 0;
+}
+
 TEST(fm6_resolution_patches_exe)
 {
     uint8_t *game = pe_map(FM6_EXE, NULL);
@@ -549,6 +557,19 @@ TEST(fm6_resolution_patches_exe)
                                                                       (void *)fm5_ui_vcall))(obj, 1, vp, 0);
     CHECK(ui6_seen[2] == 2560.0f && ui6_seen[3] == 1440.0f && ui6_seen[0] == 0.0f && ui6_seen[5] == 1.0f);
     CHECK(vp[2] == 1920.0f);
+    /* grafico da UI (relacao de marchas): retangulo inteiro do renderizador escalado */
+    CHECK_HEX(game + 0xcff5c5, "c5f829442430" "c5fb114c2440" "ff1549" "7f30ff");   /* call [rip -> 0x7520] */
+    CHECK(*(void **)(game + 0x7520) == (void *)fm6_chart_vcall);
+    {
+        static const int32_t rect[6] = { 1406, 695, 397, 170, 0, 0x3f800000 };
+        void *vt[7] = { 0 }, *robj = vt;
+        vt[0] = vt;                                  /* [obj] = vtable = o proprio array */
+        vt[6] = (void *)chart_fake_setvp;
+        fm6_chart_vcall(robj, rect);
+        CHECK(chart_seen[0] == 1875 && chart_seen[1] == 927 && chart_seen[2] == 529 && chart_seen[3] == 226);
+        CHECK(chart_seen[5] == 0x3f800000 && rect[0] == 1406);
+        CHECK(log_has("FM6: grafico da UI 1406,695 397x170 -> 1875,927 529x226"));
+    }
     /* 2a vez: bytes ja trocados -> nada muda */
     fm6_resolution(game, 1440, 2560);
     CHECK(log_has("FM6: resolucao: site da altura 0x552dff nao confere, ignorado"));
