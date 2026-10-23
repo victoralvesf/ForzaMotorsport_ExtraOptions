@@ -52,15 +52,18 @@ modified on disk**, and FH2 keeps working as before.
    azimuth.exe "--game=C:\YourGamesFolder\Forza Motorsport 6" --skip-launcher
    ```
 
-The launcher's graphics settings (resolution, frame rate, etc.) apply only to FM5. FM6 does
-not support them for now.
+The launcher's graphics settings (resolution, frame rate, etc.) apply to FM5. On FM6 only the
+**frame rate** is applied for now: menus, pre-race, post-race and replays run at the chosen
+rate instead of dropping to 30, and rates above 60 (120, 144, 180...) work up to your
+monitor's refresh rate, with the game speed unchanged.
 
 ## Status and known issues
 
 - **Forza Motorsport 5:** menus, races, garage, DLC and Marketplace work.
-- **Forza Motorsport 6 (initial support):** boots, menus, video, audio and races work at about
-  60 fps. Known issues:
-  - the launcher's graphics settings are not applied (see above);
+- **Forza Motorsport 6 (initial support):** boots, menus, video, audio and races work, at the
+  launcher's frame rate (60 or higher). Known issues:
+  - the launcher's graphics settings other than frame rate are not applied (see above);
+  - very heavy scenes (e.g. some pre-race shots) can still drop below the chosen frame rate;
   - turning on the RivaTuner (RTSS) overlay can crash the game ("device removed").
 - Rivals and online modes need Xbox Live and do not work in either game.
 
