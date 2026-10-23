@@ -52,8 +52,8 @@ modified on disk**, and FH2 keeps working as before.
    azimuth.exe "--game=C:\YourGamesFolder\Forza Motorsport 6" --skip-launcher
    ```
 
-The launcher's graphics settings (resolution, frame rate, etc.) apply to FM5. On FM6 only the
-**frame rate** is applied for now: menus, pre-race, post-race and replays run at the chosen
+The launcher's graphics settings (resolution, frame rate, etc.) apply to FM5. On FM6 the
+**resolution** and the **frame rate** are applied for now. With the frame rate, menus, pre-race, post-race and replays run at the chosen
 rate instead of dropping to 30, and rates above 60 (120, 144, 180...) work up to your
 monitor's refresh rate, with the game speed unchanged.
 

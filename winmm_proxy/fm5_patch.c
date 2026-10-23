@@ -56,6 +56,12 @@ static const uint32_t fm5_splash_intro_cmps[] = { 0x13a33e, 0x13a825, 0x13b9ce }
 #define FM5_RES_UI_SIZE    0x8e4da5  /* tamanho da UI = float([r15+8]), float([r15+0xc]) -> [rbp+0x6f/0x73] (36 bytes) */
 
 /* ---- RVAs no exe do FM6 (Monument 1.0.0.44) ---- */
+/* resolucao (mesmos sites do FM5, ver fm6_resolution) */
+#define FM6_RES_HEIGHT     0x552dff  /* mov dword [rbx+0x2578], 0x438 */
+#define FM6_RES_WIDTH      0x55c690  /* vmulss ; vmulss ; vcvttss2si rdx,xmm2 (+0x10) */
+#define FM6_RES_UI_SIZE    0x9faf52  /* float([rbx+8]), float([rbx+0xc]) -> [rbp+0x38/0x3c] (34 bytes) */
+#define FM6_UI_VP_CALL     0x127ea5  /* ff 90 38 05 00 00  call [rax+0x538] (viewport) */
+#define FM6_UI_SLOT        0x1287d8  /* padding cc entre 0x1287d8 e 0x1287e0 */
 /* SkipIntro: opcao "disablesplashintro" = byte [opcoes+0x30d7] (registrada em 0xa3ae3b). Sem imediato para trocar:
    no init 0xa06964 e "cmp [r12+0x30d7],sil ; je" (esi = 0 desde 0xa06a46) -> je vira nop (= opcao ligada);
    no logo parade 0xa08e78 (Health_Disclaimer/forzatech) e "cmp [rax+0x30d7],r15b ; jne" (r15 = 0) -> jmp */
@@ -360,96 +366,146 @@ static void implicit_apu_heap(const char *game_name)
 }
 
 /* Resolucao do launcher (PatchOptions +4 altura, +8 largura; 0 = nao mexe), como 0x14003e720 faz no FH2:
-   o imediato 1080 vira a altura; com largura != 0 o vcvttss2si rbp,xmm2 (largura = altura * 16/9) vira mov ebp,
-   largura. Aspecto != 16:9: a UI (sites +0x130..+0x1c8 do FH2) ainda nao e ajustada no FM5. */
-/* Viewport da UI (cont. 3): 0xb60ca0 le o tamanho da UI (1920x1080, fixo acima), monta a projecao ortografica com
-   ele e usa o MESMO tamanho no viewport ([rdi+0x18] = contexto, rax = objeto: call [rax+0x188] = ponteiro de
-   RSSetViewports guardado NO objeto (tabela rapida do XDK, nao a vtable) em 0xb60db8,
-   {0,0,w,h,0,1} em rsp+0x30; o call [rax+0x130] seguinte e OMSetRenderTargets) -> a UI ficava num quadrado
-   1920x1080 no canto. A chamada vira call [rip -> slot no padding 0xb60c98] = fm5_ui_vcall, que escala o viewport. */
+   o imediato 1080 vira a altura; com largura != 0 o vcvttss2si (largura = altura * 16/9) vira mov r32, largura.
+   Aspecto != 16:9: a UI (sites +0x130..+0x1c8 do FH2) ainda nao e ajustada. Sites por jogo em ResSites. */
+/* Viewport da UI (cont. 3): o renderizador da UI le o tamanho da UI (1920x1080, fixo abaixo), monta a projecao
+   ortografica com ele e usa o MESMO tamanho no viewport ([rdi+0x18] = contexto, rax = objeto: call [rax+off] =
+   ponteiro de RSSetViewports guardado NO objeto (tabela rapida do XDK, nao a vtable)) -> a UI ficava num quadrado
+   1920x1080 no canto. A chamada vira call [rip -> slot no padding cc] = fm5_ui_vcall, que escala o viewport.
+   FM5: 0xb60ca0, call [rax+0x188] em 0xb60db8, {0,0,w,h,0,1} em rsp+0x30 (o call [rax+0x130] seguinte e
+   OMSetRenderTargets). FM6: 0x127d90, call [rax+0x538] em 0x127ea5, viewport no membro [rdi+0x130]
+   (OMSetRenderTargets = [rax+0x4e0]). */
 #define FM5_UI_VP_CALL     0xb60db8  /* ff 90 88 01 00 00  call [rax+0x188] (viewport) */
 #define FM5_UI_SLOT        0xb60c98  /* padding cc entre 0xb60c91 e 0xb60ca0 */
+
+typedef struct {
+    const char *tag;
+    uint32_t height;                 /* mov dword [rbx+X], 0x438 (opcao defaultverticalresolution) */
+    const char *height_orig;
+    uint32_t width;                  /* vmulss ; vmulss ; vcvttss2si r64,xmm2 (+0x10) */
+    const char *width_orig;
+    uint8_t width_mov;               /* opcode de mov r32, imm32 no registro do vcvttss2si */
+    uint32_t ui_size;                /* float([r+8]), float([r+0xc]) -> os 2 floats passados ao setter da UI */
+    const char *ui_size_orig;
+    const uint8_t *ui_size_code;
+    uint32_t ui_size_len;
+    uint32_t vp_call;                /* call [rax+off] do viewport da UI */
+    const char *vp_call_orig;
+    uint32_t vp_off;
+    uint32_t vp_slot;                /* 8 bytes cc de padding (ponteiro p/ fm5_ui_vcall) */
+} ResSites;
+
+static const uint8_t fm5_ui_size_code[36] = {
+    0xb8, 0x00, 0x00, 0xf0, 0x44,  0x89, 0x45, 0x6f,       /* mov eax, 1920.0f ; mov [rbp+0x6f], eax */
+    0xb8, 0x00, 0x00, 0x87, 0x44,  0x89, 0x45, 0x73,       /* mov eax, 1080.0f ; mov [rbp+0x73], eax */
+    0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,        /* nop (8) */
+    0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,        /* nop (8) */
+    0x0f, 0x1f, 0x40, 0x00 };                              /* nop (4) */
+static const uint8_t fm6_ui_size_code[34] = {
+    0xb8, 0x00, 0x00, 0xf0, 0x44,  0x89, 0x45, 0x38,       /* mov eax, 1920.0f ; mov [rbp+0x38], eax */
+    0xb8, 0x00, 0x00, 0x87, 0x44,  0x89, 0x45, 0x3c,       /* mov eax, 1080.0f ; mov [rbp+0x3c], eax */
+    0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,        /* nop (8) */
+    0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,        /* nop (8) */
+    0x66, 0x90 };                                          /* nop (2) */
+
+static const ResSites fm5_res_sites = {
+    "FM5", FM5_RES_HEIGHT, "c7836025000038040000",
+    FM5_RES_WIDTH, "c5fa590d0b2aba01c5f259153f22ba01c4e1fa2cea", 0xbd,           /* rbp -> mov ebp */
+    FM5_RES_UI_SIZE, "418b4708c5f857c0c4e1fa2ac0c5fa11456f418b470cc5f057c9c4e1f22ac8c5fa114d73",
+    fm5_ui_size_code, sizeof fm5_ui_size_code, FM5_UI_VP_CALL, "ff9088010000", 0x188, FM5_UI_SLOT };
+static const ResSites fm6_res_sites = {
+    "FM6", FM6_RES_HEIGHT, "c7837825000038040000",
+    FM6_RES_WIDTH, "c5fa590d48cedb00c5f25915b0c8db00c4e1fa2cd2", 0xba,           /* rdx -> mov edx */
+    FM6_RES_UI_SIZE, "8b4308c5f857c0c4e1fa2ac0c5fa1145388b430cc5f057c9c4e1f22ac8c5fa114d3c",
+    fm6_ui_size_code, sizeof fm6_ui_size_code, FM6_UI_VP_CALL, "ff9038050000", 0x538, FM6_UI_SLOT };
+
 static uint8_t *ui_game;
+static const ResSites *ui_sites = &fm5_res_sites;
 static float ui_sx = 1, ui_sy = 1;
 
 static void fm5_ui_vcall(void *obj, uint32_t n, void *p, uintptr_t r9)
 {
     typedef void (*vc_fn)(void *, uint32_t, void *, uintptr_t);
     static volatile LONG logged_vp;
+    const ResSites *rs = ui_sites;
     uintptr_t ret = (uintptr_t)__builtin_return_address(0) - (uintptr_t)ui_game;
-    void **tab = (void **)obj;                   /* call [rax+0x188] com rax = objeto: ponteiro NO objeto (tabela rapida do XDK) */
-    if (ret == FM5_UI_VP_CALL + 6 && p) {
+    void **tab = (void **)obj;                   /* call [rax+off] com rax = objeto: ponteiro NO objeto (tabela rapida do XDK) */
+    if (ret == rs->vp_call + 6 && p) {
         float v[6];
         memcpy(v, p, sizeof v);
         v[0] *= ui_sx; v[2] *= ui_sx; v[1] *= ui_sy; v[3] *= ui_sy;
         if (InterlockedIncrement(&logged_vp) <= 2)
-            wlog("FM5: UI viewport %.0f,%.0f %.0fx%.0f -> %.0f,%.0f %.0fx%.0f (alvo game+%#llx)", ((float *)p)[0],
-                 ((float *)p)[1], ((float *)p)[2], ((float *)p)[3], v[0], v[1], v[2], v[3],
-                 (unsigned long long)((uintptr_t)tab[0x188 / 8] - (uintptr_t)ui_game));
-        ((vc_fn)tab[0x188 / 8])(obj, n, v, r9);
+            wlog("%s: UI viewport %.0f,%.0f %.0fx%.0f -> %.0f,%.0f %.0fx%.0f (alvo game+%#llx)", rs->tag,
+                 ((float *)p)[0], ((float *)p)[1], ((float *)p)[2], ((float *)p)[3], v[0], v[1], v[2], v[3],
+                 (unsigned long long)((uintptr_t)tab[rs->vp_off / 8] - (uintptr_t)ui_game));
+        ((vc_fn)tab[rs->vp_off / 8])(obj, n, v, r9);
         return;
     }
-    wlog("FM5: fm5_ui_vcall chamado de game+%#llx inesperado", (unsigned long long)ret);
+    wlog("%s: fm5_ui_vcall chamado de game+%#llx inesperado", rs->tag, (unsigned long long)ret);
 }
 
-static void fm5_ui_viewport(uint8_t *game, uint32_t w, uint32_t h)
+static void fm5_ui_viewport(uint8_t *game, const ResSites *rs, uint32_t w, uint32_t h)
 {
     static const uint8_t pad[8] = { 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc };
     void *fn = (void *)fm5_ui_vcall;
     uint8_t code[6] = { 0xff, 0x15 };
     int32_t rel;
-    if (!bytes_match(game + FM5_UI_VP_CALL, "ff9088010000", 6) || memcmp(game + FM5_UI_SLOT, pad, 8)) {
-        wlog("FM5: resolucao: sites do viewport da UI nao conferem, ignorado");
+    if (!bytes_match(game + rs->vp_call, rs->vp_call_orig, 6) || memcmp(game + rs->vp_slot, pad, 8)) {
+        wlog("%s: resolucao: sites do viewport da UI nao conferem, ignorado", rs->tag);
         return;
     }
-    ui_game = game; ui_sx = w / 1920.0f; ui_sy = h / 1080.0f;
-    write_mem(game + FM5_UI_SLOT, &fn, 8);
-    rel = (int32_t)(FM5_UI_SLOT - (FM5_UI_VP_CALL + 6));   memcpy(code + 2, &rel, 4); write_mem(game + FM5_UI_VP_CALL, code, 6);
-    wlog("FM5: resolucao: viewport da UI escalado para %ux%u", w, h);
+    ui_game = game; ui_sites = rs; ui_sx = w / 1920.0f; ui_sy = h / 1080.0f;
+    write_mem(game + rs->vp_slot, &fn, 8);
+    rel = (int32_t)(rs->vp_slot - (rs->vp_call + 6));   memcpy(code + 2, &rel, 4); write_mem(game + rs->vp_call, code, 6);
+    wlog("%s: resolucao: viewport da UI escalado para %ux%u", rs->tag, w, h);
+}
+
+static void game_resolution(uint8_t *game, const ResSites *rs, uint32_t height, uint32_t width)
+{
+    if (!height && !width) return;
+    if (height && width && (uint64_t)width * 9 != (uint64_t)height * 16)
+        wlog("%s: resolucao: aspecto %ux%u != 16:9, UI nao ajustada (so a cena)", rs->tag, width, height);
+    if (height) {
+        if (!bytes_match(game + rs->height, rs->height_orig, 10))
+            wlog("%s: resolucao: site da altura %#x nao confere, ignorado", rs->tag, rs->height);
+        else {
+            write_mem(game + rs->height + 6, &height, 4);
+            wlog("%s: resolucao: altura %u", rs->tag, height);
+        }
+    }
+    if (width) {
+        uint8_t code[5] = { rs->width_mov };
+        if (!bytes_match(game + rs->width, rs->width_orig, 21))
+            wlog("%s: resolucao: site da largura %#x nao confere, ignorado", rs->tag, rs->width);
+        else {
+            memcpy(code + 1, &width, 4);
+            write_mem(game + rs->width + 0x10, code, sizeof code);
+            wlog("%s: resolucao: largura %u", rs->tag, width);
+        }
+    }
+    /* = "UI size from the display" do FH2: o layout da UI e feito para 1920x1080; com o tamanho do render a UI
+       ficava no canto superior esquerdo (cont. 2). Forca 1920.0/1080.0 nos dois floats passados ao setter da UI. */
+    if (!bytes_match(game + rs->ui_size, rs->ui_size_orig, rs->ui_size_len))
+        wlog("%s: resolucao: site do tamanho da UI %#x nao confere, ignorado", rs->tag, rs->ui_size);
+    else {
+        write_mem(game + rs->ui_size, rs->ui_size_code, rs->ui_size_len);
+        wlog("%s: resolucao: UI fixa em 1920x1080", rs->tag);
+        fm5_ui_viewport(game, rs, width ? width : (uint32_t)(((uint64_t)(height ? height : 1080) * 16 + 4) / 9),
+                        height ? height : 1080);
+    }
 }
 
 static void fm5_resolution(uint8_t *game, uint32_t height, uint32_t width)
 {
-    if (!height && !width) return;
-    if (height && width && (uint64_t)width * 9 != (uint64_t)height * 16)
-        wlog("FM5: resolucao: aspecto %ux%u != 16:9, UI nao ajustada (so a cena)", width, height);
-    if (height) {
-        if (!bytes_match(game + FM5_RES_HEIGHT, "c7836025000038040000", 10))
-            wlog("FM5: resolucao: site da altura %#x nao confere, ignorado", FM5_RES_HEIGHT);
-        else {
-            write_mem(game + FM5_RES_HEIGHT + 6, &height, 4);
-            wlog("FM5: resolucao: altura %u", height);
-        }
-    }
-    if (width) {
-        uint8_t code[5] = { 0xbd };
-        if (!bytes_match(game + FM5_RES_WIDTH, "c5fa590d0b2aba01c5f259153f22ba01c4e1fa2cea", 21))
-            wlog("FM5: resolucao: site da largura %#x nao confere, ignorado", FM5_RES_WIDTH);
-        else {
-            memcpy(code + 1, &width, 4);
-            write_mem(game + FM5_RES_WIDTH + 0x10, code, sizeof code);
-            wlog("FM5: resolucao: largura %u", width);
-        }
-    }
-    /* = "UI size from the display" do FH2: o layout da UI e feito para 1920x1080; com o tamanho do render a UI
-       ficava no canto superior esquerdo (cont. 2). Forca 1920.0/1080.0 nos dois floats passados a [vtable+0x78]. */
-    {
-        static const uint8_t code[36] = {
-            0xb8, 0x00, 0x00, 0xf0, 0x44,  0x89, 0x45, 0x6f,       /* mov eax, 1920.0f ; mov [rbp+0x6f], eax */
-            0xb8, 0x00, 0x00, 0x87, 0x44,  0x89, 0x45, 0x73,       /* mov eax, 1080.0f ; mov [rbp+0x73], eax */
-            0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,        /* nop (8) */
-            0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00,        /* nop (8) */
-            0x0f, 0x1f, 0x40, 0x00 };                              /* nop (4) */
-        if (!bytes_match(game + FM5_RES_UI_SIZE,
-                         "418b4708c5f857c0c4e1fa2ac0c5fa11456f418b470cc5f057c9c4e1f22ac8c5fa114d73", 36))
-            wlog("FM5: resolucao: site do tamanho da UI %#x nao confere, ignorado", FM5_RES_UI_SIZE);
-        else {
-            write_mem(game + FM5_RES_UI_SIZE, code, sizeof code);
-            wlog("FM5: resolucao: UI fixa em 1920x1080");
-            fm5_ui_viewport(game, width ? width : (uint32_t)(((uint64_t)(height ? height : 1080) * 16 + 4) / 9),
-                            height ? height : 1080);
-        }
-    }
+    game_resolution(game, &fm5_res_sites, height, width);
+}
+
+/* FM6: mesmos sites. Altura no construtor das opcoes ([rbx+0x2578] = defaultverticalresolution); largura = rdx do
+   [r9+0x30] que cria o render (0x55c654); setter do tamanho da UI = objeto global 0x1d86d30 slot 0x80 (getter 0x88,
+   lido pelo renderizador da UI 0x127d90). */
+static void fm6_resolution(uint8_t *game, uint32_t height, uint32_t width)
+{
+    game_resolution(game, &fm6_res_sites, height, width);
 }
 
 /* FPS (PASSO 10): o Present do FM5 (Frame11 slot 0x138 = 0x7146e0) le [frame+0xa0]: 0 -> SyncInterval 1 (60 fps),
@@ -1201,6 +1257,8 @@ static void hook_apply_patches(void *image, const void *options)
         fm6_graphics_protect_install();
         /* audio_fm6_game_hooks(game): desligado - suspeito de travar o carregamento (17_fm6.txt PASSO 53) */
         fm6_patches(game);
+        fm6_resolution(game, *(const uint32_t *)((const uint8_t *)options + 4),
+                       *(const uint32_t *)((const uint8_t *)options + 8));
         fm6_frame_rate(game, *(const uint32_t *)((const uint8_t *)options + 0xc));
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;

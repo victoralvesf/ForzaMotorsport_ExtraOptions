@@ -520,6 +520,56 @@ TEST(fm6_frame_rate_patches_exe)
     dump_log_on_fail();
 }
 
+/* exe real do FM6: resolucao 2560x1440 (altura padrao, largura, UI fixa em 1920x1080 e viewport da UI escalado) */
+static float ui6_seen[6];
+static void ui6_fake_setvp(void *obj, uint32_t n, const float *vp, uintptr_t r9)
+{
+    (void)obj; (void)n; (void)r9;
+    memcpy(ui6_seen, vp, sizeof ui6_seen);
+}
+
+TEST(fm6_resolution_patches_exe)
+{
+    uint8_t *game = pe_map(FM6_EXE, NULL);
+    void *obj[0x540 / 8] = { 0 };
+    static const float vp[6] = { 0, 0, 1920, 1080, 0, 1 };
+    if (!game) { test_skip("exe do FM6 ausente"); return; }
+    log_capture();
+    fm6_resolution(game, 1440, 2560);
+    CHECK(!log_has("nao confere"));
+    CHECK_HEX(game + 0x552dff, "c78378250000a0050000");                  /* mov dword [rbx+0x2578], 1440 */
+    CHECK_HEX(game + 0x55c6a0, "ba000a0000");                            /* mov edx, 2560 */
+    CHECK_HEX(game + 0x9faf52, "b80000f044894538" "b80000874489453c" "0f1f840000000000" "0f1f840000000000" "6690");
+    CHECK_HEX(game + 0x9faf74, "488b01");                                /* depois: mov rax,[rcx] intacto */
+    CHECK_HEX(game + 0x127ea5, "ff152d090000");                          /* call [rip -> 0x1287d8] */
+    CHECK(*(void **)(game + 0x1287d8) == (void *)fm5_ui_vcall);
+    CHECK(log_has("FM6: resolucao: viewport da UI escalado para 2560x1440"));
+    obj[0x538 / 8] = (void *)ui6_fake_setvp;
+    ((void (*)(void *, uint32_t, const float *, uintptr_t))t_call_from(game + 0x127ea5 + 6,
+                                                                      (void *)fm5_ui_vcall))(obj, 1, vp, 0);
+    CHECK(ui6_seen[2] == 2560.0f && ui6_seen[3] == 1440.0f && ui6_seen[0] == 0.0f && ui6_seen[5] == 1.0f);
+    CHECK(vp[2] == 1920.0f);
+    /* 2a vez: bytes ja trocados -> nada muda */
+    fm6_resolution(game, 1440, 2560);
+    CHECK(log_has("FM6: resolucao: site da altura 0x552dff nao confere, ignorado"));
+    pe_unmap(game);
+    /* so a altura (720): largura = altura * 16/9 do proprio jogo */
+    game = pe_map(FM6_EXE, NULL);
+    fm6_resolution(game, 720, 0);
+    CHECK_HEX(game + 0x552dff, "c78378250000d0020000");
+    CHECK_HEX(game + 0x55c6a0, "c4e1fa2cd2");
+    CHECK(ui_sx > 0.666f && ui_sx < 0.667f && ui_sy > 0.666f && ui_sy < 0.667f);
+    pe_unmap(game);
+    /* 0x0: nada */
+    game = pe_map(FM6_EXE, NULL);
+    fm6_resolution(game, 0, 0);
+    CHECK_HEX(game + 0x552dff, "c7837825000038040000");
+    CHECK_HEX(game + 0x127ea5, "ff9038050000");
+    pe_unmap(game);
+    ui_sites = &fm5_res_sites;
+    dump_log_on_fail();
+}
+
 /* medicao de fps do FM6: 1 s de quadros a 30 fps (Present 1 ms, vline 20 ms) loga os tempos medios */
 static uintptr_t fake_vcall(void *a, void *b, void *c, void *d) { (void)a; (void)b; (void)c; (void)d; return 7; }
 
