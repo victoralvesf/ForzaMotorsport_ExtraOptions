@@ -116,13 +116,13 @@ void fm5_car_detail(uint8_t *game, int level)
                                         FM5_GET_CAR_FOCUS_LOD, FM5_GET_CAR_NONFOCUS_LOD };
     size_t i, n;
     if (level == 1 || level < 0 || level > 3) {
-        wlog("FM5: car_detail %d (%s): LODs originais", level, level_name(level));
+        wlog("FM5: car_detail %d (%s): original LODs", level, level_name(level));
         return;
     }
     n = level >= 2 ? 4 : 2;   /* low so reduz ranking/distancias; min/max ficam como no jogo */
     for (i = 0; i < n; i++)
         if (!bytes_match(game + getters[i], GETTER_PROLOGUE, GETTER_STOLEN)) {
-            wlog("FM5: car_detail: getter %#x nao confere, ignorado", getters[i]);
+            wlog("FM5: car_detail: getter %#x does not match, ignored", getters[i]);
             return;
         }
     car_level = level;
@@ -144,9 +144,9 @@ void fm5_car_detail(uint8_t *game, int level)
             p[9] = 0x90; p[10] = 0x90;
             VirtualProtect(p + 9, 2, old, &old);
             FlushInstructionCache(GetCurrentProcess(), p + 9, 2);
-        } else wlog("FM5: car_detail: site %#x (+1 sem foco) nao confere, ignorado", FM5_CAR_UNFOCUSED_INC);
+        } else wlog("FM5: car_detail: site %#x (+1 non-focus) does not match, ignored", FM5_CAR_UNFOCUSED_INC);
     }
-    wlog("FM5: car_detail %d (%s): getters de LOD dos carros com hook", level, level_name(level));
+    wlog("FM5: car_detail %d (%s): car LOD getters hooked", level, level_name(level));
 }
 
 /*
@@ -189,12 +189,12 @@ static int get_hidef(void *mgr, int idx)
 void fm5_shadows(uint8_t *game, int level)
 {
     if (level == 1 || level < 0 || level > 3) {
-        wlog("FM5: shadows %d (%s): sombras originais", level, level_name(level));
+        wlog("FM5: shadows %d (%s): original shadows", level, level_name(level));
         return;
     }
     if (!bytes_match(game + FM5_GET_SHADOW_MAP_RES, GETTER_PROLOGUE, GETTER_STOLEN) ||
         (level >= 2 && !bytes_match(game + FM5_GET_MAX_HIDEF_SHADOWS, GETTER_PROLOGUE, GETTER_STOLEN))) {
-        wlog("FM5: shadows: getters nao conferem, ignorado");
+        wlog("FM5: shadows: getters do not match, ignored");
         return;
     }
     shadow_level = level;
@@ -203,7 +203,7 @@ void fm5_shadows(uint8_t *game, int level)
     if (level >= 2)
         hook_at(game + FM5_GET_MAX_HIDEF_SHADOWS, GETTER_PROLOGUE, GETTER_STOLEN, (void *)get_hidef,
                 (void **)&orig_hidef);
-    wlog("FM5: shadows %d (%s): getters de sombra com hook", level, level_name(level));
+    wlog("FM5: shadows %d (%s): shadow getters hooked", level, level_name(level));
 }
 
 /*
@@ -258,7 +258,7 @@ static int patch_imm_sites(uint8_t *game, const ImmSite *s, size_t n, uint32_t n
     size_t i;
     for (i = 0; i < n; i++)
         if (!bytes_match(game + s[i].rva, s[i].orig, s[i].len)) {
-            wlog("FM5: reflections: %s: site %#x nao confere, ignorado", what, s[i].rva);
+            wlog("FM5: reflections: %s: site %#x does not match, ignored", what, s[i].rva);
             return 0;
         }
     for (i = 0; i < n; i++) {
@@ -311,31 +311,31 @@ void fm5_reflections(uint8_t *game, int level)
     static const uint32_t cube[] = { 256, 512, 1024, 2048 };
     static const uint32_t mirror_num[] = { 1, 1, 2, 3 }, mirror_den[] = { 2, 1, 1, 1 };
     if (level == 1 || level < 0 || level > 3) {
-        wlog("FM5: reflections %d (%s): reflexos originais", level, level_name(level));
+        wlog("FM5: reflections %d (%s): original reflections", level, level_name(level));
         return;
     }
     refl_level = level;
     if (patch_imm_sites(game, cube_sites, sizeof cube_sites / sizeof *cube_sites, cube[level], 512, "cubemap"))
         wlog("FM5: reflections: cubemap 512 -> %u", cube[level]);
     if (patch_imm_sites(game, mirror_sites, sizeof mirror_sites / sizeof *mirror_sites, mirror_num[level],
-                        mirror_den[level], "espelhos"))
-        wlog("FM5: reflections: espelhos 768x256 -> %ux%u", 768 * mirror_num[level] / mirror_den[level],
+                        mirror_den[level], "mirrors"))
+        wlog("FM5: reflections: mirrors 768x256 -> %ux%u", 768 * mirror_num[level] / mirror_den[level],
              256 * mirror_num[level] / mirror_den[level]);
     if (bytes_match(game + FM5_GET_WINDSHIELD_RES, GETTER_PROLOGUE, GETTER_STOLEN))
         hook_at(game + FM5_GET_WINDSHIELD_RES, GETTER_PROLOGUE, GETTER_STOLEN, (void *)get_windshield,
                 (void **)&orig_windshield);
-    else wlog("FM5: reflections: getter WindshieldReflectionResolution nao confere, ignorado");
+    else wlog("FM5: reflections: WindshieldReflectionResolution getter does not match, ignored");
     if (level >= 2) {
         if (bytes_match(game + FM5_GET_HALF_RATE_MIRROR, GETTER_PROLOGUE, GETTER_STOLEN))
             hook_at(game + FM5_GET_HALF_RATE_MIRROR, GETTER_PROLOGUE, GETTER_STOLEN, (void *)get_half_rate,
                     (void **)&orig_half_rate);
-        else wlog("FM5: reflections: getter HalfRateMirror nao confere, ignorado");
+        else wlog("FM5: reflections: HalfRateMirror getter does not match, ignored");
         if (bytes_match(game + FM5_GET_ENVMAP_FREQ, ENVMAP_PROLOGUE, GETTER_STOLEN))
             hook_at(game + FM5_GET_ENVMAP_FREQ, ENVMAP_PROLOGUE, GETTER_STOLEN, (void *)get_envmap,
                     (void **)&orig_envmap);
-        else wlog("FM5: reflections: getter EnvMapFrequencyScale nao confere, ignorado");
+        else wlog("FM5: reflections: EnvMapFrequencyScale getter does not match, ignored");
     }
-    wlog("FM5: reflections %d (%s): aplicado", level, level_name(level));
+    wlog("FM5: reflections %d (%s): applied", level, level_name(level));
 }
 
 /*
@@ -456,13 +456,13 @@ void fm6_car_detail(uint8_t *game, int level)
     static void *const dist_hooks[] = { (void *)fm6_get_dist0, (void *)fm6_get_dist1, (void *)fm6_get_dist2 };
     int i;
     if (level == 1 || level < 0 || level > 3) {
-        wlog("FM6: car_detail %d (%s): LODs originais", level, level_name(level));
+        wlog("FM6: car_detail %d (%s): original LODs", level, level_name(level));
         return;
     }
     for (i = 0; i < 7; i++) {
         uint32_t rva = i < 3 ? thr[i] : i < 6 ? dist[i - 3] : FM6_GET_CAR_FOCUS_LOD;
         if (!bytes_match(game + rva, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN)) {
-            wlog("FM6: car_detail: getter %#x nao confere, ignorado", rva);
+            wlog("FM6: car_detail: getter %#x does not match, ignored", rva);
             return;
         }
     }
@@ -474,5 +474,5 @@ void fm6_car_detail(uint8_t *game, int level)
     if (level >= 2)
         hook_at(game + FM6_GET_CAR_FOCUS_LOD, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN, (void *)fm6_get_focus,
                 (void **)&fm6_orig_focus);
-    wlog("FM6: car_detail %d (%s): getters de LOD dos carros com hook", level, level_name(level));
+    wlog("FM6: car_detail %d (%s): car LOD getters hooked", level, level_name(level));
 }

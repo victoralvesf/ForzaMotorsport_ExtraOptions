@@ -113,8 +113,8 @@ static void stats_release(UINT32 frames, DWORD flags, const BYTE *buf)
         if (pk > st.peak) st.peak = pk;
     }
     if (log_point(n))
-        wlog("audio FM6: ReleaseBuffer #%ld (%u quadros, flags %#lx): total %llu quadros, %llu com flag SILENT, "
-             "%llu com amostra != 0, pico %.4f; GetBuffer %ld (%ld falhas), GetCurrentPadding %ld",
+        wlog("audio FM6: ReleaseBuffer #%ld (%u frames, flags %#lx): total %llu frames, %llu with SILENT flag, "
+             "%llu with sample != 0, peak %.4f; GetBuffer %ld (%ld failures), GetCurrentPadding %ld",
              n, frames, flags, (unsigned long long)st.frames, (unsigned long long)st.frames_silent_flag,
              (unsigned long long)st.frames_sound, st.peak, st.get_calls, st.get_fail, st.padding_calls);
 }
@@ -126,7 +126,7 @@ static long rc_get_buffer(void *self, UINT32 frames, BYTE **data)
     InterlockedIncrement(&st.get_calls);
     if (hr < 0) {
         LONG k = InterlockedIncrement(&st.get_fail);
-        if (log_point(k)) wlog("audio FM6: GetBuffer(%u) falhou #%ld hr=%#lx", frames, k, hr);
+        if (log_point(k)) wlog("audio FM6: GetBuffer(%u) failed #%ld hr=%#lx", frames, k, hr);
     }
     last_buffer = hr >= 0 && data ? *data : NULL;
     last_frames = frames;
@@ -155,11 +155,11 @@ static void hook_render_client(void *rc)
     if (!is_game_rc(rc))
         for (i = 0; i < 4; i++) if (!game_rc[i]) { game_rc[i] = rc; break; }
     if (vt == render_vt) return;
-    if (render_vt) { wlog("audio FM6: outro vtable de render client %p (ja trocado %p), ignorado", vt, render_vt); return; }
+    if (render_vt) { wlog("audio FM6: another render client vtable %p (already swapped %p), ignored", vt, render_vt); return; }
     render_vt = vt;
     swap_slot(vt, RC_GET_BUFFER, (void *)rc_get_buffer, (void **)&orig_get_buffer);
     swap_slot(vt, RC_RELEASE_BUFFER, (void *)rc_release_buffer, (void **)&orig_release_buffer);
-    wlog("audio FM6: IAudioRenderClient %p (vtable %p): GetBuffer/ReleaseBuffer com contagem", rc, vt);
+    wlog("audio FM6: IAudioRenderClient %p (vtable %p): GetBuffer/ReleaseBuffer counted", rc, vt);
 }
 
 static long ac_init(void *self, int share, DWORD flags, int64_t dur, int64_t period, const WAVEFORMATEX *f,
@@ -172,8 +172,8 @@ static long ac_init(void *self, int share, DWORD flags, int64_t dur, int64_t per
         fmt_bits = f->wBitsPerSample;
         fmt_float = fmt_is_float(f);
     }
-    wlog("audio FM6: Initialize(%p modo %d flags %#lx duracao %lld periodo %lld fmt tag %#x %u canais %lu Hz %u bits "
-         "bloco %u%s) hr=%#lx", self, share, flags, (long long)dur, (long long)period, f ? f->wFormatTag : 0,
+    wlog("audio FM6: Initialize(%p mode %d flags %#lx duration %lld period %lld fmt tag %#x %u channels %lu Hz %u bits "
+         "block %u%s) hr=%#lx", self, share, flags, (long long)dur, (long long)period, f ? f->wFormatTag : 0,
          f ? f->nChannels : 0, f ? f->nSamplesPerSec : 0, f ? f->wBitsPerSample : 0, f ? f->nBlockAlign : 0,
          fmt_float ? " float" : "", hr);
     return hr;
@@ -232,7 +232,7 @@ static volatile LONG acp_types[0x20];
 /* repassa 8 argumentos inteiros (os de pilha nas mesmas posicoes) e so loga depois da chamada */
 static void log_ret(const char *what, LONG n, uint64_t ret, void *caller)
 {
-    if (log_point(n)) wlog("audio FM6: %s #%ld -> %#llx (chamador %p)", what, n, (unsigned long long)ret, caller);
+    if (log_point(n)) wlog("audio FM6: %s #%ld -> %#llx (caller %p)", what, n, (unsigned long long)ret, caller);
 }
 
 static uint64_t fm6_sound_init(uint64_t a, uint64_t b, uint64_t c, uint64_t d, uint64_t e, uint64_t f, uint64_t g,
@@ -240,7 +240,7 @@ static uint64_t fm6_sound_init(uint64_t a, uint64_t b, uint64_t c, uint64_t d, u
 {
     static volatile LONG n;
     uint64_t r = orig_sound_init(a, b, c, d, e, f, g, h);
-    log_ret("init do som (game+0x79e0b0)", InterlockedIncrement(&n), r, __builtin_return_address(0));
+    log_ret("sound init (game+0x79e0b0)", InterlockedIncrement(&n), r, __builtin_return_address(0));
     return r;
 }
 
@@ -258,7 +258,7 @@ static uint64_t fm6_acp_setup(uint64_t a, uint64_t b, uint64_t c, uint64_t d, ui
 {
     static volatile LONG n;
     uint64_t r = orig_acp_setup(a, b, c, d, e, f, g, h);
-    log_ret("ACP criado (game+0x6553b0)", InterlockedIncrement(&n), r, __builtin_return_address(0));
+    log_ret("ACP created (game+0x6553b0)", InterlockedIncrement(&n), r, __builtin_return_address(0));
     return r;
 }
 
@@ -267,7 +267,7 @@ static void acp_message(uint8_t *proc, uint32_t *msg)
     if (is_fm6()) {
         uint32_t t = msg[0] < 0x1f ? msg[0] : 0x1f;
         LONG k = InterlockedIncrement(&acp_types[t]);
-        if (log_point(k)) wlog("audio FM6: mensagem ACP tipo %u #%ld", msg[0], k);
+        if (log_point(k)) wlog("audio FM6: ACP message type %u #%ld", msg[0], k);
     }
     orig_acp_message(proc, msg);
 }
@@ -292,7 +292,7 @@ static void fm6_acp_message_layout(uint8_t *msg)
     memcpy(msg + 0x10, &tag, sizeof tag);
     k = InterlockedIncrement(&acp_fixed);
     if (log_point(k))
-        wlog("audio FM6: mensagem ACP 0x10 #%ld (comando tipo %u): tag %#llx em +0x10", k, *(uint32_t *)(msg + 8),
+        wlog("audio FM6: ACP message 0x10 #%ld (command type %u): tag %#llx at +0x10", k, *(uint32_t *)(msg + 8),
              (unsigned long long)tag);
 }
 
@@ -311,7 +311,7 @@ void audio_fm6_game_hooks(uint8_t *game)
                   (void **)&orig_sound_sub);
     ok &= hook_at(game + FM6_ACP_SETUP, "40534881ecc0000000488bd933d2", 14, (void *)fm6_acp_setup,
                   (void **)&orig_acp_setup);
-    wlog("audio FM6: hooks do init do som / ACP %s", ok ? "instalados" : "INCOMPLETOS (bytes nao conferem)");
+    wlog("audio FM6: sound init / ACP hooks %s", ok ? "installed" : "INCOMPLETE (bytes do not match)");
 }
 
 int audio_fm6_install(void)
@@ -324,17 +324,17 @@ int audio_fm6_install(void)
     size_t i, n = sizeof client_slots / sizeof *client_slots;
     for (i = 0; i < n; i++)
         if ((uint8_t *)vt[client_slots[i].slot] != g_base + client_slots[i].rva) {
-            wlog("audio: vtable do FmodAudioClient slot %d = %p (esperado azimuth+%#x), diagnostico nao instalado",
+            wlog("audio: FmodAudioClient vtable slot %d = %p (expected azimuth+%#x), diagnostics not installed",
                  client_slots[i].slot, vt[client_slots[i].slot], client_slots[i].rva);
             return 0;
         }
     if (!hook_at(g_base + RVA_ACP_MESSAGE, "48895c241856574154415641574881ecd0000000", 20, (void *)acp_message,
                  (void **)&orig_acp_message))
-        wlog("audio: processamento de mensagens ACP (%#x) nao confere, sem contagem", RVA_ACP_MESSAGE);
+        wlog("audio: ACP message processing (%#x) does not match, not counted", RVA_ACP_MESSAGE);
     if (!hook_at(g_base + RVA_ACP_POP_MESSAGE, "48895c24104889742418574883ec20", 15, (void *)acp_pop,
                  (void **)&orig_acp_pop))
-        wlog("audio: PopMessage do ACP (%#x) nao confere, mensagem 0x10 do FM6 sem correcao", RVA_ACP_POP_MESSAGE);
+        wlog("audio: ACP PopMessage (%#x) does not match, FM6 message 0x10 not fixed", RVA_ACP_POP_MESSAGE);
     for (i = 0; i < n; i++) swap_slot(vt, client_slots[i].slot, hooks[i], origs[i]);
-    wlog("audio: FmodAudioClient (vtable %#x) com diagnostico do FM6", RVA_FMOD_CLIENT_VT);
+    wlog("audio: FmodAudioClient (vtable %#x) with FM6 diagnostics", RVA_FMOD_CLIENT_VT);
     return 1;
 }

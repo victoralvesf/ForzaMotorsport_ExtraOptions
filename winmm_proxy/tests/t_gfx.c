@@ -82,7 +82,7 @@ TEST(level_names_and_defaults)
     /* default (1) e fora da faixa: nada e lido nem escrito */
     log_capture();
     fm5_car_detail(dummy, 1); fm5_shadows(dummy, 1); fm5_reflections(dummy, -1);
-    CHECK(log_has("LODs originais") && log_has("sombras originais") && log_has("reflexos originais"));
+    CHECK(log_has("original LODs") && log_has("original shadows") && log_has("original reflections"));
 }
 
 /* ------------------------------------------------------------------------ */
@@ -137,7 +137,7 @@ TEST(gfx_levels_on_fm5_exe)
         if (!g) { test_skip(FM5_EXE " ausente"); return; }
         log_capture();
         fm5_car_detail(g, level); fm5_shadows(g, level); fm5_reflections(g, level);
-        CHECK(!log_has("nao confere"));
+        CHECK(!log_has("does not match") && !log_has("do not match"));
         if (level == 1) {
             CHECK_HEX(g + FM5_GET_CAR_LOD_THRESHOLDS, GETTER_PROLOGUE);
             CHECK_HEX(g + FM5_GET_SHADOW_MAP_RES, GETTER_PROLOGUE);
@@ -217,9 +217,9 @@ TEST(fm6_car_detail_on_fm6_exe)
         for (i = 0; i < 7; i++) CHECK_HEX(g + getters[i], "40574883ec4048c7442420feffffff48895c2458");
         log_capture();
         fm6_car_detail(g, level);
-        CHECK(!log_has("nao confere"));
+        CHECK(!log_has("does not match") && !log_has("do not match"));
         if (level == 1) {
-            CHECK(log_has("FM6: car_detail 1 (default): LODs originais"));
+            CHECK(log_has("FM6: car_detail 1 (default): original LODs"));
             CHECK_HEX(g + 0x43fe54, "40574883ec40");
         } else {
             CHECK(hooked_to(g + 0x43fe54, (void *)fm6_get_thr0));

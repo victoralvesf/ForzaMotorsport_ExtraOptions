@@ -476,10 +476,10 @@ static int gg_copy_extent(const char *side, const D3D12_RESOURCE_DESC *r, const 
         const D3D12_SUBRESOURCE_FOOTPRINT *f = &loc->PlacedFootprint.Footprint;
         uint64_t rows = gg_is_bc(f->Format) ? (f->Height + 3) / 4 : f->Height, need;
         if (r->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
-            return wsprintfA(why, "%s: footprint num recurso que nao e buffer (dim %d)", side, r->Dimension), 1;
+            return wsprintfA(why, "%s: footprint on a resource that is not a buffer (dim %d)", side, r->Dimension), 1;
         need = loc->PlacedFootprint.Offset + (uint64_t)f->RowPitch * (rows * (f->Depth ? f->Depth : 1) - 1) + 1;
         if (!f->Width || !f->Height || !f->Depth || need > r->Width)
-            return wsprintfA(why, "%s: footprint fora do buffer (offset %lu pitch %u %ux%ux%u fmt %d, buffer %lu)", side,
+            return wsprintfA(why, "%s: footprint outside the buffer (offset %lu pitch %u %ux%ux%u fmt %d, buffer %lu)", side,
                              (unsigned long)loc->PlacedFootprint.Offset, f->RowPitch, f->Width, f->Height, f->Depth,
                              f->Format, (unsigned long)r->Width), 1;
         *w = f->Width; *h = f->Height; *d = f->Depth;
@@ -489,9 +489,9 @@ static int gg_copy_extent(const char *side, const D3D12_RESOURCE_DESC *r, const 
         uint32_t arr = r->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? 1 : r->DepthOrArraySize;
         uint32_t n = mips * (arr ? arr : 1) * gg_planes(r->Format), i = loc->SubresourceIndex;
         if (r->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER || r->Dimension == D3D12_RESOURCE_DIMENSION_UNKNOWN)
-            return wsprintfA(why, "%s: subrecurso %u num recurso de dim %d", side, i, r->Dimension), 1;
+            return wsprintfA(why, "%s: subresource %u on a resource of dim %d", side, i, r->Dimension), 1;
         if (i >= n)
-            return wsprintfA(why, "%s: subrecurso %u >= %u (%lux%u x%u mips %u fmt %d dim %d)", side, i, n,
+            return wsprintfA(why, "%s: subresource %u >= %u (%lux%u x%u mips %u fmt %d dim %d)", side, i, n,
                              (unsigned long)r->Width, r->Height, r->DepthOrArraySize, r->MipLevels, r->Format,
                              r->Dimension), 1;
         mip = i % mips;
@@ -507,19 +507,19 @@ int gg_copy_check(const D3D12_RESOURCE_DESC *dr, const D3D12_TEXTURE_COPY_LOCATI
                   const D3D12_RESOURCE_DESC *sr, const D3D12_TEXTURE_COPY_LOCATION *src, const D3D12_BOX *box, char *why)
 {
     uint64_t dw, dh, dd, sw, sh, sd, cw, ch, cd;
-    if (gg_copy_extent("destino", dr, dst, &dw, &dh, &dd, why) || gg_copy_extent("origem", sr, src, &sw, &sh, &sd, why))
+    if (gg_copy_extent("destination", dr, dst, &dw, &dh, &dd, why) || gg_copy_extent("source", sr, src, &sw, &sh, &sd, why))
         return 1;
     if (box) {
         if (box->left >= box->right || box->top >= box->bottom || box->front >= box->back) return 0;   /* vazio: no-op */
         if (box->right > sw || box->bottom > sh || box->back > sd)
-            return wsprintfA(why, "origem: box (%u,%u,%u)-(%u,%u,%u) fora de %ux%ux%u", box->left, box->top, box->front,
+            return wsprintfA(why, "source: box (%u,%u,%u)-(%u,%u,%u) outside %ux%ux%u", box->left, box->top, box->front,
                              box->right, box->bottom, box->back, (unsigned)sw, (unsigned)sh, (unsigned)sd), 1;
         cw = box->right - box->left; ch = box->bottom - box->top; cd = box->back - box->front;
     } else {
         cw = sw; ch = sh; cd = sd;
     }
     if (x + cw > dw || y + ch > dh || z + cd > dd)
-        return wsprintfA(why, "destino: regiao (%u,%u,%u) + %ux%ux%u fora de %ux%ux%u", x, y, z, (unsigned)cw,
+        return wsprintfA(why, "destination: region (%u,%u,%u) + %ux%ux%u outside %ux%ux%u", x, y, z, (unsigned)cw,
                          (unsigned)ch, (unsigned)cd, (unsigned)dw, (unsigned)dh, (unsigned)dd), 1;
     return 0;
 }
@@ -582,9 +582,9 @@ static void report_to(volatile LONG *ctr, LONG max, const char *what, uint64_t v
     LONG k = InterlockedIncrement(ctr);
     if (k > max) return;
     /* wsprintfA nao tem %llx */
-    len = v >> 32 ? wsprintfA(buf, "gpuguard #%ld tid=%lu: %s 0x%lx%08lx; pilha:", k, GetCurrentThreadId(), what,
+    len = v >> 32 ? wsprintfA(buf, "gpuguard #%ld tid=%lu: %s 0x%lx%08lx; stack:", k, GetCurrentThreadId(), what,
                               (unsigned long)(v >> 32), (unsigned long)v)
-                  : wsprintfA(buf, "gpuguard #%ld tid=%lu: %s %#lx; pilha:", k, GetCurrentThreadId(), what, (unsigned long)v);
+                  : wsprintfA(buf, "gpuguard #%ld tid=%lu: %s %#lx; stack:", k, GetCurrentThreadId(), what, (unsigned long)v);
     n = RtlCaptureStackBackTrace(1, 24, frames, NULL);
     for (i = 0; i < n && len < 580; i++) {
         label(one, frames[i]);
@@ -663,7 +663,7 @@ void gg_trace_dump(void *cl)
     uint32_t dropped = 0, n = gg_trace_get(cl, s, GG_SITES, &dropped), i, j;
     for (i = 0; i < n; i++) {
         char buf[400], one[40];
-        int len = wsprintfA(buf, "gpuguard: lista %p: %s x%u (1o %u,%u,%u) rs %p pso %p;", cl, gg_op_name[s[i].op],
+        int len = wsprintfA(buf, "gpuguard: list %p: %s x%u (1st %u,%u,%u) rs %p pso %p;", cl, gg_op_name[s[i].op],
                             s[i].count, s[i].arg[0], s[i].arg[1], s[i].arg[2], s[i].rs, s[i].pso);
         for (j = 0; j < s[i].nframes; j++) {
             label(one, s[i].frames[j]);
@@ -671,7 +671,7 @@ void gg_trace_dump(void *cl)
         }
         wlog("%s", buf);
     }
-    if (dropped) wlog("gpuguard: lista %p: %u chamadas em pontos alem dos %d guardados", cl, dropped, GG_SITES);
+    if (dropped) wlog("gpuguard: list %p: %u calls at sites beyond the %d stored", cl, dropped, GG_SITES);
 }
 
 static uint64_t guard_va(const char *what, uint64_t va)
@@ -704,7 +704,7 @@ static void write_null(uintptr_t h)
 static void check_src(uintptr_t h)
 {
     if (gg_written(h) != 0) return;
-    report("CopyDescriptors: origem nunca gravada", h);
+    report("CopyDescriptors: source never written", h);
     write_null(h);
 }
 
@@ -719,7 +719,7 @@ static void check_table(ID3D12GraphicsCommandList *l, int compute, UINT param, D
         if (gg_written(h) != 0) continue;
         if (!bad++) {
             char what[112];
-            wsprintfA(what, "%s param %u: slot %u de %u nunca gravado, handle de GPU",
+            wsprintfA(what, "%s param %u: slot %u of %u never written, GPU handle",
                       compute ? "SetComputeRootDescriptorTable" : "SetGraphicsRootDescriptorTable", param, i, n);
             report(what, g.ptr + (uint64_t)i * res_inc);
         }
@@ -774,7 +774,7 @@ static HRESULT STDMETHODCALLTYPE hook_rootsig(ID3D12Device *dev, UINT mask, cons
         gg_rs_add(*out, none, 0);                  /* registro velho no mesmo endereco fica sem tabelas */
         gg_rs_set_uav(*out, 0);
         if (InterlockedIncrement(&foreign) <= 4)
-            wlog("gpuguard: root signature %p criada fora do Azimuth -> sem correcoes", *out);
+            wlog("gpuguard: root signature %p created outside Azimuth -> no fixes", *out);
         return hr;
     }
     if (!deser) deser = (PFN_D3D12_CREATE_VERSIONED_ROOT_SIGNATURE_DESERIALIZER)
@@ -867,15 +867,15 @@ static void desc_from_resource(gg_desc *g, ID3D12Resource *r)
     if (gg_trace_on && FAILED(r->lpVtbl->GetHeapProperties(r, &hp, &hf))) g->flags |= GG_DF_RESERVED;
 }
 
-static const char *const gg_dk_name[] = { "vazio", "CBV", "SRV", "UAV", "nulo(trava)" };
+static const char *const gg_dk_name[] = { "empty", "CBV", "SRV", "UAV", "null(crash)" };
 
 /* uma linha por slot gravado no espelho */
 static int desc_text(char *out, uint32_t i, const gg_desc *d)
 {
-    if (d->kind == GG_DK_NONE) return wsprintfA(out, " [%u]vazio", i);
+    if (d->kind == GG_DK_NONE) return wsprintfA(out, " [%u]empty", i);
     return wsprintfA(out, " [%u]%s d%u f%u res %p r%u %ux%u va 0x%lx%08lx%s%s", i, gg_dk_name[d->kind], d->dim, d->fmt,
                      d->res, d->rdim, d->w, d->h, (unsigned long)(d->va >> 32), (unsigned long)d->va,
-                     d->flags & GG_DF_RESERVED ? " RESERVADO" : "", d->flags & GG_DF_NO_RESOURCE ? " sem-recurso" : "");
+                     d->flags & GG_DF_RESERVED ? " RESERVED" : "", d->flags & GG_DF_NO_RESOURCE ? " no-resource" : "");
 }
 
 /* ---- estado grafico por lista para o dump: tabelas, root views, IB, VBs ---- */
@@ -946,14 +946,14 @@ static void dump_draw_state(ID3D12GraphicsCommandList *l, const char *what, cons
     uint32_t i, j;
     AcquireSRWLockExclusive(&lock);
     if (!gg_gfx_get(l, &g)) memset(&g, 0, sizeof g);
-    wlog("gpuguard: estado %s (%u,%u,%u) hash %08lx lista %p rs %p; IB va 0x%lx%08lx %u bytes fmt %u", what, arg[0], arg[1],
+    wlog("gpuguard: state %s (%u,%u,%u) hash %08lx list %p rs %p; IB va 0x%lx%08lx %u bytes fmt %u", what, arg[0], arg[1],
          arg[2], (unsigned long)hash, (void *)l, rs, (unsigned long)(g.ib.BufferLocation >> 32), (unsigned long)g.ib.BufferLocation,
          g.ib.SizeInBytes, (unsigned)g.ib.Format);
     for (len = 0, i = 0; i < GG_DUMP_VBS; i++)
         if (g.vb[i].BufferLocation)
             len += wsprintfA(buf + len, " vb%u 0x%lx%08lx %u/%u", i, (unsigned long)(g.vb[i].BufferLocation >> 32),
                              (unsigned long)g.vb[i].BufferLocation, g.vb[i].SizeInBytes, g.vb[i].StrideInBytes);
-    wlog("gpuguard:   VBs:%s", len ? buf : " nenhum");
+    wlog("gpuguard:   VBs:%s", len ? buf : " none");
     gg_pso_info_str(gg_pso_info(gg_cl_rs(l, GG_CL_PSO, NULL, 0)), buf);
     wlog("gpuguard:   PSO: %s", buf);
     for (i = 0; i < GG_ROOT_PARAMS; i++) {
@@ -962,7 +962,7 @@ static void dump_draw_state(ID3D12GraphicsCommandList *l, const char *what, cons
         if (g.tab[i]) {
             uint32_t n = gg_rs_table(rs, i);
             uintptr_t cpu = gg_gpu_to_cpu(g.tab[i]);
-            len = wsprintfA(buf, "gpuguard:   p%u tabela gpu 0x%lx%08lx (%u slots):", i, (unsigned long)(g.tab[i] >> 32),
+            len = wsprintfA(buf, "gpuguard:   p%u gpu table 0x%lx%08lx (%u slots):", i, (unsigned long)(g.tab[i] >> 32),
                             (unsigned long)g.tab[i], n);
             for (j = 0; cpu && j < n && j < GG_DUMP_SLOTS && len < 1800; j++) {
                 gg_desc d;
@@ -1059,7 +1059,7 @@ static void null_uavs_fill(ID3D12Device *dev, uintptr_t cpu, uint64_t gpu)
         dev->lpVtbl->CreateUnorderedAccessView(dev, NULL, NULL, &u, h);
     }
     null_uav_gpu = gpu;
-    wlog("gpuguard: %u UAVs nulos no fim do heap visivel (gpu %#llx)", GG_NULL_UAVS, (unsigned long long)gpu);
+    wlog("gpuguard: %u null UAVs at the end of the visible heap (gpu %#llx)", GG_NULL_UAVS, (unsigned long long)gpu);
 }
 
 void *gg_pso_rs(void *pso);
@@ -1077,7 +1077,7 @@ uint64_t gg_missing_uav_tables(void *cl)
         static volatile LONG odd;
         LONG k = InterlockedIncrement(&odd);
         if ((k & (k - 1)) == 0)
-            wlog("gpuguard: root signature da lista %p != a do PSO %p (pso %p, lista %p, tid %lu) -> UAVs nulos nao ligados (#%ld)",
+            wlog("gpuguard: root signature of list %p != that of PSO %p (pso %p, list %p, tid %lu) -> null UAVs not bound (#%ld)",
                  rs, prs, pso, cl, GetCurrentThreadId(), k);
         return 0;
     }
@@ -1098,7 +1098,7 @@ static void bind_null_uavs(ID3D12GraphicsCommandList *l)
         gg_cl_gtab(l, 1, 1ull << i);
         real_gtab(l, i, g);
         k = InterlockedIncrement(&bound);
-        if ((k & (k - 1)) == 0) wlog("gpuguard: tabela de UAV %u nao definida no draw -> UAVs nulos (#%ld)", i, k);
+        if ((k & (k - 1)) == 0) wlog("gpuguard: UAV table %u not set at draw -> null UAVs (#%ld)", i, k);
     }
 }
 
@@ -1121,7 +1121,7 @@ static HRESULT STDMETHODCALLTYPE hook_heap(ID3D12Device *dev, const D3D12_DESCRI
         if (!ours) {
             gg_heap_forget(s.ptr, d->NumDescriptors, res_inc);
             if (InterlockedIncrement(&foreign) <= 4)
-                wlog("gpuguard: heap CBV/SRV/UAV x%u (flags %u) criado fora do Azimuth -> sem correcoes", d->NumDescriptors,
+                wlog("gpuguard: CBV/SRV/UAV heap x%u (flags %u) created outside Azimuth -> no fixes", d->NumDescriptors,
                      (unsigned)d->Flags);
             return hr;
         }
@@ -1339,7 +1339,7 @@ void gg_pso_info_str(uint32_t info, char *out)
     int len = 0, i;
     for (i = 0; i < 6; i++)
         if (info & (1u << i)) len += wsprintfA(out + len, "%s ", name[i]);
-    wsprintfA(out + len, "topo %u", (unsigned)(info >> 8 & 0xff));
+    wsprintfA(out + len, "topology %u", (unsigned)(info >> 8 & 0xff));
 }
 
 /* slots lidos pelo PSO; -1 = PSO desconhecido */
@@ -1401,12 +1401,12 @@ static uint32_t check_ia(ID3D12GraphicsCommandList *l, uint32_t op, const uint32
     if (pso && gg_pso_slots(pso) < 0) {
         static volatile LONG unknown;
         LONG k = InterlockedIncrement(&unknown);
-        if ((k & (k - 1)) == 0) wlog("gpuguard: draw com PSO de origem desconhecida %p (#%ld)", pso, k);
+        if ((k & (k - 1)) == 0) wlog("gpuguard: draw with a PSO of unknown origin %p (#%ld)", pso, k);
     }
     if (miss) {
         char what[200];
-        wsprintfA(what, "%s (%u,%u,%u) le slots sem vertex buffer %#lx%s; pso %p lista %p, mascara", gg_op_name[op],
-                  arg[0], arg[1], arg[2], (unsigned long)(miss & 0x7fffffffu), miss >> 31 ? " e sem index buffer" : "",
+        wsprintfA(what, "%s (%u,%u,%u) reads slots without a vertex buffer %#lx%s; pso %p list %p, mask", gg_op_name[op],
+                  arg[0], arg[1], arg[2], (unsigned long)(miss & 0x7fffffffu), miss >> 31 ? " and no index buffer" : "",
                   pso, (void *)l);
         report_to(&ia_reports, GG_MAX_REPORTS, what, miss);
     }
@@ -1452,7 +1452,7 @@ static int fresh_gs_pso(uint32_t info)
     LONG k;
     if (gg_trace_on != 8 || !(info & 0x10)) return 0;
     k = InterlockedIncrement(&made);
-    if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: PSO com GS #%ld criado fora da pipeline library", k);
+    if ((k & (k - 1)) == 0) wlog("gpuguard: experiment: PSO with GS #%ld created outside the pipeline library", k);
     return 1;
 }
 
@@ -1530,7 +1530,7 @@ static HRESULT STDMETHODCALLTYPE hook_lib(ID3D12Device1 *dev, const void *blob, 
             swap((void **)&l1->lpVtbl->LoadPipeline, hook_lib_stream, (void **)&real_lib_stream);
             l1->lpVtbl->Release(l1);
         }
-        wlog("gpuguard: pipeline library trocada (LoadGraphicsPipeline%s)", l1 ? ", LoadPipeline" : "");
+        wlog("gpuguard: pipeline library swapped (LoadGraphicsPipeline%s)", l1 ? ", LoadPipeline" : "");
     }
     return hr;
 }
@@ -1598,7 +1598,7 @@ static void log_new_site(void *cl, uint32_t op, void *rs, void *pso, const uint3
     if (i < (uint32_t)nseen || nseen >= 1024) { ReleaseSRWLockExclusive(&lock); return; }
     seen[nseen++] = hash;
     ReleaseSRWLockExclusive(&lock);
-    len = wsprintfA(buf, "gpuguard: ponto novo de %s (%u,%u,%u) rs %p pso %p lista %p tid=%lu;", gg_op_name[op],
+    len = wsprintfA(buf, "gpuguard: new %s site (%u,%u,%u) rs %p pso %p list %p tid=%lu;", gg_op_name[op],
                     arg[0], arg[1], arg[2], rs, pso, cl, GetCurrentThreadId());
     for (i = 0; i < n; i++) {
         label(one, f[i]);
@@ -1638,12 +1638,12 @@ void gg_ring_dump(void)
 {
     static gg_ring_ent e[GG_RING];
     uint32_t n = gg_ring_get(e, GG_RING), i;
-    wlog("gpuguard: ultimos %u draws/ClearRTV (mais antigo primeiro):", n);
+    wlog("gpuguard: last %u draws/ClearRTV (oldest first):", n);
     for (i = 0; i < n; i++) {
         char st[40];
         gg_pso_info_str(gg_pso_info(e[i].pso), st);
-        wlog("gpuguard:  #%u lista %p %s %s (%u,%u,%u) rs %p pso %p hash %08lx (%s)", e[i].seq, e[i].cl, gg_op_name[e[i].op],
-             e[i].direct ? "direto" : "replayer", e[i].arg[0], e[i].arg[1], e[i].arg[2], e[i].rs, e[i].pso,
+        wlog("gpuguard:  #%u list %p %s %s (%u,%u,%u) rs %p pso %p hash %08lx (%s)", e[i].seq, e[i].cl, gg_op_name[e[i].op],
+             e[i].direct ? "direct" : "replayer", e[i].arg[0], e[i].arg[1], e[i].arg[2], e[i].rs, e[i].pso,
              (unsigned long)e[i].hash, st);
     }
 }
@@ -1688,7 +1688,7 @@ static void check_odd(ID3D12GraphicsCommandList *l, uint32_t op, const uint32_t 
     void *pso;
     if (!gg_odd_args(op, arg)) return;
     pso = gg_cl_rs(l, GG_CL_PSO, NULL, 0);
-    wsprintfA(what, "%s com argumentos absurdos (%u,%u,%u) pso %p hash %08lx, lista", gg_op_name[op], arg[0], arg[1],
+    wsprintfA(what, "%s with absurd arguments (%u,%u,%u) pso %p hash %08lx, list", gg_op_name[op], arg[0], arg[1],
               arg[2], pso, (unsigned long)gg_pso_hash(pso));
     report_to(&odd_reports, GG_ODD_REPORTS, what, (uint64_t)(uintptr_t)l);
 }
@@ -1697,7 +1697,7 @@ static void check_odd(ID3D12GraphicsCommandList *l, uint32_t op, const uint32_t 
 static void skip_note(volatile LONG *ctr, const char *what)
 {
     LONG k = InterlockedIncrement(ctr);
-    if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: %s #%ld pulado", what, k);
+    if ((k & (k - 1)) == 0) wlog("gpuguard: experiment: %s #%ld skipped", what, k);
 }
 
 static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x, UINT y, UINT z)
@@ -1708,12 +1708,12 @@ static void STDMETHODCALLTYPE hook_dispatch(ID3D12GraphicsCommandList *l, UINT x
     if (gg_trace_on == 2 && rs && rs == internal_rs) {
         static volatile LONG skipped;
         LONG k = InterlockedIncrement(&skipped);
-        if ((k & (k - 1)) == 0) wlog("gpuguard: experimento: Dispatch #%ld da compute interna pulado (%u,%u,%u)", k, x, y, z);
+        if ((k & (k - 1)) == 0) wlog("gpuguard: experiment: internal compute Dispatch #%ld skipped (%u,%u,%u)", k, x, y, z);
         return;
     }
     if (gg_trace_on == 7 && rs != internal_rs) {   /* EXPERIMENTO D3D12Debug=9 (17_fm6.txt PASSO 28) */
         static volatile LONG skipped;
-        skip_note(&skipped, "Dispatch fora da compute interna");
+        skip_note(&skipped, "Dispatch outside the internal compute");
         return;
     }
     real_dispatch(l, x, y, z);
@@ -1756,19 +1756,19 @@ int gg_skip_draw(int direct, uint32_t op, uint32_t ia_miss, uint32_t pso_hash)
     if (gg_draw_skip == 6) {
         static volatile LONG skipped;
         if (!ia_miss) return 0;
-        skip_note(&skipped, "draw com IA incompleto");
+        skip_note(&skipped, "draw with incomplete IA");
         return 1;
     }
     if (gg_draw_skip == 8) return 0;   /* gg_skip_stages */
     if (gg_draw_skip == 7) {
         static volatile LONG skipped;
         if (direct || op != GG_OP_DRAW_INDEXED || !hash_listed(pso_hash)) return 0;
-        skip_note(&skipped, "DrawIndexedInstanced do replayer da lista de hashes");
+        skip_note(&skipped, "DrawIndexedInstanced from the hash-list replayer");
         return 1;
     }
     if ((gg_draw_skip == 1 && !direct) || (gg_draw_skip >= 2 && direct)) return 0;
     if (gg_draw_skip >= 3 && gg_draw_skip <= 5 && op != only[gg_draw_skip - 3]) return 0;
-    skip_note(&draws_skipped[direct != 0], direct ? "draw direto" : "draw do replayer");
+    skip_note(&draws_skipped[direct != 0], direct ? "direct draw" : "replayer draw");
     return 1;
 }
 
@@ -1777,7 +1777,7 @@ int gg_skip_stages(uint32_t info)
 {
     static volatile LONG skipped;
     if (gg_trace_on != 6 || gg_draw_skip != 8 || !(info & GG_PSO_EXTRA_STAGES)) return 0;
-    skip_note(&skipped, "draw com DS/HS/GS/SO");
+    skip_note(&skipped, "draw with DS/HS/GS/SO");
     return 1;
 }
 
@@ -1796,7 +1796,7 @@ static void log_pso_hash(uint32_t h, const uint32_t *arg, int bv, uint32_t info)
     {
         char st[40];
         gg_pso_info_str(info, st);
-        wlog("gpuguard: hash de PSO novo no DrawIndexedInstanced do replayer: %08lx (#%ld) (%u,%u,%u) base %d; %s",
+        wlog("gpuguard: new PSO hash in the replayer DrawIndexedInstanced: %08lx (#%ld) (%u,%u,%u) base %d; %s",
              (unsigned long)h, (long)nseen, arg[0], arg[1], arg[2], bv, st);
     }
 }
@@ -1826,7 +1826,7 @@ static void STDMETHODCALLTYPE hook_draw_indexed(ID3D12GraphicsCommandList *l, UI
     if (gg_trace_on) {               /* os primeiros de cada tipo: replayer (suspeito) x diretos (funcionam) */
         static volatile LONG dumped[2];
         if (InterlockedIncrement(&dumped[direct != 0]) <= (direct ? 4 : 12))
-            dump_draw_state(l, direct ? "DrawIndexedInstanced direto" : "DrawIndexedInstanced do replayer", arg, h);
+            dump_draw_state(l, direct ? "direct DrawIndexedInstanced" : "replayer DrawIndexedInstanced", arg, h);
     }
     if (gg_skip_draw(direct, GG_OP_DRAW_INDEXED, check_ia(l, GG_OP_DRAW_INDEXED, arg), h)) return;
     if (gg_skip_stages(info)) return;
@@ -1881,8 +1881,8 @@ static void log_copy_shape(const D3D12_RESOURCE_DESC *d, const D3D12_TEXTURE_COP
     if (i < (uint32_t)nseen || nseen >= 64) { ReleaseSRWLockExclusive(&lock); return; }
     seen[nseen++] = h;
     ReleaseSRWLockExclusive(&lock);
-    wlog("gpuguard: copia nova: destino dim %u %ux%u x%u mips %u fmt %u (%s), origem %s, flags %#x", v[0], v[1], v[2],
-         v[3], v[4], v[5], v[6] ? "footprint" : "subrecurso", v[7] ? "footprint" : "subrecurso", (unsigned)d->Flags);
+    wlog("gpuguard: new copy: destination dim %u %ux%u x%u mips %u fmt %u (%s), source %s, flags %#x", v[0], v[1], v[2],
+         v[3], v[4], v[5], v[6] ? "footprint" : "subresource", v[7] ? "footprint" : "subresource", (unsigned)d->Flags);
 }
 
 static void check_copytex(const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y, UINT z,
@@ -1891,7 +1891,7 @@ static void check_copytex(const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y
     D3D12_RESOURCE_DESC dd, sd;
     char why[200];
     if (!dst || !src || !dst->pResource || !src->pResource) {
-        report_to(&copy_reports, GG_MAX_REPORTS, "CopyTextureRegion com recurso nulo, destino", (uintptr_t)(dst ? dst->pResource : NULL));
+        report_to(&copy_reports, GG_MAX_REPORTS, "CopyTextureRegion with a null resource, destination", (uintptr_t)(dst ? dst->pResource : NULL));
         return;
     }
     dst->pResource->lpVtbl->GetDesc(dst->pResource, &dd);
@@ -1901,7 +1901,7 @@ static void check_copytex(const D3D12_TEXTURE_COPY_LOCATION *dst, UINT x, UINT y
         uint64_t va = dd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? dst->pResource->lpVtbl->GetGPUVirtualAddress(dst->pResource)
                     : sd.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ? src->pResource->lpVtbl->GetGPUVirtualAddress(src->pResource) : 0;
         char what[260];
-        wsprintfA(what, "CopyTextureRegion %s; VA do buffer", why);
+        wsprintfA(what, "CopyTextureRegion %s; buffer VA", why);
         report_to(&copy_reports, GG_MAX_REPORTS, what, va);
     }
 }
@@ -2053,7 +2053,7 @@ static void note_make_site(int what)
     if (idx < 0 || (c > 1 && (c < 64 || (c & (c - 1))))) return;
     {
         char buf[600], one[40];
-        int len = wsprintfA(buf, "gpuguard: %s criada no ponto %ld (#%ld, tid %lu); pilha:", names[what], idx, c,
+        int len = wsprintfA(buf, "gpuguard: %s created at site %ld (#%ld, tid %lu); stack:", names[what], idx, c,
                             GetCurrentThreadId());
         for (i = 0; i < n && len < 540; i++) {
             label(one, f[i]);
@@ -2070,7 +2070,7 @@ static void list_created(void *obj)
     gg_cl_forget(obj);
     note_make_site(0);
     st_list_open();
-    if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command lists criadas, %ld vivas", k, live);
+    if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command lists created, %ld alive", k, live);
 }
 
 static HRESULT (STDMETHODCALLTYPE *real_alloc)(ID3D12Device *, D3D12_COMMAND_LIST_TYPE, REFIID, void **);
@@ -2081,7 +2081,7 @@ static HRESULT STDMETHODCALLTYPE hook_alloc(ID3D12Device *dev, D3D12_COMMAND_LIS
     if (SUCCEEDED(hr)) {
         LONG k = InterlockedIncrement(&made);
         note_make_site(1);
-        if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command allocators criados", k);
+        if (k >= 16 && (k & (k - 1)) == 0) wlog("gpuguard: %ld command allocators created", k);
     }
     return hr;
 }
@@ -2123,8 +2123,8 @@ static void hook_list_vtable(void *obj)
         swap((void **)&l->lpVtbl->SetPipelineState, hook_set_pso, (void **)&real_set_pso);
     }
     l->lpVtbl->Release(l);
-    wlog("gpuguard: vtable da command list trocada (root signature, tabelas, root views, IA, SO, UAVs nulos nos draws%s)",
-         gg_trace_on ? ", rastreio de Dispatch/CopyTextureRegion/draws/ClearRTV/PSO" : "");
+    wlog("gpuguard: command list vtable swapped (root signature, tables, root views, IA, SO, null UAVs on draws%s)",
+         gg_trace_on ? ", tracking of Dispatch/CopyTextureRegion/draws/ClearRTV/PSO" : "");
 }
 
 static HRESULT STDMETHODCALLTYPE hook_list(ID3D12Device *dev, UINT mask, D3D12_COMMAND_LIST_TYPE type, ID3D12CommandAllocator *a,
@@ -2164,7 +2164,7 @@ static void log_residency(int which, UINT n, ID3D12Pageable *const *objs)
     LONG k = InterlockedIncrement(&residency_calls[which]);
     char what[96];
     if (k > 8 && (k & (k - 1))) return;
-    wsprintfA(what, "residencia: %s chamada #%ld com %u objetos, 1o", names[which], k, n);
+    wsprintfA(what, "residency: %s call #%ld with %u objects, 1st", names[which], k, n);
     report_to(&residency_reports, 64, what, (uintptr_t)(n && objs ? objs[0] : NULL));
 }
 
@@ -2200,7 +2200,7 @@ static void hook_residency(IUnknown *obj)
         swap((void **)&dev3->lpVtbl->EnqueueMakeResident, hook_enqueue, (void **)&real_enqueue);
         dev3->lpVtbl->Release(dev3);
     }
-    wlog("gpuguard: residencia rastreada (MakeResident/Evict/SetResidencyPriority/EnqueueMakeResident)");
+    wlog("gpuguard: residency tracked (MakeResident/Evict/SetResidencyPriority/EnqueueMakeResident)");
 }
 
 /* chamado pelo hook do D3D12CreateDevice (debug12_fm5.c) no FM6 */
@@ -2237,5 +2237,5 @@ void gpuguard_install(IUnknown *obj)
         dev4->lpVtbl->Release(dev4);
     }
     if (gg_trace_on) hook_residency(obj);
-    wlog("gpuguard: ligada no device D3D12 (descritor CBV/SRV/UAV de %u bytes)", res_inc);
+    wlog("gpuguard: attached to the D3D12 device (CBV/SRV/UAV descriptor of %u bytes)", res_inc);
 }

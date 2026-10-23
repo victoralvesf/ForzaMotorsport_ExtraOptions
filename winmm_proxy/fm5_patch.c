@@ -266,16 +266,16 @@ void write_mem(void *dst, const void *src, size_t len)
 
 static const Patch exe_patches[] = {
     /* aceita >= 1 template (usa o primeiro): jne -> jb */
-    { RVA_TEMPLATE_JNE, 2, "755b", "725b", "secure template: exatamente 1 -> pelo menos 1" },
+    { RVA_TEMPLATE_JNE, 2, "755b", "725b", "secure template: exactly 1 -> at least 1" },
     /* TLS do jogo: tamanho <= 0x150, alinhamento <= 16, zeros so dentro do template */
-    { RVA_TLS_SIZE_JNE, 6, "0f85f1000000", "0f87f1000000", "TLS: tamanho == 0x150 -> <= 0x150" },
+    { RVA_TLS_SIZE_JNE, 6, "0f85f1000000", "0f87f1000000", "TLS: size == 0x150 -> <= 0x150" },
     { RVA_TLS_CHAR_JNE, 6, "0f85da000000", "0f87da000000", "TLS: Characteristics == 0x500000 -> <=" },
-    { RVA_TLS_ZERO_END, 7, "488d8250010000", "488b4608909090", "TLS: laco de zeros ate EndAddressOfRawData" },
+    { RVA_TLS_ZERO_END, 7, "488d8250010000", "488b4608909090", "TLS: zero loop up to EndAddressOfRawData" },
     /* exe do jogo com 14 secoes fixas (FM6 tem 15); hash, SizeOfImage e entry do registro ja identificam o exe */
-    { RVA_EXE_NSEC_JNE, 6, "0f8523010000", "909090909090", "exe: NumberOfSections == 14 fixo" },
+    { RVA_EXE_NSEC_JNE, 6, "0f8523010000", "909090909090", "exe: fixed NumberOfSections == 14" },
     /* layout fixo do xg_x.dll pinado (o hash do registro ja identifica o XG) */
-    { RVA_XG_SIZE_JNE, 6, "0f859c020000", "909090909090", "XG: SizeOfImage fixo" },
-    { RVA_XG_ENTRY_JNE, 6, "0f858f020000", "909090909090", "XG: AddressOfEntryPoint fixo" },
+    { RVA_XG_SIZE_JNE, 6, "0f859c020000", "909090909090", "XG: fixed SizeOfImage" },
+    { RVA_XG_ENTRY_JNE, 6, "0f858f020000", "909090909090", "XG: fixed AddressOfEntryPoint" },
 };
 
 /* ------------------------------------------------------------------------ */
@@ -327,14 +327,14 @@ static void drop_partyconfig_link(void)
     size_t i;
     for (i = 0; i < 2; i++)
         if (!bytes_match(g_base + sites[i].rva, sites[i].orig, 7)) {
-            wlog("Live table: lea do fim dos links nao confere em %#x", sites[i].rva);
+            wlog("Live table: end-of-links lea does not match at %#x", sites[i].rva);
             return;
         }
     for (i = 0; i < 2; i++) {
         int32_t disp = *(int32_t *)(g_base + sites[i].rva + 3) - LINK_SIZE;
         write_mem(g_base + sites[i].rva + 3, &disp, 4);
     }
-    wlog("Live table: link PartyConfig removido");
+    wlog("Live table: PartyConfig link removed");
 }
 
 /* Heap da APU: os XDKs do FM5 (nov-2012) e do FM6 NAO tem ApuCreateHeap (heap implicito); o Azimuth exige que o
@@ -360,7 +360,7 @@ static void implicit_apu_heap(const char *game_name)
         *(void **)h = big;
         *(uint32_t *)(h + 8) = FM5_APU_CACHED_SIZE;
     } else if (big) VirtualFree(big, 0, MEM_RELEASE);
-    wlog("APU: heap criado p/ o %s: cacheado %p (%#x bytes, APU %#x), nao cacheado %p (%#x bytes, APU %#x)",
+    wlog("APU: heap created for %s: cached %p (%#x bytes, APU %#x), uncached %p (%#x bytes, APU %#x)",
          game_name, *(void **)h, *(uint32_t *)(h + 8), *(uint32_t *)(h + 0xc),
          *(void **)(h + 0x20), *(uint32_t *)(h + 0x28), *(uint32_t *)(h + 0x2c));
 }
@@ -435,13 +435,13 @@ static void fm5_ui_vcall(void *obj, uint32_t n, void *p, uintptr_t r9)
         memcpy(v, p, sizeof v);
         v[0] *= ui_sx; v[2] *= ui_sx; v[1] *= ui_sy; v[3] *= ui_sy;
         if (InterlockedIncrement(&logged_vp) <= 2)
-            wlog("%s: UI viewport %.0f,%.0f %.0fx%.0f -> %.0f,%.0f %.0fx%.0f (alvo game+%#llx)", rs->tag,
+            wlog("%s: UI viewport %.0f,%.0f %.0fx%.0f -> %.0f,%.0f %.0fx%.0f (target game+%#llx)", rs->tag,
                  ((float *)p)[0], ((float *)p)[1], ((float *)p)[2], ((float *)p)[3], v[0], v[1], v[2], v[3],
                  (unsigned long long)((uintptr_t)tab[rs->vp_off / 8] - (uintptr_t)ui_game));
         ((vc_fn)tab[rs->vp_off / 8])(obj, n, v, r9);
         return;
     }
-    wlog("%s: fm5_ui_vcall chamado de game+%#llx inesperado", rs->tag, (unsigned long long)ret);
+    wlog("%s: fm5_ui_vcall called from unexpected game+%#llx", rs->tag, (unsigned long long)ret);
 }
 
 static void fm5_ui_viewport(uint8_t *game, const ResSites *rs, uint32_t w, uint32_t h)
@@ -451,13 +451,13 @@ static void fm5_ui_viewport(uint8_t *game, const ResSites *rs, uint32_t w, uint3
     uint8_t code[6] = { 0xff, 0x15 };
     int32_t rel;
     if (!bytes_match(game + rs->vp_call, rs->vp_call_orig, 6) || memcmp(game + rs->vp_slot, pad, 8)) {
-        wlog("%s: resolucao: sites do viewport da UI nao conferem, ignorado", rs->tag);
+        wlog("%s: resolution: UI viewport sites do not match, ignored", rs->tag);
         return;
     }
     ui_game = game; ui_sites = rs; ui_sx = w / 1920.0f; ui_sy = h / 1080.0f;
     write_mem(game + rs->vp_slot, &fn, 8);
     rel = (int32_t)(rs->vp_slot - (rs->vp_call + 6));   memcpy(code + 2, &rel, 4); write_mem(game + rs->vp_call, code, 6);
-    wlog("%s: resolucao: viewport da UI escalado para %ux%u", rs->tag, w, h);
+    wlog("%s: resolution: UI viewport scaled to %ux%u", rs->tag, w, h);
 }
 
 /* Graficos da UI do FM6 (PASSO 107 cont. 1; relacao de marchas da tunagem): 0xcff4e8 calcula a posicao/tamanho do
@@ -477,7 +477,7 @@ static uintptr_t fm6_chart_vcall(void *obj, const int32_t *r)
     v[0] = (int32_t)(r[0] * ui_sx + 0.5f); v[2] = (int32_t)((r[0] + r[2]) * ui_sx + 0.5f) - v[0];
     v[1] = (int32_t)(r[1] * ui_sy + 0.5f); v[3] = (int32_t)((r[1] + r[3]) * ui_sy + 0.5f) - v[1];
     if (InterlockedIncrement(&logged) <= 2)
-        wlog("FM6: grafico da UI %d,%d %dx%d -> %d,%d %dx%d", r[0], r[1], r[2], r[3], v[0], v[1], v[2], v[3]);
+        wlog("FM6: UI graphic %d,%d %dx%d -> %d,%d %dx%d", r[0], r[1], r[2], r[3], v[0], v[1], v[2], v[3]);
     return ((vc_fn)(*(void ***)obj)[0x30 / 8])(obj, v);
 }
 
@@ -491,45 +491,45 @@ static void fm6_chart_viewport(uint8_t *game)
     int32_t rel;
     if (!bytes_match(game + FM6_CHART_VP, "488b01c5f829442430c5fb114c2440ff5030", 18) ||
         memcmp(game + FM6_CHART_SLOT, pad, 8)) {
-        wlog("FM6: resolucao: site do viewport dos graficos da UI nao confere, ignorado");
+        wlog("FM6: resolution: UI graphics viewport site does not match, ignored");
         return;
     }
     write_mem(game + FM6_CHART_SLOT, &fn, 8);
     rel = (int32_t)(FM6_CHART_SLOT - (FM6_CHART_VP + 18));   memcpy(code + 14, &rel, 4);
     write_mem(game + FM6_CHART_VP, code, sizeof code);
-    wlog("FM6: resolucao: viewport dos graficos da UI escalado");
+    wlog("FM6: resolution: UI graphics viewport scaled");
 }
 
 static void game_resolution(uint8_t *game, const ResSites *rs, uint32_t height, uint32_t width)
 {
     if (!height && !width) return;
     if (height && width && (uint64_t)width * 9 != (uint64_t)height * 16)
-        wlog("%s: resolucao: aspecto %ux%u != 16:9, UI nao ajustada (so a cena)", rs->tag, width, height);
+        wlog("%s: resolution: aspect %ux%u != 16:9, UI not adjusted (scene only)", rs->tag, width, height);
     if (height) {
         if (!bytes_match(game + rs->height, rs->height_orig, 10))
-            wlog("%s: resolucao: site da altura %#x nao confere, ignorado", rs->tag, rs->height);
+            wlog("%s: resolution: height site %#x does not match, ignored", rs->tag, rs->height);
         else {
             write_mem(game + rs->height + 6, &height, 4);
-            wlog("%s: resolucao: altura %u", rs->tag, height);
+            wlog("%s: resolution: height %u", rs->tag, height);
         }
     }
     if (width) {
         uint8_t code[5] = { rs->width_mov };
         if (!bytes_match(game + rs->width, rs->width_orig, 21))
-            wlog("%s: resolucao: site da largura %#x nao confere, ignorado", rs->tag, rs->width);
+            wlog("%s: resolution: width site %#x does not match, ignored", rs->tag, rs->width);
         else {
             memcpy(code + 1, &width, 4);
             write_mem(game + rs->width + 0x10, code, sizeof code);
-            wlog("%s: resolucao: largura %u", rs->tag, width);
+            wlog("%s: resolution: width %u", rs->tag, width);
         }
     }
     /* = "UI size from the display" do FH2: o layout da UI e feito para 1920x1080; com o tamanho do render a UI
        ficava no canto superior esquerdo (cont. 2). Forca 1920.0/1080.0 nos dois floats passados ao setter da UI. */
     if (!bytes_match(game + rs->ui_size, rs->ui_size_orig, rs->ui_size_len))
-        wlog("%s: resolucao: site do tamanho da UI %#x nao confere, ignorado", rs->tag, rs->ui_size);
+        wlog("%s: resolution: UI size site %#x does not match, ignored", rs->tag, rs->ui_size);
     else {
         write_mem(game + rs->ui_size, rs->ui_size_code, rs->ui_size_len);
-        wlog("%s: resolucao: UI fixa em 1920x1080", rs->tag);
+        wlog("%s: resolution: UI fixed at 1920x1080", rs->tag);
         fm5_ui_viewport(game, rs, width ? width : (uint32_t)(((uint64_t)(height ? height : 1080) * 16 + 4) / 9),
                         height ? height : 1080);
     }
@@ -584,10 +584,10 @@ void fm5_frame_set_sync(uint8_t *frame, uint32_t mode, uintptr_t rbx, uintptr_t 
             mi.State == MEM_COMMIT)
             fn = *(uintptr_t *)rbx - g;
         if (fps_queue_ret)
-            wlog("%s: fps: modo de present %u -> %u (chamador game+%#llx, fn da fila game+%#llx, limitador [+0x500]=%u)",
+            wlog("%s: fps: present mode %u -> %u (caller game+%#llx, queue fn game+%#llx, limiter [+0x500]=%u)",
                  fps_tag, mode, v, (unsigned long long)(ret - g), (unsigned long long)fn, frame[0x500]);
         else
-            wlog("%s: fps: modo de present %u -> %u (chamador game+%#llx)", fps_tag, mode, v,
+            wlog("%s: fps: present mode %u -> %u (caller game+%#llx)", fps_tag, mode, v,
                  (unsigned long long)(ret - g));
     }
     *(uint32_t *)(frame + 0xa0) = v;
@@ -618,13 +618,13 @@ static void fm5_frame_unlock(uint8_t *game, uint32_t fps)
     if (!bytes_match(game + FM5_FRAME11_LIMIT, "40534883ec30c5f829742420c5fb10353ca35c01488d9940040000", 27) ||
         *(uint8_t **)(game + FM5_FRAME11_VTBL + 0xe8) != game + FM5_FRAME11_LIMIT ||
         !bytes_match(game + FM5_STEP_BRANCH - 7, "803dff16000200740f", 9)) {
-        wlog("FM5: fps: limitador 60 / passo fixo nao conferem, fps > 60 ignorado");
+        wlog("FM5: fps: 60 limiter / fixed step do not match, fps > 60 ignored");
         return;
     }
     fps_step = 1.0 / fps;
     write_mem(game + FM5_FRAME11_VTBL + 0xe8, &fn, 8);
     write_mem(game + FM5_STEP_BRANCH, &eb, 1);
-    wlog("FM5: fps: limitador do jogo em %u fps (passo %.3f ms), simulacao com dt medido", fps, fps_step * 1000);
+    wlog("FM5: fps: game limiter at %u fps (step %.3f ms), simulation with measured dt", fps, fps_step * 1000);
 }
 
 static void fm5_frame_rate(uint8_t *game, uint32_t fps)
@@ -633,12 +633,12 @@ static void fm5_frame_rate(uint8_t *game, uint32_t fps)
     void *fn = (void *)fm5_frame_set_sync_stub;
     size_t i;
     if (!bytes_match(game + FM5_FRAME_SET_SYNC, "8991a0000000c3", 7)) {
-        wlog("FM5: fps: setter %#x nao confere, ignorado", FM5_FRAME_SET_SYNC);
+        wlog("FM5: fps: setter %#x does not match, ignored", FM5_FRAME_SET_SYNC);
         return;
     }
     for (i = 0; i < 2; i++)
         if (*(uint8_t **)(game + vtbls[i] + 0x180) != game + FM5_FRAME_SET_SYNC) {
-            wlog("FM5: fps: vtable %#x slot 0x180 nao confere, ignorado", vtbls[i]);
+            wlog("FM5: fps: vtable %#x slot 0x180 does not match, ignored", vtbls[i]);
             return;
         }
     fps_game = game;
@@ -646,7 +646,7 @@ static void fm5_frame_rate(uint8_t *game, uint32_t fps)
     fps_queue_ret = 0x6828d0;
     fps_force = fps >= 60;
     for (i = 0; i < 2; i++) write_mem(game + vtbls[i] + 0x180, &fn, 8);
-    wlog("FM5: fps: frame_rate %u -> %s", fps, fps_force ? "present sempre com intervalo 1" : "original");
+    wlog("FM5: fps: frame_rate %u -> %s", fps, fps_force ? "present always with interval 1" : "original");
     if (fps > 60) fm5_frame_unlock(game, fps);
 }
 
@@ -672,7 +672,7 @@ static uint32_t fm6_get_frame_rate(void *mgr, int idx)
 {
     static volatile LONG last = -1;
     uint32_t v = fm6_get_frame_rate_orig(mgr, idx), r = (fps_force && v == 30) ? 60 : v;
-    if (InterlockedExchange(&last, (LONG)v) != (LONG)v) wlog("FM6: fps: FrameRate do cenario %u -> %u", v, r);
+    if (InterlockedExchange(&last, (LONG)v) != (LONG)v) wlog("FM6: fps: scenario FrameRate %u -> %u", v, r);
     return r;
 }
 
@@ -688,12 +688,12 @@ static void fm6_frame_unlock(uint8_t *game, uint32_t fps)
 {
     static const uint8_t nop6[6] = { 0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00 };
     if (!bytes_match(game + FM6_STEP_BRANCH, "80bb71250000000f85f0287000", 13)) {
-        wlog("FM6: fps: passo fixo %#x nao confere, fps > 60 ignorado", FM6_STEP_BRANCH);
+        wlog("FM6: fps: fixed step %#x does not match, fps > 60 ignored", FM6_STEP_BRANCH);
         return;
     }
     write_mem(game + FM6_STEP_BRANCH + 7, nop6, sizeof nop6);
     fm6_vline_rate(fps);
-    wlog("FM6: fps: vline a %u Hz, simulacao com dt medido", fps);
+    wlog("FM6: fps: vline at %u Hz, simulation with measured dt", fps);
 }
 
 /* Medicao de fps do FM6 (diagnostico, sempre ligado com o fps instalado): o FM6 chama o Present do host direto (sem o
@@ -731,7 +731,7 @@ static void fm6_fps_sample(LONGLONG t0, LONGLONG t1)
         LONG fps = (LONG)(n * (double)fm6_qpf.QuadPart / (t1 - win0) + 0.5);
         LONG64 w = InterlockedExchange64(&fm6_wait_sum, 0);
         if (fps < last_fps - 3 || fps > last_fps + 3) {
-            wlog("FM6: fps %ld (quadro %.2f ms: Present %.2f ms, espera do vline %.2f ms)", fps,
+            wlog("FM6: fps %ld (frame %.2f ms: Present %.2f ms, vline wait %.2f ms)", fps,
                  (t1 - win0) * ms / n, in_sum * ms / n, w * ms / n);
             last_fps = fps;
         }
@@ -755,7 +755,7 @@ static void fm6_fps_meter(uint8_t *game)
     void *p = (void *)fm6_present_hook, *w = (void *)fm6_vline_wait_hook;
     if (*(uint8_t **)(game + FM6_FRAME11_VTBL + 0x108) != game + FM6_FRAME_VLINE_WAIT ||
         !bytes_match(game + FM6_FRAME_VLINE_WAIT, "4053", 2)) {
-        wlog("FM6: fps: slot 0x108 (vline) nao confere, sem medicao");
+        wlog("FM6: fps: slot 0x108 (vline) does not match, not measured");
         return;
     }
     fm6_present_orig = (fm6_vcall4)(game + FM6_FRAME_PRESENT);
@@ -772,12 +772,12 @@ static void fm6_frame_rate(uint8_t *game, uint32_t fps)
     if (!bytes_match(game + FM6_FRAME_SET_SYNC, "8991a0000000c3", 7) ||
         !bytes_match(game + FM6_FRAME_PRESENT + 0x1b, "8b89a000000085c90f84", 10) ||
         *(uint8_t **)(game + FM6_FRAME11_VTBL + 0x158) != game + FM6_FRAME_PRESENT) {
-        wlog("FM6: fps: setter/Present nao conferem, ignorado");
+        wlog("FM6: fps: setter/Present do not match, ignored");
         return;
     }
     for (i = 0; i < 2; i++)
         if (*(uint8_t **)(game + vtbls[i] + 0x1a0) != game + FM6_FRAME_SET_SYNC) {
-            wlog("FM6: fps: vtable %#x slot 0x1a0 nao confere, ignorado", vtbls[i]);
+            wlog("FM6: fps: vtable %#x slot 0x1a0 does not match, ignored", vtbls[i]);
             return;
         }
     fps_game = game;
@@ -785,10 +785,10 @@ static void fm6_frame_rate(uint8_t *game, uint32_t fps)
     fps_queue_ret = 0;
     fps_force = fps >= 60;
     for (i = 0; i < 2; i++) write_mem(game + vtbls[i] + 0x1a0, &fn, 8);
-    wlog("FM6: fps: frame_rate %u -> %s", fps, fps_force ? "present sempre com intervalo 1" : "original");
+    wlog("FM6: fps: frame_rate %u -> %s", fps, fps_force ? "present always with interval 1" : "original");
     if (fps_force && !hook_at(game + FM6_GET_FRAME_RATE, "40574883ec4048c7442420feffffff48895c2458", 20,
                               (void *)fm6_get_frame_rate, (void **)&fm6_get_frame_rate_orig))
-        wlog("FM6: fps: getter do FrameRate %#x nao confere, cenarios a 30 ficam", FM6_GET_FRAME_RATE);
+        wlog("FM6: fps: FrameRate getter %#x does not match, 30 fps scenarios stay", FM6_GET_FRAME_RATE);
     if (fps > 60) fm6_frame_unlock(game, fps);
     fm6_fps_meter(game);
 }
@@ -813,10 +813,10 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
         size_t i, n = sizeof fm5_splash_intro_cmps / sizeof *fm5_splash_intro_cmps;
         for (i = 0; i < n; i++)
             if (!bytes_match(game + fm5_splash_intro_cmps[i], "80be9f30000000", 7)) break;
-        if (i < n) wlog("FM5: SkipIntro: site %#x nao confere, ignorado", fm5_splash_intro_cmps[i]);
+        if (i < n) wlog("FM5: SkipIntro: site %#x does not match, ignored", fm5_splash_intro_cmps[i]);
         else {
             for (i = 0; i < n; i++) write_mem(game + fm5_splash_intro_cmps[i] + 6, &ff, 1);
-            wlog("FM5: SkipIntro=1 (disablesplashintro forcado)");
+            wlog("FM5: SkipIntro=1 (disablesplashintro forced)");
         }
     }
 
@@ -827,11 +827,11 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
         int32_t rel = (int32_t)(FM5_IE_VIDEO_DONE - (FM5_IE_VIDEO_PLAY + 5));
         if (!bytes_match(p, "4883ec7848c7442420feffffff", 13) ||
             !bytes_match(game + FM5_IE_VIDEO_DONE, "4883ec48488d15851ac200", 11))
-            wlog("FM5: SkipPresentationVideo: site nao confere, ignorado");
+            wlog("FM5: SkipPresentationVideo: site does not match, ignored");
         else {
             memcpy(code + 1, &rel, 4);
             write_mem(p, code, sizeof code);
-            wlog("FM5: SkipPresentationVideo=1 (IE_Blockbuster.bk2 pulado)");
+            wlog("FM5: SkipPresentationVideo=1 (IE_Blockbuster.bk2 skipped)");
         }
     }
 
@@ -842,11 +842,11 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
         static const uint8_t ret1[6] = { 0xb8, 1, 0, 0, 0, 0xc3 }, dl1[2] = { 0xb2, 0x01 };
         if (!bytes_match(game + FM5_OFFER_OWNED, "48895c241048896c2418565741564883", 16) ||
             !bytes_match(game + FM5_OFFER_NOINV - 7, "488dbe8800000033d2488bcfe8abf7ffff", 17))
-            wlog("FM5: UnlockDLC: sites nao conferem, ignorado");
+            wlog("FM5: UnlockDLC: sites do not match, ignored");
         else {
             write_mem(game + FM5_OFFER_OWNED, ret1, sizeof ret1);
             write_mem(game + FM5_OFFER_NOINV, dl1, sizeof dl1);
-            wlog("FM5: UnlockDLC=1 (todas as ofertas de DLC contam como compradas)");
+            wlog("FM5: UnlockDLC=1 (all DLC offers count as purchased)");
         }
     }
 
@@ -855,10 +855,10 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
            em 0x1a13d0): imediato 0x01000000 -> 0x01010000 */
         static const uint8_t one = 1;
         if (!bytes_match(game + FM5_MARKET_DEFAULT, "c783bc30000000000001", 10))
-            wlog("FM5: EnableMarketplace: site nao confere, ignorado");
+            wlog("FM5: EnableMarketplace: site does not match, ignored");
         else {
             write_mem(game + FM5_MARKET_DEFAULT + 8, &one, 1);
-            wlog("FM5: EnableMarketplace=1 (enablemarketplace ligado)");
+            wlog("FM5: EnableMarketplace=1 (enablemarketplace on)");
         }
     }
 
@@ -872,12 +872,12 @@ static void fm5_patches(uint8_t *game, const uint8_t *options)
         uint8_t *p = game + FM5_SPEECH_SITE;
         uint8_t code[7] = { 0xbd, 0, 0, 0, 0, 0xeb, 0x16 };  /* mov ebp, idx ; jmp 0x623cd4 */
         if (!bytes_match(p, "418b6e043bee7c", 7)) {
-            wlog("FM5: site de fala nao confere, ignorado");
+            wlog("FM5: speech site does not match, ignored");
             return;
         }
         memcpy(code + 1, &speech->index, 4);
         write_mem(p, code, sizeof code);
-        wlog("FM5: fala forcada para %ls (indice %u)", speech->locale, speech->index);
+        wlog("FM5: speech forced to %ls (index %u)", speech->locale, speech->index);
     }
 }
 
@@ -911,14 +911,14 @@ static void take_tls_template(uint8_t *game)
     if (!t) return;
     start = (uint8_t *)(uintptr_t)t->StartAddressOfRawData;
     n = (size_t)(t->EndAddressOfRawData - t->StartAddressOfRawData);
-    if (n > TLS_HELPER_SIZE) { wlog("TLS: template de %#zx bytes > bloco do helper", n); return; }
+    if (n > TLS_HELPER_SIZE) { wlog("TLS: template of %#zx bytes > helper block", n); return; }
     for (i = 0; i < n && !start[i]; i++) ;
     if (i == n) return;                              /* ja zerado: nada a fazer */
     memcpy(game_tls, start, n);
     game_tls_size = n;
     memset(start, 0, n);                             /* .tls do jogo e RW; so o loader le o template */
     game_tls_pending = 1;
-    wlog("TLS: template de %#zx bytes guardado e zerado (1o byte nao nulo em +%#zx)", n, i);
+    wlog("TLS: template of %#zx bytes saved and zeroed (1st non-zero byte at +%#zx)", n, i);
 }
 
 typedef LONG (WINAPI *nt_query_thread_fn)(HANDLE, int, void *, ULONG, ULONG *);
@@ -1023,10 +1023,10 @@ static void tls_slot0_redirect(DWORD index)
     if (!slot0_n) return;
     for (i = 0; i < slot0_n; i++)
         if (slot0_reg(slot0_game + slot0_sites[i]) < 0) {
-            wlog("TLS: site do slot 0 em game+%#x nao confere; nenhum alterado", slot0_sites[i]);
+            wlog("TLS: slot 0 site at game+%#x does not match; none changed", slot0_sites[i]);
             return;
         }
-    if (!(stubs = alloc_near(slot0_game, 16 * 32))) { wlog("TLS: sem memoria perto do jogo para os stubs"); return; }
+    if (!(stubs = alloc_near(slot0_game, 16 * 32))) { wlog("TLS: no memory near the game for the stubs"); return; }
     for (i = 0; i < slot0_n; i++) {
         uint8_t *at = slot0_game + slot0_sites[i], code[9] = { 0xe8, 0, 0, 0, 0, 0x0f, 0x1f, 0x40, 0x00 };
         int r = slot0_reg(at);
@@ -1037,7 +1037,7 @@ static void tls_slot0_redirect(DWORD index)
         write_mem(at, code, sizeof code);
     }
     FlushInstructionCache(GetCurrentProcess(), stubs, 16 * 32);
-    wlog("TLS: %zu leituras do slot 0 do jogo -> indice %lu (%zu stubs em %p)", slot0_n, index, used, (void *)stubs);
+    wlog("TLS: %zu reads of the game's slot 0 -> index %lu (%zu stubs at %p)", slot0_n, index, used, (void *)stubs);
 }
 
 void game_tls_apply(void)
@@ -1055,7 +1055,7 @@ void game_tls_apply(void)
     t = helper ? tls_dir((uint8_t *)helper) : NULL;
     query = (nt_query_thread_fn)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationThread");
     if (!index || !t || !query || t->EndAddressOfRawData - t->StartAddressOfRawData < game_tls_size) {
-        wlog("TLS: azimuth-tls.dll nao confere (modulo %p indice %p); template do jogo NAO aplicado", (void *)helper, (void *)index);
+        wlog("TLS: azimuth-tls.dll does not match (module %p index %p); game template NOT applied", (void *)helper, (void *)index);
         return;
     }
     write_mem((void *)(uintptr_t)t->StartAddressOfRawData, game_tls, game_tls_size);
@@ -1076,7 +1076,7 @@ void game_tls_apply(void)
         } while (Thread32Next(snap, &te));
     }
     if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
-    wlog("TLS: template do jogo no azimuth-tls.dll (indice %lu) e em %d threads", *index, fixed);
+    wlog("TLS: game template in azimuth-tls.dll (index %lu) and in %d threads", *index, fixed);
 }
 
 /* hook com trampolim: os bytes roubados nao podem ter enderecos relativos a RIP */
@@ -1084,9 +1084,9 @@ int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void *
 {
     uint8_t *tramp;
     const void *back = at + stolen;
-    if (!bytes_match(at, orig_hex, strlen(orig_hex) / 2)) { wlog("hook %p: bytes nao conferem", (void *)at); return 0; }
+    if (!bytes_match(at, orig_hex, strlen(orig_hex) / 2)) { wlog("hook %p: bytes do not match", (void *)at); return 0; }
     tramp = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
-    if (!tramp) { wlog("hook %p: VirtualAlloc falhou", (void *)at); return 0; }
+    if (!tramp) { wlog("hook %p: VirtualAlloc failed", (void *)at); return 0; }
     memcpy(tramp, at, stolen);
     tramp[stolen] = 0xff; tramp[stolen + 1] = 0x25;
     memset(tramp + stolen + 2, 0, 4);
@@ -1099,7 +1099,7 @@ int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void *
 int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp_out)
 {
     if (!hook_at(g_base + rva, orig_hex, stolen, hook, tramp_out)) return 0;
-    wlog("hook %#x instalado", rva);
+    wlog("hook %#x installed", rva);
     return 1;
 }
 
@@ -1132,11 +1132,11 @@ static void fm6_committed_placement_textures(void)
 {
     static const uint8_t ret0[3] = { 0x31, 0xc0, 0xc3 };
     if (!bytes_match(g_base + RVA_TITLE_STORAGE_RESERVED, "48895c241055565748", 9)) {
-        wlog("FM6: placement textures committed: site %#x nao confere, ignorado", RVA_TITLE_STORAGE_RESERVED);
+        wlog("FM6: placement textures committed: site %#x does not match, ignored", RVA_TITLE_STORAGE_RESERVED);
         return;
     }
     write_mem(g_base + RVA_TITLE_STORAGE_RESERVED, ret0, 3);
-    wlog("FM6: placement textures como recurso committed (sem recurso reservado)");
+    wlog("FM6: placement textures as committed resources (no reserved resource)");
 }
 
 /* EXPERIMENTO D3D12Debug=6 (17_fm6.txt PASSO 25): o destroy comum 0x1400da270 (chamado pela fila de Release
@@ -1158,17 +1158,17 @@ static void fm6_leak_destroy(uint8_t *obj)
     LONG n;
     if (!leak_type(t)) { orig_gfx_destroy(obj); return; }
     n = InterlockedIncrement(&leaked[t]);
-    if (!(n & (n - 1))) wlog("FM6: D3D12Debug=6: destroy pulado tipo %#x (%ld)", t, n);
+    if (!(n & (n - 1))) wlog("FM6: D3D12Debug=6: destroy skipped type %#x (%ld)", t, n);
 }
 
 static void fm6_leak_gfx_objects(void)
 {
     if (!hook_function(RVA_GFX_DESTROY, "48895c241855565741564157488bec", 15, (void *)fm6_leak_destroy,
                        (void **)&orig_gfx_destroy)) {
-        wlog("FM6: D3D12Debug=6: site %#x nao confere, ignorado", RVA_GFX_DESTROY);
+        wlog("FM6: D3D12Debug=6: site %#x does not match, ignored", RVA_GFX_DESTROY);
         return;
     }
-    wlog("FM6: D3D12Debug=6: recursos/views nunca destruidos (vazam)");
+    wlog("FM6: D3D12Debug=6: resources/views never destroyed (they leak)");
 }
 
 /* 17_fm6.txt PASSO 47: o VirtualAlloc do Azimuth (0x1400aad30) so traduz as protecoes Xbox 0x10004/0x30004/0x20204
@@ -1195,7 +1195,7 @@ static void *fm6_az_valloc(void *addr, size_t size, uint32_t type, uint32_t prot
         static volatile LONG n;
         LONG k = InterlockedIncrement(&n);
         if (k <= 8 || !(k & (k - 1)))
-            wlog("FM6: VirtualAlloc grafico #%ld %p tam=%#zx tipo=%#x protecao %#x -> %#x: %p", k, addr, size, type,
+            wlog("FM6: graphics VirtualAlloc #%ld %p size=%#zx type=%#x protection %#x -> %#x: %p", k, addr, size, type,
                  protect, p, r);
     }
     return r;
@@ -1205,7 +1205,7 @@ static int fm6_graphics_protect_install(void)
 {
     if (!hook_function(RVA_AZ_VIRTUAL_ALLOC, "40555356574154415541564157488d6c24e1", 18, (void *)fm6_az_valloc,
                        (void **)&orig_az_valloc)) {
-        wlog("FM6: VirtualAlloc do Azimuth (%#x) nao confere; protecao 0x40404 sem traducao", RVA_AZ_VIRTUAL_ALLOC);
+        wlog("FM6: Azimuth VirtualAlloc (%#x) does not match; protection 0x40404 not translated", RVA_AZ_VIRTUAL_ALLOC);
         return 0;
     }
     return 1;
@@ -1227,24 +1227,24 @@ static void fm6_patches(uint8_t *game)
         size_t i, n = sizeof fm6_splash_intro_cmps / sizeof *fm6_splash_intro_cmps;
         for (i = 0; i < n; i++)
             if (!bytes_match(game + fm6_splash_intro_cmps[i], "4138b424d730000074", 9)) break;
-        if (i < n) wlog("FM6: SkipIntro: site %#x nao confere, ignorado", fm6_splash_intro_cmps[i]);
+        if (i < n) wlog("FM6: SkipIntro: site %#x does not match, ignored", fm6_splash_intro_cmps[i]);
         else if (!bytes_match(game + FM6_LOGO_PARADE_CMP, "4438b8d730000075", 8))
-            wlog("FM6: SkipIntro: site %#x nao confere, ignorado", FM6_LOGO_PARADE_CMP);
+            wlog("FM6: SkipIntro: site %#x does not match, ignored", FM6_LOGO_PARADE_CMP);
         else {
             for (i = 0; i < n; i++) write_mem(game + fm6_splash_intro_cmps[i] + 8, nop2, 2);
             write_mem(game + FM6_LOGO_PARADE_CMP + 7, &jmp8, 1);
-            wlog("FM6: SkipIntro=1 (disablesplashintro forcado: T10_MS_Combined.bk2 e logo parade pulados)");
+            wlog("FM6: SkipIntro=1 (disablesplashintro forced: T10_MS_Combined.bk2 and logo parade skipped)");
         }
     }
     if (cfg6_int(L"SkipPresentationVideo", 0)) {
         static const uint8_t nop5[5] = { 0x0f, 0x1f, 0x44, 0x00, 0x00 }, nop2[2] = { 0x66, 0x90 };
         if (!bytes_match(game + FM6_INTRO_VIDEO_SET, "488d4b28e832d846ff", 9) ||
             !bytes_match(game + FM6_INTRO_VIDEO_PATH, "85c07519", 4))
-            wlog("FM6: SkipPresentationVideo: site nao confere, ignorado");
+            wlog("FM6: SkipPresentationVideo: site does not match, ignored");
         else {
             write_mem(game + FM6_INTRO_VIDEO_SET + 4, nop5, 5);
             write_mem(game + FM6_INTRO_VIDEO_PATH + 2, nop2, 2);
-            wlog("FM6: SkipPresentationVideo=1 (IntroVideo das intros de carreira vazio: IE_Blockbuster.bk2 pulado)");
+            wlog("FM6: SkipPresentationVideo=1 (career intro IntroVideo empty: IE_Blockbuster.bk2 skipped)");
         }
     }
     if (cfg6_int(L"UnlockDLC", 0)) {
@@ -1254,11 +1254,11 @@ static void fm6_patches(uint8_t *game)
         static const uint8_t ret1[6] = { 0xb8, 1, 0, 0, 0, 0xc3 }, dl1[2] = { 0xb2, 0x01 };
         if (!bytes_match(game + FM6_OFFER_OWNED, "48895c2410565741564883ec20488db9", 16) ||
             !bytes_match(game + FM6_OFFER_NOINV - 7, "488dbba000000033d2488bcfe86a000000", 17))
-            wlog("FM6: UnlockDLC: sites nao conferem, ignorado");
+            wlog("FM6: UnlockDLC: sites do not match, ignored");
         else {
             write_mem(game + FM6_OFFER_OWNED, ret1, sizeof ret1);
             write_mem(game + FM6_OFFER_NOINV, dl1, sizeof dl1);
-            wlog("FM6: UnlockDLC=1 (todas as ofertas de DLC contam como compradas)");
+            wlog("FM6: UnlockDLC=1 (all DLC offers count as purchased)");
         }
     }
 }
@@ -1283,13 +1283,13 @@ static void hook_apply_patches(void *image, const void *options)
     placed_textures_setup();
     if (is_fm5()) {
         uint8_t *game = *(uint8_t **)image;
-        wlog("apply_patches: FM5 em %p, sites do FH2 pulados", game);
+        wlog("apply_patches: FM5 at %p, FH2 sites skipped", game);
         fm5_patches(game, options);
         return;
     }
     if (is_fm6()) {  /* os sites do registro sao do FH2: TLS, heap da APU e batches */
         uint8_t *game = *(uint8_t **)image;
-        wlog("apply_patches: FM6 em %p, sem patches", game);
+        wlog("apply_patches: FM6 at %p, no patches", game);
         g_fm6_game = game;
         take_tls_template(game);
         implicit_apu_heap("FM6");
@@ -1332,7 +1332,7 @@ static void *xg_vtbl[XG_NEW_SLOTS];
 static void *const *xg_fm5_vtbl;
 
 #define XG_BAD_SLOT(n) static long xg_bad_slot_##n(void *self) \
-    { wlog("XG: computer %p chamou o slot %d (sem equivalente no XG do FM5)", self, n); return (long)0x80004001; }
+    { wlog("XG: computer %p called slot %d (no equivalent in the FM5 XG)", self, n); return (long)0x80004001; }
 XG_BAD_SLOT(7) XG_BAD_SLOT(8) XG_BAD_SLOT(9) XG_BAD_SLOT(10) XG_BAD_SLOT(11)
 XG_BAD_SLOT(12) XG_BAD_SLOT(13) XG_BAD_SLOT(14) XG_BAD_SLOT(15)
 
@@ -1370,7 +1370,7 @@ static void xg_wrap_computer(void **obj)
         xg_fm5_vtbl = *(void *const **)obj;
         for (i = 0; i < XG_NEW_SLOTS; i++)
             xg_vtbl[i] = i < 6 ? xg_fm5_vtbl[i] : i == 6 ? (void *)xg_copy_from_subresource : bad[i - 7];
-        wlog("XG: vtable do computer %p -> layout novo (6 = CopyFromSubresource proprio)", (void *)xg_fm5_vtbl);
+        wlog("XG: computer %p vtable -> new layout (6 = own CopyFromSubresource)", (void *)xg_fm5_vtbl);
     }
     if (*(void *const **)obj == xg_fm5_vtbl) *obj = xg_vtbl;
 }
@@ -1393,12 +1393,12 @@ static void xg_wrap_computer_fm6(void **obj)
         int i;
         if (!bytes_match(vt[3], get54b8, 8) || !bytes_match(vt[4], get54c0, 8)) {
             static int logged;
-            if (!logged++) wlog("XG: computer %p do FM6 com vtable %p inesperada, sem conversao", (void *)obj, (void *)vt);
+            if (!logged++) wlog("XG: FM6 computer %p with unexpected vtable %p, not converted", (void *)obj, (void *)vt);
             return;
         }
         for (i = 0; i < XG_FH2_SLOTS; i++) xg_fm6_new[i] = vt[xg_fm6_slot[i]];
         xg_fm6_vtbl = vt;
-        wlog("XG: vtable do computer do FM6 %p -> layout do FH2 (12 -> 8 slots)", (void *)vt);
+        wlog("XG: FM6 computer vtable %p -> FH2 layout (12 -> 8 slots)", (void *)vt);
     }
     if (vt == xg_fm6_vtbl) *obj = xg_fm6_new;
 }
@@ -1437,16 +1437,16 @@ static int install(void)
     /* 1) conferir tudo antes de escrever qualquer coisa */
     if (!bytes_match(g_base + RVA_ALLOW_SPAN + 8, "0200000000000000", 8) ||
         *(void **)(g_base + RVA_ALLOW_SPAN) != g_base + RVA_ALLOW_ARRAY) {
-        wlog("allow list nao confere"); return 0;
+        wlog("allow list does not match"); return 0;
     }
     for (i = 0; i < sizeof exe_patches / sizeof exe_patches[0]; i++)
         if (!bytes_match(g_base + exe_patches[i].rva, exe_patches[i].orig, exe_patches[i].len)) {
-            wlog("bytes nao conferem em %#x (%s)", exe_patches[i].rva, exe_patches[i].what); return 0;
+            wlog("bytes do not match at %#x (%s)", exe_patches[i].rva, exe_patches[i].what); return 0;
         }
     if (!bytes_match(g_base + RVA_XG_NAME_CMP, xg_orig, 21) ||
         !bytes_match(g_base + RVA_APPLY_PATCHES, apply_orig, 16) ||
         !bytes_match(g_base + RVA_RESOLVER, resolver_orig, 16)) {
-        wlog("bytes do resolvedor/apply_patches nao conferem"); return 0;
+        wlog("resolver/apply_patches bytes do not match"); return 0;
     }
 
     /* 2) registros + allow list {fh2, fh2 f&f, fm5, fm6} */
@@ -1474,25 +1474,25 @@ static int install(void)
     xg_match_target = g_base + RVA_XG_NAME_MATCH;
     xg_next_target = g_base + RVA_XG_NAME_NEXT;
     abs_jmp(g_base + RVA_XG_NAME_CMP, (const void *)xg_name_stub, 21);
-    wlog("patch %#x: resolvedor aceita xg.dll", RVA_XG_NAME_CMP);
+    wlog("patch %#x: resolver accepts xg.dll", RVA_XG_NAME_CMP);
 
     /* 5) hook do apply_patches (14 bytes roubados, sem RIP-relativos) */
     if (!hook_function(RVA_APPLY_PATCHES, apply_orig, APPLY_STOLEN,
                        (void *)hook_apply_patches, (void **)&orig_apply_patches)) return 0;
-    wlog("patch %#x: apply_patches com hook", RVA_APPLY_PATCHES);
+    wlog("patch %#x: apply_patches hooked", RVA_APPLY_PATCHES);
 
     /* 6) resolvedor de imports: d3d11_x.dll!D3D11CreateDevice para o FM5 (d3d_fm5.c) */
     if (!d3d_install()) return 0;
-    wlog("patch %#x: resolvedor com hook (D3D11CreateDevice)", RVA_RESOLVER);
+    wlog("patch %#x: resolver hooked (D3D11CreateDevice)", RVA_RESOLVER);
 
     /* 7) descritores do XG no layout do XDK do FM5 */
     if (!hook_function(RVA_XG_COMPUTER, "48895c24205556574154415541564157", XG_COMPUTER_STOLEN,
                        (void *)hook_xg_computer, (void **)&orig_xg_computer)) return 0;
-    wlog("patch %#x: XG texture computer com hook (layout do desc do FM5)", RVA_XG_COMPUTER);
+    wlog("patch %#x: XG texture computer hooked (FM5 desc layout)", RVA_XG_COMPUTER);
 
     /* 8) ativacao WinRT: classes do XDK do FM5 sem equivalente (SpeechRecognizer) -> fabrica stub */
     if (!winrt_install()) return 0;
-    wlog("patch 0x9a680/0x208790: ativacao WinRT (fabricas stub) e GetTemplateByName (5 templates do FM5)");
+    wlog("patch 0x9a680/0x208790: WinRT activation (stub factories) and GetTemplateByName (5 FM5 templates)");
 
     /* 9) grafos SHAPE (audio) do XDK do FM5 (shape_fm5.c) */
     if (!shape_install()) return 0;
@@ -1516,7 +1516,7 @@ static void load_real_winmm(void)
     UINT n = GetSystemDirectoryW(path, MAX_PATH);
     wcscpy(path + n, L"\\winmm.dll");
     real = LoadLibraryW(path);
-    if (!real) { wlog("winmm real nao carregou"); return; }
+    if (!real) { wlog("real winmm did not load"); return; }
     for (i = 0; winmm_names[i]; i++)
         winmm_real[i] = (void *)GetProcAddress(real, winmm_names[i]);
 }
@@ -1548,11 +1548,11 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         GetModuleFileNameW(NULL, path, MAX_PATH);
         slash = wcsrchr(path, L'\\');
         if (_wcsicmp(slash ? slash + 1 : path, L"azimuth.exe") != 0) {
-            wlog("processo nao e azimuth.exe, so repasse");
+            wlog("process is not azimuth.exe, forwarding only");
             return TRUE;
         }
         if (!install()) {
-            wlog("NADA FOI ALTERADO");
+            wlog("NOTHING WAS CHANGED");
             MessageBoxW(NULL, L"azimuth.exe is not the expected version; the mod's patches were not applied.\n"
                               L"See azimuth_motorsport.log.", L"winmm FM5", MB_ICONWARNING);
         }

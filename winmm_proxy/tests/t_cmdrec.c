@@ -339,7 +339,7 @@ TEST(cmdrec_setup_and_wants)
     log_capture();
     rc_setup(inner);
     CHECK(!rc_on);                                   /* bytes zerados: nao confere */
-    CHECK(log_has("nao confere"));
+    CHECK(log_has("does not match"));
     memcpy(az + 0xdef6d, "\xff\x50\x60\xeb\x0c", 5);   /* call [rax+0x60]; jmp */
     rc_setup(inner);
     CHECK(rc_on);

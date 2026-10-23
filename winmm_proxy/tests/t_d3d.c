@@ -481,7 +481,7 @@ TEST(private_data_bytecode_double_free_guard)
     out = NULL; size = 8;
     CHECK_EQ((uint32_t)dtor_get(obj, &guid_bytecode, &size, &out), (uint32_t)DXGI_ERROR_NOT_FOUND_);
     CHECK(out == NULL);                            /* 2a vez: double free evitado */
-    CHECK(log_has("double free evitado"));
+    CHECK(log_has("double free avoided"));
     release_result = 0;
     pd_release_hook(obj);
 }
@@ -929,7 +929,7 @@ TEST(fm6_deferred_placement_update_shadow_to_immediate)
     v1 = d->upd[0].cur;
     CHECK(shd_ref == 1 && v1->ref == 1 && v1->size == 64);
     CHECK(v1->data[7] == 0xee && v1->data[8] == 1 && v1->data[11] == 4 && v1->data[12] == 0xee);
-    CHECK(log_has("sombra de buf") && log_has("-> sombra"));
+    CHECK(log_has("shadow of buf") && log_has("-> shadow"));
     fm6_UpdateSubresource(jctx, res, 0, box, d1, 0, 0);       /* sem versao compartilhada: altera no lugar */
     CHECK(d->upd[0].cur == v1);
     o1 = fm6_om_snapshot(jctx);                                /* so a sombra suja ja gera a copia */
@@ -956,7 +956,7 @@ TEST(fm6_deferred_placement_update_shadow_to_immediate)
     CHECK(shd_upd_n == 2 && shd_upd_data[0] == 0x40 && shd_upd_data[8] == 0x48);
     fm6_upd_apply(ictx, o1);                                   /* lista reexecutada: volta a versao dela */
     CHECK(shd_upd_n == 3 && shd_upd_data[8] == 1);
-    CHECK(log_has("versoes de placement buffer aplicadas no imediato"));
+    CHECK(log_has("placement buffer versions applied on the immediate"));
     fm6_om_item_release(o1);
     fm6_om_item_release(o2);
     fm6_om_item_release(o3);
@@ -1116,7 +1116,7 @@ TEST(fm6_resource_batch_records_objects)
     log_capture();
     fm6_SetFastResourcesFromBatch(ctx, cb, 4 * 20 + 12);
     CHECK_EQ(batch_calls, 4);
-    CHECK(!log_has("registro desconhecido"));
+    CHECK(!log_has("unknown record"));
     CHECK(batch_start[3] == 3 && batch_obj[3] == o[3] && batch_obj[2] == o[2]);
     batch_calls = 0;
     fm6_SetFastResourcesFromBatch(ctx, srv + 7 * 36, 36);
@@ -1128,7 +1128,7 @@ TEST(fm6_resource_batch_records_objects)
     log_capture();
     fm6_SetFastResourcesFromBatch(ctx, cb + 4 * 20, 20);      /* registro nao gravado: nada */
     CHECK_EQ(batch_calls, 0);
-    CHECK(log_has("registro desconhecido 0xeeeeeeee"));
+    CHECK(log_has("unknown record 0xeeeeeeee"));
 }
 
 /* objeto com contagem de referencias (AddRef/Release nos slots 1/2) */
@@ -1167,12 +1167,12 @@ TEST(fm6_resource_batch_holds_srv_refs)
     fm6_SetFastResourcesFromBatch(ctx, srv + 3 * 36, 36);
     CHECK(batch_calls == 1 && batch_obj[0] == &a);
     CHECK_EQ(a.refs, 1);                                      /* a sonda devolve o que pegou */
-    CHECK(log_has("ja solto pelo jogo"));
+    CHECK(log_has("already released by the game"));
     batch_calls = 0;
     log_capture();
     fm6_SetFastResourcesFromBatch(ctx, srv + 1 * 36, 36);     /* b2 ainda do jogo: sem aviso */
     CHECK(batch_calls == 1 && batch_obj[0] == &b2);
-    CHECK(!log_has("ja solto pelo jogo"));
+    CHECK(!log_has("already released by the game"));
     fm6_batch_hold = 1;
 }
 
@@ -1196,7 +1196,7 @@ TEST(fm6_immediate_srv_hold)
     CHECK_EQ(k, 0);
     CHECK_EQ(a.refs, 1);                                      /* trocada: ainda na fila, nao solta */
     CHECK(b2.refs == 2 && c.refs == 2);
-    CHECK(log_has("solta pelo jogo ainda ligada no imediato"));
+    CHECK(log_has("released by the game still bound on immediate"));
     k = ih_bind(ctx, 0, 0, 0, NULL, 160, 50, out, 8);         /* 40 de 50: ainda espera */
     CHECK_EQ(k, 0);
     k = ih_bind(ctx, 0, 0, 0, NULL, 170, 50, out, 8);
@@ -1204,7 +1204,7 @@ TEST(fm6_immediate_srv_hold)
     log_capture();
     k = ih_bind(ctx, 4, 3, 2, NULL, 180, 50, out, 8);         /* desliga: as duas vao para a fila */
     CHECK(k == 0 && b2.refs == 2 && c.refs == 2);
-    CHECK(!log_has("solta pelo jogo"));                       /* o jogo ainda as tem */
+    CHECK(!log_has("still bound on immediate"));                       /* o jogo ainda as tem */
     CHECK(ih_ctx[0].v[4][3] == NULL && ih_ctx[0].v[4][4] == NULL);
     k = ih_bind(ctx, 6, 0, 1, (void *[]){ &a }, 300, 50, out, 8);   /* estagio invalido: so drena */
     CHECK(k == 2 && a.refs == 1);
@@ -1341,7 +1341,7 @@ TEST(fm6_nested_command_lists)
         CHECK(((fin_fn)def[0x73])(d2ctx, FALSE, &out) == 0);
         ((exec_fn)imm[0x3b])(ictx, out, FALSE);
         CHECK(exec_n == 3 && exec_cl[0] == w1 && exec_cl[1] == w2 && exec_cl[2] == out);
-        CHECK(log_has("sem nada gravado antes: sem parte"));
+        CHECK(log_has("with nothing recorded before: no part"));
     }
 }
 
@@ -1468,8 +1468,8 @@ TEST(fm6_nested_bundle_inherits_om)
     log_capture();
     CHECK(((mk_fn)dev_vt[0x1b])(NULL, 0, &j) == 0 && j == inh_ctx[0]);
     CHECK(((mk_fn)dev_vt[0x44])(NULL, 0x60000, &w) == 0 && w == inh_ctx[1]);
-    CHECK(log_has("FM6 CreateDeferredContext flags=0 -> diferido d"));
-    CHECK(log_has("FM6 CreateDeferredContextX flags=0x60000 -> diferido d"));
+    CHECK(log_has("FM6 CreateDeferredContext flags=0 -> deferred d"));
+    CHECK(log_has("FM6 CreateDeferredContextX flags=0x60000 -> deferred d"));
     /* juntador liga RT/DS, viewport e scissor (repassados ao Azimuth) */
     ((om_fn)def[0x22])(j, 1, rtvs, &dsv);
     ((vp_fn)def[0x2d])(j, 1, vp);
@@ -1497,7 +1497,7 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(fm6_dctx_find(j)->st.ncb[5] == 3 && fm6_dctx_find(j)->st.nsrv[5] == 4 && fm6_dctx_find(j)->st.srv[5][3] == &srvv);
     ((void (*)(void *, UINT, UINT, UINT, UINT))def[0xa0])(w, 4, 0, 5, 3);
     CHECK_EQ(inh_remap_n, 1);
-    CHECK(log_has("RemapShaderResourceInheritance #1 no diferido d"));
+    CHECK(log_has("RemapShaderResourceInheritance #1 on deferred d"));
     /* SetFastResources do XDK (FM6 0xd4, PASSO 50): CB do PS slot 4 (tipo 1) e sampler (tipo 2) -> anota so o CB e
        repassa (inicio, fim) ao Azimuth 0xd1 */
     {
@@ -1547,17 +1547,17 @@ TEST(fm6_nested_bundle_inherits_om)
        os nao gravados ficam como o imediato tem (PASSO 50) */
     CHECK(inh_res_n == 3 + 4 && inh_res_ctx == inh_ctx[2] && inh_res_slot == 0x43 && inh_res_start == 3);
     CHECK(inh_res_cnt == 1 && inh_res_last == &srvv);
-    CHECK(log_has("1 viewports, 1 scissors, 2 slots de CB e 1 de SRV estacionados"));
-    CHECK(log_has("estagio 4:----x estagio 5:--x"));
+    CHECK(log_has("1 viewports, 1 scissors, 2 CB slots and 1 SRV slots parked"));
+    CHECK(log_has("stage 4:----x stage 5:--x"));
     CHECK_EQ(exec_n, 4);
     CHECK(exec_cl[0] == part && exec_cl[1] == b && exec_cl[2] == b2 && exec_cl[3] == f);
     CHECK(inh_om_n == 2 && inh_om_ctx == inh_ctx[2] && inh_om_rts == 1 && inh_om_rtv0 == &rtv && inh_om_dsv == &dsv);
     CHECK(inh_vp_n == 2 && inh_sc_n == 2);
     CHECK(inh_bs_n == 2 && inh_bs_ctx == inh_ctx[2] && inh_bs == &bsv && inh_bs_mask == 0xffffffffu && inh_bs_f0 == 1.0f);
     CHECK(inh_ds_n == 2 && inh_ds == &dssv && inh_ds_ref == 3 && inh_rs_n == 2 && inh_rs == &rsv);
-    CHECK(log_has("bundle aninhado executa com o OM do juntador (1 RTs"));
-    CHECK(log_has("CBs da copia no imediato"));   /* PASSO 49 */
-    CHECK(log_has("estagio 4 slot 0 <- estagio 5 slot 3"));
+    CHECK(log_has("nested bundle runs with the joiner's OM (1 RTs"));
+    CHECK(log_has("CBs of the copy on immediate"));   /* PASSO 49 */
+    CHECK(log_has("stage 4 slot 0 <- stage 5 slot 3"));
     CHECK(log_has("depth ") && log_has(" ref 3, rs "));
     CHECK(rtv.ref == 3);                                                 /* f ainda segura as copias */
     CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);
@@ -1657,7 +1657,7 @@ TEST(fm6_esram_alias_copy_and_resolve)
     /* ClearState tambem fecha a cena */
     ((disp_fn)imm[0x2a])(ctx, 240, 135, 1);
     ((void (*)(void *))imm[0x6f])(ctx);
-    CHECK(al6_resolve_n == 2 && log_has("saiu da cena (ClearState)"));
+    CHECK(al6_resolve_n == 2 && log_has("left the scene (ClearState)"));
     alias_test = 0;
 }
 
@@ -1694,7 +1694,7 @@ TEST(fm6_reexecuted_list_waits_for_gpu)
     *(uint64_t *)(rx_fence + AZ_FENCE_SUBMITTED) = 13;
     fm6_apply_execute(ctx, cl, 0, NULL);                     /* ...agora em 13, ja submetida: so espera */
     CHECK(rx_orig == 4 && rx_submits == 1 && rx_waits == 2 && rx_wait_value == 13);
-    CHECK(log_has("reexecutada antes da GPU terminar"));
+    CHECK(log_has("re-executed before the GPU finished"));
     *(uint64_t *)(rx_fence + AZ_FENCE_DONE) = 20;
     fm6_apply_execute(ctx, cl, 0, NULL);                     /* GPU ja passou: direto */
     CHECK(rx_orig == 5 && rx_waits == 2);

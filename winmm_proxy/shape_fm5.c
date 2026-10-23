@@ -41,14 +41,14 @@ static void translate_graph(uint64_t *b, uint64_t *e)
 {
     LONG n = graphs_logged < 4 ? InterlockedIncrement(&graphs_logged) : 0;
     uint64_t *p;
-    if (n) wlog("shape: grafo do FM5 (%u entradas)", (unsigned)(e - b));
+    if (n) wlog("shape: FM5 graph (%u entries)", (unsigned)(e - b));
     for (p = b; p != e; p++) {
         unsigned op = (unsigned)(*p & 0x1f), nop;
         if (fm5_opcode(op, &nop)) {
             *p = (*p & ~(uint64_t)0x1f) | nop;
         } else if (unknown_logged < 16) {
             InterlockedIncrement(&unknown_logged);
-            wlog("shape: opcode %u do FM5 sem traducao: %016llx", op, (unsigned long long)*p);
+            wlog("shape: FM5 opcode %u not translated: %016llx", op, (unsigned long long)*p);
         }
         if (n) wlog("shape:   [%u] %016llx op %u -> %u", (unsigned)(p - b), (unsigned long long)*p, op,
                     (unsigned)(*p & 0x1f));
@@ -63,7 +63,7 @@ static void fm6_graph_log(uint8_t *graph)
     uint64_t *b = *(uint64_t **)(graph + 0x48), *e = *(uint64_t **)(graph + 0x50), *p;
     LONG n = InterlockedIncrement(&fm6_graphs);
     if (n > 4 && (n & (n - 1))) return;
-    wlog("shape: grafo do FM6 #%ld (%u entradas)", n, (unsigned)(e - b));
+    wlog("shape: FM6 graph #%ld (%u entries)", n, (unsigned)(e - b));
     if (n <= 2)
         for (p = b; p != e && p - b < 16; p++)
             wlog("shape:   [%u] %016llx op %u", (unsigned)(p - b), (unsigned long long)*p, (unsigned)(*p & 0x1f));

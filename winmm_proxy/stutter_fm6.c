@@ -191,7 +191,7 @@ static int iat_swap(uint32_t rva, const char *name, void *hook, void **orig)
     void *kb = (void *)GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), name);
     DWORD old;
     if (!*slot || (*slot != k32 && *slot != kb)) {
-        wlog("stutter: IAT %#x (%s) nao confere (%p; kernel32 %p, kernelbase %p) -> sem hook", rva, name, *slot, k32, kb);
+        wlog("stutter: IAT %#x (%s) does not match (%p; kernel32 %p, kernelbase %p) -> not hooked", rva, name, *slot, k32, kb);
         return 0;
     }
     *orig = *slot;
@@ -259,7 +259,7 @@ void rk_note(int k, LONG64 ticks, const D3D12_RESOURCE_DESC *rd, uint64_t size, 
 /* " | committed 3 12.0 ms (max 9.1 ms tex2d 2048x2048x1 m12 f71 fl0 16384 KB tid 123), ..." so tipos com chamadas */
 int rk_format(char *buf, int cap)
 {
-    static const char *const kn[RK_N] = { "committed", "placed", "reserved", "heap", "tiles", "destruir" };
+    static const char *const kn[RK_N] = { "committed", "placed", "reserved", "heap", "tiles", "destroy" };
     static const char *const dn[] = { "?", "buf", "tex1d", "tex2d", "tex3d" };
     int len = 0, k, any = 0;
     for (k = 0; k < RK_N && len < cap - 200; k++) {
@@ -267,7 +267,7 @@ int rk_format(char *buf, int cap)
         if (!rk_n[k]) continue;
         len += sprintf(buf + len, "%s %s %ld %.1f ms (max %.1f ms", any ? "," : " |", kn[k], rk_n[k], ms_of(rk_ticks[k]), ms_of(m->ticks));
         if (k == RK_HEAP) len += sprintf(buf + len, " %llu KB fl%#x", (unsigned long long)(m->size >> 10), m->flags);
-        else if (k == RK_TILES) len += sprintf(buf + len, " %u regioes", m->flags);
+        else if (k == RK_TILES) len += sprintf(buf + len, " %u regions", m->flags);
         else if (k < RK_HEAP)
             len += sprintf(buf + len, " %s %ux%ux%u m%u f%u fl%#x %llu KB", dn[m->dim <= 4 ? m->dim : 0], m->w, m->h, m->depth, m->mips,
                            m->fmt, m->flags, (unsigned long long)(m->size >> 10));
@@ -289,9 +289,9 @@ void rk_reset(void)
  * destruicao de fato, UpdateTileMappings. Cada mapeamento e conferido: recurso ou heap ja solto pelo reaper (ou
  * destruido), faixa do heap alem do tamanho. cx_dump (dred_watch, D3D12Debug>=3) grava o anel quando o device cai. */
 enum { CX_RESERVED, CX_COMMITTED, CX_PLACED, CX_HEAP, CX_DEFER, CX_DESTROY, CX_TILES, CX_BAD, CX_REEXEC, CX_N };
-static const char *const cx_names[CX_N] = { "reservado", "committed", "placed", "heap", "reaper solta (adiado)",
-                                            "destruido", "UpdateTileMappings", "MAPEAMENTO SUSPEITO",
-                                            "lista reexecutada (fence anterior, concluida, enviada)" };
+static const char *const cx_names[CX_N] = { "reserved", "committed", "placed", "heap", "reaper release (deferred)",
+                                            "destroyed", "UpdateTileMappings", "SUSPICIOUS MAPPING",
+                                            "list re-executed (previous fence, completed, submitted)" };
 typedef struct { LONG64 t; uint32_t kind, tid; void *a, *b; uint32_t x[8]; } cx_ev;
 #define CX_RING 1024
 static cx_ev cx_ring[CX_RING];
@@ -375,8 +375,8 @@ static void cx_tiles(void *res, UINT nr, const D3D12_TILED_RESOURCE_COORDINATE *
         LONG k = InterlockedIncrement(&cx_bad);
         cx_add(CX_BAD, res, heap, y, 5);
         if (k <= 32 || !(k & (k - 1)))
-            wlog("stutter: caixa-preta: UpdateTileMappings suspeito #%ld: recurso %p%s heap %p%s, faixa %u = tiles %u+%u de %u",
-                 k, res, bad & 1 ? " (JA SOLTO)" : "", heap, bad & 2 ? " (JA SOLTO)" : "", y[1], y[2], y[3], size);
+            wlog("stutter: black box: suspicious UpdateTileMappings #%ld: resource %p%s heap %p%s, range %u = tiles %u+%u of %u",
+                 k, res, bad & 1 ? " (ALREADY RELEASED)" : "", heap, bad & 2 ? " (ALREADY RELEASED)" : "", y[1], y[2], y[3], size);
     }
 }
 
@@ -384,7 +384,7 @@ void cx_dump(void)
 {
     LONG n = cx_seq, i, first = n > CX_RING ? n - CX_RING : 0;
     LONG64 now = qpc();
-    wlog("stutter: caixa-preta: %ld eventos, %ld mapeamentos suspeitos; ultimos %ld (ms antes da queda):", n, cx_bad, n - first);
+    wlog("stutter: black box: %ld events, %ld suspicious mappings; last %ld (ms before the crash):", n, cx_bad, n - first);
     for (i = first; i < n; i++) {
         cx_ev *e = &cx_ring[i % CX_RING];
         wlog("stutter: cx %.1f ms tid %lu %s %p %p [%u %u %u %u %u %u %u %u]", (double)(now - e->t) * 1000.0 / st_freq.QuadPart,
@@ -604,12 +604,12 @@ static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 
     int len;
     LONG k = InterlockedIncrement(&spikes);
     if (k > 300 && (k & (k - 1))) return;
-    len = wsprintfA(buf, "stutter: quadro #%ld (pico %ld) ", n, k);
-    len += sprintf(buf + len, "%.1f ms (media %.1f; %.1f no Present) | PSO %ld %.1f ms | recursos %ld %.1f ms %ld MB | "
-                   "ECL %ld (%ld listas) %.1f ms | esperas>=4ms:", ms, mean, in_present, st_n[ST_PSO], ms_of(st_ticks[ST_PSO]),
+    len = wsprintfA(buf, "stutter: frame #%ld (spike %ld) ", n, k);
+    len += sprintf(buf + len, "%.1f ms (average %.1f; %.1f in Present) | PSO %ld %.1f ms | resources %ld %.1f ms %ld MB | "
+                   "ECL %ld (%ld lists) %.1f ms | waits>=4ms:", ms, mean, in_present, st_n[ST_PSO], ms_of(st_ticks[ST_PSO]),
                    st_n[ST_RES], ms_of(st_ticks[ST_RES]), (long)(st_bytes >> 20), st_n[ST_ECL], st_lists,
                    ms_of(st_ticks[ST_ECL]));
-    if (!nt) len += wsprintfA(buf + len, " nenhuma");
+    if (!nt) len += wsprintfA(buf + len, " none");
     for (i = 0; i < nt && len < 1300; i++) {
         st_wait *w = &waits[top[i]];
         len += sprintf(buf + len, " [%s %.1f ms tid %u%s", kind[w->kind % 7], w->us / 1000.0, w->tid,
@@ -618,12 +618,12 @@ static void log_spike(LONG n, double ms, double mean, double in_present, LONG64 
         len += wsprintfA(buf + len, "]");
     }
     len += rk_format(buf + len, (int)sizeof buf - len - 300);
-    if (dr_on) len += sprintf(buf + len, " | adiados %ld soltos %ld fila %ld cheia %ld", dr_deferred, dr_released,
+    if (dr_on) len += sprintf(buf + len, " | deferred %ld released %ld queued %ld full %ld", dr_deferred, dr_released,
                               dr_head - dr_tail, dr_full);
     {
         static const char *const qn[] = { "direct", "bundle", "compute", "copy" };
-        len += sprintf(buf + len, " | GPU: maior trecho %.1f ms (%s, valor %llu), soma %.1f ms, %ld concluidos, %ld pendentes, "
-                       "%ld Wait de fila, %ld fora do anel", ms_of(gpu_max_ticks), qn[gpu_max_qt & 3],
+        len += sprintf(buf + len, " | GPU: longest span %.1f ms (%s, value %llu), total %.1f ms, %ld completed, %ld pending, "
+                       "%ld queue Waits, %ld outside the ring", ms_of(gpu_max_ticks), qn[gpu_max_qt & 3],
                        (unsigned long long)gpu_max_val, ms_of(gpu_sum_ticks), gpu_done, gpu_pend, sig_waits, sig_dropped);
     }
     wlog("%s", buf);
@@ -653,7 +653,7 @@ static void frame_tick(LONG64 before, LONG64 after)
         uint32_t k;
         for (k = 0; k < sum_n; k++) mean10 += sum_frames[k];
         mean10 /= sum_n;
-        wlog("stutter: 10 s: %u quadros, media %.1f ms, p99 %.1f, max %.1f, %u picos", sum_n, mean10,
+        wlog("stutter: 10 s: %u frames, average %.1f ms, p99 %.1f, max %.1f, %u spikes", sum_n, mean10,
              st_percentile(sum_frames, sum_n, 99), sum_max, sum_spikes);
         {
             char tb[512];
@@ -695,7 +695,7 @@ static void hook_swapchain(IUnknown *u)
     vt_swap((void **)&sc->lpVtbl->Present, st_present, (void **)&real_present);
     vt_swap((void **)&sc->lpVtbl->Present1, st_present1, (void **)&real_present1);
     sc->lpVtbl->Release(sc);
-    wlog("stutter: Present/Present1 da swap chain com medicao");
+    wlog("stutter: swap chain Present/Present1 measured");
 }
 
 static HRESULT (STDMETHODCALLTYPE *real_csc)(IDXGIFactory *, IUnknown *, DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
@@ -846,7 +846,7 @@ static void lp_ecl(ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l)
         if (merge) {   /* fila sem fence do proxy (nao acontece): listas reais nunca reusadas, mas nada de gravadora no D3D12 */
             static void *rq;
             static volatile LONG logged;
-            if (!InterlockedExchange(&logged, 1)) wlog("d3d: listas unificadas: fila %p sem fence do proxy", q);
+            if (!InterlockedExchange(&logged, 1)) wlog("d3d: unified lists: queue %p without a proxy fence", q);
             if ((k = rc_merge(&rq, q, n, l, UINT64_MAX, 0, &o)) != 0) real_ecl(q, k, o);
             return;
         }
@@ -874,7 +874,7 @@ enum { MR_C_DEFAULT, MR_C_UPLOAD, MR_C_READBACK, MR_C_CUSTOM, MR_PLACED, MR_RESE
        MR_H_READBACK, MR_H_CUSTOM, MR_ALLOCATOR, MR_DESC_HEAP, MR_PA, MR_KINDS };
 static const char *const mr_names[MR_KINDS] = { "committed DEFAULT", "committed UPLOAD", "committed READBACK",
     "committed CUSTOM", "placed", "reserved", "heap DEFAULT", "heap UPLOAD", "heap READBACK", "heap CUSTOM",
-    "allocators", "descriptor heaps", "placed do proxy" };
+    "allocators", "descriptor heaps", "proxy placed" };
 #define MR_BITS 20
 #define MR_SIZE (1u << MR_BITS)
 typedef struct { const void *o; uint32_t kind; uint64_t bytes; } mr_ent;
@@ -961,7 +961,7 @@ static void mr_del(const void *o)
 /* VirtualQuery do processo, por alocacao (AllocationBase): WC, com pagina NOACCESS comprometida (guarda), RW, RO,
  * mapeada; bytes comprometidos e numero de alocacoes (imagens fora) */
 enum { MV_WC, MV_GUARD, MV_RW, MV_RO, MV_OTHER, MV_MAPPED, MV_KINDS };
-static const char *const mv_names[MV_KINDS] = { "WC", "RW com guarda", "RW", "RO", "outra", "mapeada" };
+static const char *const mv_names[MV_KINDS] = { "WC", "RW guarded", "RW", "RO", "other", "mapped" };
 static void mv_close(uint64_t *bytes, uint32_t *allocs, uint64_t cur, int wc, int guard, int rw, int ro, DWORD type)
 {
     int k;
@@ -998,7 +998,7 @@ void mv_scan(uint64_t *bytes, uint32_t *allocs)
 }
 
 static HMODULE self_mod;
-/* ---- de quem sao os blocos "RW com guarda" (PASSO 95): crescem sem parar na corrida (714 MB -> 2.7 GB na queda,
+/* ---- de quem sao os blocos "RW guarded" (PASSO 95): crescem sem parar na corrida (714 MB -> 2.7 GB na queda,
  * nunca caem = vazamento; paginas NOACCESS entre blocos = heap). Le 1 pagina em MG_EVERY dessas alocacoes
  * (ReadProcessMemory: pagina solta no meio da leitura so falha) e conta os qwords que apontam para dentro de uma imagem
  * (vtables/codigo: azimuth, proxy, driver, d3d12, jogo) -> os valores mais frequentes dizem que objetos enchem. ---- */
@@ -1114,7 +1114,7 @@ void mg_report(const char *when)
     }
     (void)start;
     for (i = 0; i < mg_nmods; i++) total += mg_mods[i].n;
-    len = sprintf(buf, "stutter: blocos com guarda %s: %llu paginas lidas (1 em %d), %llu ponteiros para imagens; por modulo:",
+    len = sprintf(buf, "stutter: guarded blocks %s: %llu pages read (1 in %d), %llu pointers into images; per module:",
                   when, (unsigned long long)pages, MG_EVERY, (unsigned long long)total);
     for (k = 0; k < 8; k++) {                                /* os 8 modulos com mais ponteiros */
         int best = -1;
@@ -1136,7 +1136,7 @@ void mg_report(const char *when)
         if (best == MG_BINS) break;
         top[nt++] = best;
     }
-    len = sprintf(buf, "stutter: blocos com guarda %s: valores mais frequentes:", when);
+    len = sprintf(buf, "stutter: guarded blocks %s: most frequent values:", when);
     for (k = 0; k < (int)nt && len < 1800; k++) {
         int mi = mg_mod_of(mg_bins[top[k]].v);
         sprintf(one, " %s+%#llx x%llu;", mi >= 0 ? mg_mods[mi].name : "?",
@@ -1152,27 +1152,27 @@ void mr_report(const char *when)
     int len, k;
     uint64_t vb[MV_KINDS];
     uint32_t va[MV_KINDS];
-    len = sprintf(buf, "stutter: memoria %s: D3D12 vivos:", when);
+    len = sprintf(buf, "stutter: memory %s: live D3D12:", when);
     for (k = 0; k < MR_KINDS && len < 1700; k++) {
         LONG made = InterlockedExchange(&mr_made[k], 0), gone = InterlockedExchange(&mr_gone[k], 0);
         if (!mr_live[k] && !made) continue;
         len += sprintf(buf + len, " [%s %lld, %llu MiB, +%ld -%ld]", mr_names[k], (long long)mr_live[k],
                        (unsigned long long)(mr_live_bytes[k] > 0 ? mr_live_bytes[k] : 0) >> 20, made, gone);
     }
-    if (mr_full) len += sprintf(buf + len, " (tabela cheia: %ld fora)", mr_full);
+    if (mr_full) len += sprintf(buf + len, " (table full: %ld left out)", mr_full);
     len += pa_format(buf + len);
     mv_scan(vb, va);
-    len += sprintf(buf + len, " | processo:");
+    len += sprintf(buf + len, " | process:");
     for (k = 0; k < MV_KINDS; k++)
         len += sprintf(buf + len, " %s %llu MiB/%u", mv_names[k], (unsigned long long)(vb[k] >> 20), va[k]);
     wlog("%s", buf);
     {   /* PASSO 99: placement textures vivas a cada 60 s e na remocao do device */
         static int ticks;
-        if (!strcmp(when, "na remocao do device") || ++ticks % 6 == 0) pa_live_report(when);
+        if (!strcmp(when, "on device removal") || ++ticks % 6 == 0) pa_live_report(when);
     }
     {   /* conteudo dos blocos com guarda: a cada +256 MB deles e na remocao do device */
         static uint64_t scanned;
-        int final = !strcmp(when, "na remocao do device");
+        int final = !strcmp(when, "on device removal");
         if (final || vb[MV_GUARD] >= scanned + (256ull << 20)) {
             scanned = vb[MV_GUARD];
             mg_report(when);
@@ -1190,7 +1190,7 @@ static DWORD WINAPI mr_watch(void *param)
         FAILED(fence->lpVtbl->SetEventOnCompletion(fence, UINT64_MAX, ev)))
         return 0;
     WaitForSingleObject(ev, INFINITE);
-    mr_report("na remocao do device");
+    mr_report("on device removal");
     return 0;
 }
 
@@ -1617,7 +1617,7 @@ static void pa_refresh_hook(void *ctx, void *obj)
     if (pa_obj_orphan(obj)) {                         /* o envio escreveria na textura que mora ali agora */
         LONG k = InterlockedIncrement(&pa_orphan_uses);
         if (k <= 8 || (k & (k - 1)) == 0)
-            wlog("d3d: PlacementReclaim: refresh de placement orfa #%ld (obj %p) pulado", k, obj);
+            wlog("d3d: PlacementReclaim: orphan placement refresh #%ld (obj %p) skipped", k, obj);
         pa_obj_used(obj);
         return;
     }
@@ -1721,16 +1721,16 @@ void pa_live_lines(pa_snap *s, uint32_t n, uint32_t now, char *l1, char *l2)
                          s[i].bytes);
         }
     }
-    len = sprintf(l1, "%u, %.0f MiB | idade:", n, PA_MIB(total));
+    len = sprintf(l1, "%u, %.0f MiB | age:", n, PA_MIB(total));
     for (k = 0; k < 6; k++)
         len += sprintf(l1 + len, " %s%u min %u/%.0f MiB", k == 5 ? ">=" : "<", k == 5 ? 60 : age_min[k + 1], age_n[k], PA_MIB(age_b[k]));
-    len += sprintf(l1 + len, " | tamanho:");
+    len += sprintf(l1 + len, " | size:");
     for (k = 0; k < 4; k++) len += sprintf(l1 + len, " %s %u/%.0f MiB", sz_name[k], sz_n[k], PA_MIB(sz_b[k]));
-    sprintf(l1 + len, " | objeto do jogo: vivo %u/%.0f MiB, solto <%us %u/%.0f MiB, solto ha mais %u/%.0f MiB, sem anotacao %u/%.0f MiB",
+    sprintf(l1 + len, " | game object: alive %u/%.0f MiB, released <%us %u/%.0f MiB, released longer ago %u/%.0f MiB, not annotated %u/%.0f MiB",
             obj_n[0], PA_MIB(obj_b[0]), PA_GONE_S, obj_n[1], PA_MIB(obj_b[1]), obj_n[2], PA_MIB(obj_b[2]), obj_n[3], PA_MIB(obj_b[3]));
-    len = sprintf(l2, "endereco: %u anotadas, cobrem %.0f de %.0f MiB (aprox.); sobrepostas por mais nova %u/%.0f MiB (objeto "
-                  "vivo %u/%.0f MiB: usadas depois de cobertas %u/%.0f MiB, so antes %u/%.0f MiB, nunca %u/%.0f MiB; mesma forma "
-                  "no mesmo endereco %u/%.0f MiB), mesmo endereco %u/%.0f MiB | antigas (>=%u min, objeto vivo) por chamador:",
+    len = sprintf(l2, "address: %u annotated, cover %.0f of %.0f MiB (approx.); overlapped by a newer one %u/%.0f MiB (object "
+                  "alive %u/%.0f MiB: used after being covered %u/%.0f MiB, only before %u/%.0f MiB, never %u/%.0f MiB; same shape "
+                  "at the same address %u/%.0f MiB), same address %u/%.0f MiB | old (>=%u min, object alive) per caller:",
                   with_addr, PA_MIB(uni), PA_MIB(sum_len), over_n, PA_MIB(over_b), held_n, PA_MIB(held_b), use_n[0],
                   PA_MIB(use_b[0]), use_n[1], PA_MIB(use_b[1]), use_n[2], PA_MIB(use_b[2]), view_n, PA_MIB(view_b), same_n,
                   PA_MIB(same_b), PA_OLD_S / 60);
@@ -1740,7 +1740,7 @@ void pa_live_lines(pa_snap *s, uint32_t n, uint32_t now, char *l1, char *l2)
         len += sprintf(l2 + len, " game+%#llx %u/%.0f MiB;", (unsigned long long)callers[b].key, callers[b].n, PA_MIB(callers[b].bytes));
         callers[b].n = 0;
     }
-    len += sprintf(l2 + len, " formas:");
+    len += sprintf(l2 + len, " shapes:");
     for (k = 0; k < 6; k++) {
         int b = pa_tally_top(shapes, ns);
         uint64_t x;
@@ -1775,8 +1775,8 @@ static void pa_live_report(const char *when)
     if (!s) return;
     pa_live_lines(s, n, pa_now(), l1, l2);
     free(s);
-    wlog("stutter: placement vivas %s: %s", when, l1);
-    wlog("stutter: placement vivas %s: %s", when, l2);
+    wlog("stutter: live placements %s: %s", when, l1);
+    wlog("stutter: live placements %s: %s", when, l2);
 }
 
 /* a textura cabe no caminho placed? */
@@ -1792,11 +1792,11 @@ int pa_wants(const D3D12_HEAP_PROPERTIES *hp, D3D12_HEAP_FLAGS hf, const D3D12_R
 static int pa_format(char *out)
 {
     if (!pa_on) return 0;
-    int len = sprintf(out, " | placed do proxy: %ld heaps de 64 MiB, %lld MiB usados, %ld vivos, +%ld -%ld, %ld no committed",
+    int len = sprintf(out, " | proxy placed: %ld heaps of 64 MiB, %lld MiB used, %ld alive, +%ld -%ld, %ld as committed",
                       pa_nheaps, (long long)(pa_used_pages * PA_PAGE >> 20), pa_ntab, InterlockedExchange(&pa_made, 0),
                       InterlockedExchange(&pa_freed, 0), InterlockedExchange(&pa_fallback, 0));
     if (pa_reclaim_on)
-        len += sprintf(out + len, ", orfas %ld (%lld MiB devolvidos no total, %u na quarentena), refresh de orfa pulado %ld",
+        len += sprintf(out + len, ", orphans %ld (%lld MiB returned in total, %u in quarantine), orphan refresh skipped %ld",
                        pa_orphans, (long long)(pa_orphan_pages * PA_PAGE >> 20), pq_head - pq_tail, pa_orphan_uses);
     return len;
 }
@@ -2002,7 +2002,7 @@ static void lt_hook(ID3D12CommandList *cl)
     vt_swap((void **)&v->CopyTextureRegion, lt_CopyTex, (void **)&lt_real_CopyTex);
     vt_swap((void **)&v->ClearRenderTargetView, lt_Clear, (void **)&lt_real_Clear);
     l->lpVtbl->Release(l);
-    wlog("stutter: tempo dos metodos da command list na thread 'Azimuth queue' medido");
+    wlog("stutter: command list method timing measured on the 'Azimuth queue' thread");
 }
 
 uint32_t vz_top(const uint64_t *v, uint32_t n, uint32_t *idx, uint32_t max);
@@ -2016,7 +2016,7 @@ int lt_format(char *buf, int cap, double frames)
     double total = 0;
     for (i = 0; i < LT_N; i++) { t[i] = (uint64_t)lt_ticks[i]; total += ms_of(lt_ticks[i]); }
     n = vz_top(t, LT_N, idx, LT_N);
-    len += snprintf(buf + len, cap - len, "stutter: lista na fila 10 s (por quadro): medidos %.2f ms;", total / frames);
+    len += snprintf(buf + len, cap - len, "stutter: list on the queue 10 s (per frame): measured %.2f ms;", total / frames);
     for (i = 0; i < n && len < cap - 100; i++) {
         uint32_t k = idx[i];
         len += snprintf(buf + len, cap - len, " %s %.0f %.2f ms (%.1f us);", lt_names[k], lt_n[k] / frames, ms_of(lt_ticks[k]) / frames,
@@ -2090,7 +2090,7 @@ static int gt_init(ID3D12CommandQueue *q)
         gt_rb[i] = 0;
     }
     dev->lpVtbl->Release(dev);   /* query heap, buffer, allocator e listas ficam ate o fim */
-    wlog("stutter: tempo de GPU por grupo de listas na fila direct (loga acima de %d ms; %d timestamps)", gt_slow_ms, GT_TS);
+    wlog("stutter: GPU time per list group on the direct queue (logs above %d ms; %d timestamps)", gt_slow_ms, GT_TS);
     return 1;
 }
 
@@ -2106,7 +2106,7 @@ static void gt_poll(void)
         if (!gt_rb[(e->ts0 + e->ng) % GT_TS]) return;
         for (i = 0; i <= e->ng; i++) t[i] = gt_rb[(e->ts0 + i) % GT_TS];
         if (gt_prev_end && gt_ms(gt_prev_end, t[0]) >= gt_slow_ms)
-            wlog("stutter: GPU parada %.1f ms ANTES do ECL #%u (fila direct; Wait de fila ou nada enviado)",
+            wlog("stutter: GPU idle %.1f ms BEFORE ECL #%u (direct queue; queue Wait or nothing submitted)",
                  gt_ms(gt_prev_end, t[0]), e->seq);
         for (i = 0; i < e->ng; i++) {
             const gt_group *g = &e->g[i];
@@ -2114,8 +2114,8 @@ static void gt_poll(void)
             int len;
             double ms = gt_ms(t[i], t[i + 1]);
             if (ms < gt_slow_ms) continue;
-            len = snprintf(buf, sizeof buf, "stutter: GPU lenta %.1f ms no ECL #%u (%u listas; grupo %u de %u: %u listas a partir "
-                           "de %p, %u operacoes, ECL inteiro %.1f ms, enviado ha %.0f ms):", ms, e->seq, e->n, i + 1, e->ng,
+            len = snprintf(buf, sizeof buf, "stutter: GPU slow %.1f ms in ECL #%u (%u lists; group %u of %u: %u lists starting "
+                           "at %p, %u operations, whole ECL %.1f ms, submitted %.0f ms ago):", ms, e->seq, e->n, i + 1, e->ng,
                            g->nl, g->cl0, g->nops, gt_ms(t[0], t[e->ng]), ms_of(qpc() - e->qpc));
             for (k = 0; k < g->ntop && len < (int)sizeof buf - 90; k++)
                 len += snprintf(buf + len, sizeof buf - len, " [pso %08x x%u %s (%u,%u)]", g->top[k][0], g->top[k][1],
@@ -2130,7 +2130,7 @@ static void gt_poll(void)
 
 static int gt_group_str(char *buf, int cap, const gt_group *g)
 {
-    int len = snprintf(buf, cap, "%u listas a partir de %p, %u operacoes:", g->nl, g->cl0, g->nops);
+    int len = snprintf(buf, cap, "%u lists starting at %p, %u operations:", g->nl, g->cl0, g->nops);
     uint32_t k;
     for (k = 0; k < g->ntop && len < cap - 90; k++)
         len += snprintf(buf + len, cap - len, " [pso %08x x%u %s (%u,%u)]", g->top[k][0], g->top[k][1],
@@ -2146,7 +2146,7 @@ void gt_dump(void)
     uint32_t e0, shown = 0;
     int locked = TryAcquireSRWLockExclusive(&gt_lock);
     if (gt_state <= 0) { if (locked) ReleaseSRWLockExclusive(&gt_lock); return; }
-    wlog("stutter: tempo de GPU: %u ECLs medidos em voo na queda (fim do ultimo concluido: tick %llu)", gt_head - gt_tail,
+    wlog("stutter: GPU time: %u measured ECLs in flight at the crash (end of the last completed: tick %llu)", gt_head - gt_tail,
          (unsigned long long)gt_prev_end);
     for (e0 = gt_tail; e0 != gt_head && shown < 8; e0++, shown++) {
         const gt_ent *e = &gt_ring[e0 % GT_ENT];
@@ -2154,11 +2154,11 @@ void gt_dump(void)
         uint32_t i;
         UINT64 t0 = gt_rb[e->ts0 % GT_TS];
         if (!t0) {
-            wlog("stutter:  ECL #%u (%u listas em %u grupos, enviado ha %.0f ms): a GPU NAO COMECOU%s", e->seq, e->n, e->ng,
-                 ms_of(qpc() - e->qpc), e0 == gt_tail ? " -> parou ANTES dele (espera de fila/fence ou o anterior)" : "");
+            wlog("stutter:  ECL #%u (%u lists in %u groups, submitted %.0f ms ago): the GPU DID NOT START%s", e->seq, e->n, e->ng,
+                 ms_of(qpc() - e->qpc), e0 == gt_tail ? " -> stopped BEFORE it (queue/fence wait or the previous one)" : "");
             if (e0 == gt_tail) {
                 gt_group_str(buf, sizeof buf, &e->g[0]);
-                wlog("stutter:   1o grupo: %s", buf);
+                wlog("stutter:   1st group: %s", buf);
             }
             continue;
         }
@@ -2166,8 +2166,8 @@ void gt_dump(void)
             UINT64 a = gt_rb[(e->ts0 + i) % GT_TS], b = gt_rb[(e->ts0 + i + 1) % GT_TS];
             if (a && b) continue;
             gt_group_str(buf, sizeof buf, &e->g[i]);
-            wlog("stutter:  ECL #%u (%u listas, enviado ha %.0f ms): grupo %u de %u COMECOU (%.1f ms depois do fim do anterior) "
-                 "E NAO TERMINOU: %s", e->seq, e->n, ms_of(qpc() - e->qpc), i + 1, e->ng, gt_prev_end ? gt_ms(gt_prev_end, a) : 0.0,
+            wlog("stutter:  ECL #%u (%u lists, submitted %.0f ms ago): group %u of %u STARTED (%.1f ms after the end of the previous one) "
+                 "AND DID NOT FINISH: %s", e->seq, e->n, ms_of(qpc() - e->qpc), i + 1, e->ng, gt_prev_end ? gt_ms(gt_prev_end, a) : 0.0,
                  buf);
             break;
         }
@@ -2344,8 +2344,8 @@ int tl_format(char *buf, int cap)
 {
     int len, k;
     if (!tl.calls) return 0;
-    len = snprintf(buf, cap, "stutter: tiles 10 s: %u chamadas, %u regioes, %llu tiles, %u recursos distintos, %u com flags, "
-                   "%u sem heap, %u faixas NULL; chamadores:", tl.calls, tl.regions,
+    len = snprintf(buf, cap, "stutter: tiles 10 s: %u calls, %u regions, %llu tiles, %u distinct resources, %u with flags, "
+                   "%u without heap, %u NULL ranges; callers:", tl.calls, tl.regions,
                    (unsigned long long)tl.tiles, tl.distinct, tl.flagged, tl.unmaps, tl.nulls);
     for (k = 0; k < TL_CALLERS && tl.callers[k].ret && len < cap - 40; k++) {
         char a[48];
@@ -2353,7 +2353,7 @@ int tl_format(char *buf, int cap)
         if (!a[0]) wsprintfA(a, " %p", tl.callers[k].ret);
         len += snprintf(buf + len, cap - len, "%s x%u", a, tl.callers[k].n);
     }
-    if (tl.other_callers && len < cap - 24) len += snprintf(buf + len, cap - len, " outros x%u", tl.other_callers);
+    if (tl.other_callers && len < cap - 24) len += snprintf(buf + len, cap - len, " others x%u", tl.other_callers);
     return len;
 }
 
@@ -2753,11 +2753,11 @@ void placed_textures_setup(void)
     pa_hold_ms = dbg_int(L"PlacementReclaimHoldMs", 2000);
     if (pa_on && pa_track && !pa_orig_refresh &&
         !hook_function(PA_REFRESH_RVA, "48895c24185556574154415541564157", 16, (void *)pa_refresh_hook, (void **)&pa_orig_refresh))
-        wlog("d3d: PlacementPlaced: refresh_title_texture (azimuth+%#x) com bytes diferentes, sem rastreio de uso", PA_REFRESH_RVA);
-    if (pa_on) wlog("d3d: PlacementPlaced: placement textures committed do Azimuth (azimuth+%#x) viram placed em heaps de 64 MiB do proxy",
+        wlog("d3d: PlacementPlaced: refresh_title_texture (azimuth+%#x) with different bytes, no usage tracking", PA_REFRESH_RVA);
+    if (pa_on) wlog("d3d: PlacementPlaced: Azimuth committed placement textures (azimuth+%#x) become placed in 64 MiB proxy heaps",
                     PA_RET_RVA);
     if (pa_reclaim_on && pa_orig_refresh)
-        wlog("d3d: PlacementReclaim: placement coberta por uma mais nova devolve as paginas depois de %d ms", pa_hold_ms);
+        wlog("d3d: PlacementReclaim: a placement covered by a newer one returns its pages after %d ms", pa_hold_ms);
     else pa_reclaim_on = 0;
 }
 
@@ -2768,16 +2768,16 @@ void alloc_share_setup(void)
     int n = as_wanted();
     if (n <= 1 || as_on) return;
     if (!hook_function(AS_ACQ_RVA, "48895c24185556574154415541564157", 16, (void *)as_acquire, (void **)&as_orig_acq)) {
-        wlog("d3d: pool de command allocators do Azimuth (azimuth+%#x) nao confere -> sem AllocatorShare", AS_ACQ_RVA);
+        wlog("d3d: Azimuth command allocator pool (azimuth+%#x) does not match -> no AllocatorShare", AS_ACQ_RVA);
         return;
     }
     if (!hook_function(AS_RET_RVA, "48895c24104c894424185556574154", 15, (void *)as_return, (void **)&as_orig_ret)) {
-        wlog("d3d: devolucao de command allocator do Azimuth (azimuth+%#x) nao confere -> sem AllocatorShare", AS_RET_RVA);
+        wlog("d3d: Azimuth command allocator return (azimuth+%#x) does not match -> no AllocatorShare", AS_RET_RVA);
         return;   /* o gancho de aquisicao sem o de devolucao e inofensivo: as_on fica 0 e nada e compartilhado */
     }
     as_budget = n;
     as_on = 1;
-    wlog("d3d: AllocatorShare: aberturas de command list da mesma thread reusam o allocator (ate %d por allocator)", n);
+    wlog("d3d: AllocatorShare: command list opens on the same thread reuse the allocator (up to %d per allocator)", n);
 }
 
 /* hook do apply_patches (fm5_patch.c), como o DeferRelease */
@@ -2785,7 +2785,7 @@ int lp_wanted(void) { return dbg_int(L"ListPool", is_fm6()) > 0; }
 void list_pool_setup(void)
 {
     lp_on = lp_real_create && lp_wanted();
-    if (lp_on) wlog("d3d: pool de command lists: a ultima Release guarda a lista, o CreateCommandList seguinte a reaproveita (Reset)");
+    if (lp_on) wlog("d3d: command list pool: the last Release keeps the list, the next CreateCommandList reuses it (Reset)");
 }
 
 /* hook do apply_patches (fm5_patch.c), depois do pool: listas unificadas (cmdrec_fm6.c; debug.ini ListMerge, padrao FM6).
@@ -2810,7 +2810,7 @@ void defer_release_setup(void)
     started = 1;
     if (!st_freq.QuadPart) QueryPerformanceFrequency(&st_freq);
     CloseHandle(CreateThread(NULL, 0, dr_drain, NULL, 0, NULL));
-    wlog("d3d: DeferRelease: a ultima Release do 'Azimuth reaper' em recurso/heap fica numa fila, solta aos poucos depois de %d ms",
+    wlog("d3d: DeferRelease: the 'Azimuth reaper' last Release on a resource/heap is queued and released gradually after %d ms",
          dr_hold_ms);
 }
 
@@ -2849,7 +2849,7 @@ void stutter_device(IUnknown *obj)
         vt_swap((void **)&dev2->lpVtbl->CreatePipelineState, st_spso, (void **)&real_spso);
         dev2->lpVtbl->Release(dev2);
     }
-    wlog("stutter: device D3D12 com medicao (PSOs, recursos, ExecuteCommandLists, Signal/Wait das filas)");
+    wlog("stutter: D3D12 device measured (PSOs, resources, ExecuteCommandLists, queue Signal/Wait)");
 }
 
 /* ---- amostrador (PASSO 58): quadro parado ha >= st_stall_ms(media) sem Present -> a cada ~2 ms o tempo de CPU de cada
@@ -3122,7 +3122,7 @@ static void st_report_blocked(void)
             if (samples[i].t == tidx && samples[i].blocked) st_hist_add(sites, 256, &ns, samples[i].ret[0] ? samples[i].ret[0] : samples[i].rip);
         st_hist_sort(sites, ns);
         st_label_any(one, thr[tidx].start);
-        len = sprintf(buf, "stutter:   bloqueada tid %lu inicio%s (%u de %u):", thr[tidx].tid, one, hist[top].n, nblocked_ticks);
+        len = sprintf(buf, "stutter:   blocked tid %lu start%s (%u of %u):", thr[tidx].tid, one, hist[top].n, nblocked_ticks);
         for (j = 0; j < ns && j < 3 && len < 1700; j++) {
             uint32_t q;
             for (i = 0; i < nsamples; i++)
@@ -3155,13 +3155,13 @@ static void st_report(LONG frame, double stalled_ms, double limit_ms)
     for (i = 0; i < nthr; i++) QueryThreadCycleTime(thr[i].h, &thr[i].cprev);
     memcpy(sorted, thr, nthr * sizeof *thr);   /* as amostras guardam o indice em thr: ordenar uma copia */
     qsort(sorted, nthr, sizeof *sorted, cmp_cycles);
-    len = sprintf(buf, "stutter: amostras do quadro #%ld: %.1f ms parado (apos %.0f ms), %u amostras; CPU:", frame, stalled_ms,
+    len = sprintf(buf, "stutter: samples of frame #%ld: %.1f ms stalled (after %.0f ms), %u samples; CPU:", frame, stalled_ms,
                   limit_ms, nsamples);
     for (i = 0; i < nthr && i < 8 && len < 1700; i++) {
         double ms = (sorted[i].cprev - sorted[i].c0) / tsc_per_ms;
         if (ms < 1) break;
         st_label_any(one, sorted[i].start);
-        len += sprintf(buf + len, " [tid %lu%s%s%s %.1f ms inicio%s]", sorted[i].tid, sorted[i].name[0] ? " '" : "",
+        len += sprintf(buf + len, " [tid %lu%s%s%s %.1f ms start%s]", sorted[i].tid, sorted[i].name[0] ? " '" : "",
                        sorted[i].name, sorted[i].name[0] ? "'" : "", ms, one);
     }
     wlog("%s", buf);
@@ -3172,7 +3172,7 @@ static void st_report(LONG frame, double stalled_ms, double limit_ms)
         for (i = 0; i < nsamples; i++)
             if (samples[i].t == tidx && !samples[i].blocked) st_hist_add(rips, 512, &nr, samples[i].rip & ~(uintptr_t)(ST_BUCKET - 1));
         st_hist_sort(rips, nr);
-        len = sprintf(buf, "stutter:   tid %lu (%u amostras):", thr[tidx].tid, hist[top].n);
+        len = sprintf(buf, "stutter:   tid %lu (%u samples):", thr[tidx].tid, hist[top].n);
         for (j = 0; j < nr && j < 10 && len < 1700; j++) {
             st_label_any(one, rips[j].key);
             len += sprintf(buf + len, "%s x%u", one, rips[j].n);
@@ -3245,18 +3245,18 @@ static void fq_poll(LONG64 now)
     if (ms >= FQ_MIN_MS && (++fq_reports <= 2000 || !(fq_reports & (fq_reports - 1)))) {
         ReadProcessMemory(GetCurrentProcess(), (void *)(q - 0x28), &vt, sizeof vt, &got);
         st_label_any(one, vt);
-        len = sprintf(buf, "stutter: fila %p dono vt%s: %.1f ms girando (%u voltas) desde o quadro #%ld; pendentes %u (max %u) "
-                      "limite %u; candidatas:", (void *)q, one, ms, fq.spins, fq.frame, fq.pend0, fq.pend_max, fq.lim);
+        len = sprintf(buf, "stutter: queue %p owner vt%s: %.1f ms spinning (%u spins) since frame #%ld; pending %u (max %u) "
+                      "limit %u; candidates:", (void *)q, one, ms, fq.spins, fq.frame, fq.pend0, fq.pend_max, fq.lim);
         for (i = 0; i < fq_ncand && len < 1700; i++) {
             fq_cand *c = &fq_cands[i];
             st_label_any(one, c->start);
-            len += sprintf(buf + len, " [tid %lu inicio%s %s=%s x%u rip", c->tid, one, c->reg, c->owner ? "dono" : "fila", c->n);
+            len += sprintf(buf + len, " [tid %lu start%s %s=%s x%u rip", c->tid, one, c->reg, c->owner ? "owner" : "queue", c->n);
             st_label_any(one, c->rip);
             len += sprintf(buf + len, "%s <", one);
             for (k = 0; k < ST_RETS && c->ret[k]; k++) { st_label_any(one, c->ret[k]); len += sprintf(buf + len, "%s", one); }
             len += sprintf(buf + len, " >]");
         }
-        if (!fq_ncand) len += sprintf(buf + len, " nenhuma");
+        if (!fq_ncand) len += sprintf(buf + len, " none");
         wlog("%s", buf);
     }
     fq_ncand = 0;
@@ -3272,7 +3272,7 @@ static void fq_install(void)
     if (!game) return;
     slot = (void **)(game + FQ_IAT);
     if (memcmp(game + FQ_CALL, call, sizeof call) || (uint8_t *)*slot < g_base || (uint8_t *)*slot >= g_base + 0x1000000) {
-        wlog("stutter: limitador da fila (game+%#x / IAT %#x) nao confere -> sem medicao da fila", FQ_CALL, FQ_IAT);
+        wlog("stutter: queue limiter (game+%#x / IAT %#x) does not match -> queue not measured", FQ_CALL, FQ_IAT);
         return;
     }
     fq_ret = (uintptr_t)game + FQ_CALL + 6;
@@ -3280,7 +3280,7 @@ static void fq_install(void)
     VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old);
     *slot = (void *)st_switch_thunk;
     VirtualProtect(slot, sizeof *slot, old, &old);
-    wlog("stutter: limitador da fila do FM6 medido (SwitchToThread game+%#x)", FQ_IAT);
+    wlog("stutter: FM6 queue limiter measured (SwitchToThread game+%#x)", FQ_IAT);
 }
 
 /* ---- perfil continuo (PASSO 72): threads do Azimuth com nome em QP_NAMES amostradas a cada volta do amostrador
@@ -3356,7 +3356,7 @@ static void qp_report(void)
             mods[j].n += qp[k].rips[i].n;
         }
         st_hist_sort(mods, nm);
-        len = sprintf(buf, "stutter: perfil '%s' 10 s: %u amostras (%u fora da tabela); modulos:", QP_NAMES[k], qp[k].n, qp[k].lost);
+        len = sprintf(buf, "stutter: profile '%s' 10 s: %u samples (%u outside the table); modules:", QP_NAMES[k], qp[k].n, qp[k].lost);
         for (i = 0; i < nm && i < 8; i++) {
             if (!mods[i].key) strcpy(path, "?");
             else if ((HMODULE)mods[i].key == self_mod) strcpy(path, "winmm");
@@ -3367,17 +3367,17 @@ static void qp_report(void)
         }
         wlog("%s", buf);
         st_hist_sort(qp[k].rips, qp[k].nrip);
-        len = sprintf(buf, "stutter: perfil '%s' RIPs:", QP_NAMES[k]);
+        len = sprintf(buf, "stutter: profile '%s' RIPs:", QP_NAMES[k]);
         for (i = 0; i < qp[k].nrip && i < 16 && len < 2200; i++) {
             st_label_any(one, qp[k].rips[i].key);
             len += sprintf(buf + len, "%s %.1f%%;", one, qp[k].rips[i].n * 100 / n);
         }
         wlog("%s", buf);
         st_hist_sort(qp[k].callers, qp[k].ncall);
-        len = sprintf(buf, "stutter: perfil '%s' 1o retorno em jogo/azimuth/proxy:", QP_NAMES[k]);
+        len = sprintf(buf, "stutter: profile '%s' 1st return into game/azimuth/proxy:", QP_NAMES[k]);
         for (i = 0; i < qp[k].ncall && i < 16 && len < 2200; i++) {
             if (qp[k].callers[i].key) st_label_any(one, qp[k].callers[i].key);
-            else strcpy(one, " nenhum");
+            else strcpy(one, " none");
             len += sprintf(buf + len, "%s %.1f%%;", one, qp[k].callers[i].n * 100 / n);
         }
         wlog("%s", buf);
@@ -3427,7 +3427,7 @@ static void vz_poll(LONG64 now)
     t0 = now;
     frames = InterlockedExchange(&vz_frames, 0);
     f = frames ? frames : 1;
-    len = sprintf(buf, "stutter: vazao 10 s: %ld quadros, %.1f ms/quadro (Present %.1f, limitador da fila %.1f) | GPU ms/quadro:",
+    len = sprintf(buf, "stutter: throughput 10 s: %ld frames, %.1f ms/frame (Present %.1f, queue limiter %.1f) | GPU ms/frame:",
                   frames, ms_of(InterlockedExchange64(&vz_frame_ticks, 0)) / f, ms_of(InterlockedExchange64(&vz_present_ticks, 0)) / f,
                   ms_of(InterlockedExchange64(&vz_lim_ticks, 0)) / f);
     for (k = 0; k < 4; k++) {
@@ -3436,14 +3436,14 @@ static void vz_poll(LONG64 now)
         vz_gpu[k] = 0;
     }
     opens = InterlockedExchange(&vz_opens, 0);
-    len += sprintf(buf + len, " | ECL %.1f/quadro, listas %.0f/quadro (max %ld), %.2f ms/quadro | abertas %.0f/quadro, draws %.0f/quadro", InterlockedExchange(&vz_ecl, 0) / f, InterlockedExchange(&vz_lists, 0) / f,
+    len += sprintf(buf + len, " | ECL %.1f/frame, lists %.0f/frame (max %ld), %.2f ms/frame | opened %.0f/frame, draws %.0f/frame", InterlockedExchange(&vz_ecl, 0) / f, InterlockedExchange(&vz_lists, 0) / f,
                    InterlockedExchange(&vz_lists_max, 0), ms_of(InterlockedExchange64(&vz_ecl_ticks, 0)) / f, opens / f,
                    InterlockedExchange(&vz_draws, 0) / f);
-    len += sprintf(buf + len, " | CreateCommandList %.1f/quadro %.2f ms, reaproveitadas %.1f/quadro, guardadas %.1f/quadro, falhas %ld",
+    len += sprintf(buf + len, " | CreateCommandList %.1f/frame %.2f ms, reused %.1f/frame, kept %.1f/frame, failures %ld",
                    InterlockedExchange(&lp_made, 0) / f, ms_of(InterlockedExchange64(&lp_made_ticks, 0)) / f,
                    InterlockedExchange(&lp_reused, 0) / f, InterlockedExchange(&lp_kept, 0) / f, InterlockedExchange(&lp_failed, 0));
     if (as_on)
-        len += sprintf(buf + len, " | allocators: do pool %.1f/quadro, reusados %.1f/quadro, devolvidos %.1f/quadro, %ld compartilhados vivos",
+        len += sprintf(buf + len, " | allocators: from pool %.1f/frame, reused %.1f/frame, returned %.1f/frame, %ld shared alive",
                        InterlockedExchange(&as_fresh, 0) / f, InterlockedExchange(&as_shared, 0) / f,
                        InterlockedExchange(&as_pushed, 0) / f, as_live);
     len += rc_format(buf + len, (int)sizeof buf - len, f);
@@ -3451,14 +3451,14 @@ static void vz_poll(LONG64 now)
         PROCESS_MEMORY_COUNTERS_EX pm;
         pm.cb = sizeof pm;
         if (K32GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS *)&pm, sizeof pm))
-            len += sprintf(buf + len, " | memoria privada %llu MiB (pico %llu)", (unsigned long long)(pm.PrivateUsage >> 20),
+            len += sprintf(buf + len, " | private memory %llu MiB (peak %llu)", (unsigned long long)(pm.PrivateUsage >> 20),
                            (unsigned long long)(pm.PeakPagefileUsage >> 20));
     }
     {   /* commit do SISTEMA (PASSO 92: as quedas vem com a soma jogo + outros programas perto do limite) */
         PERFORMANCE_INFORMATION pi;
         pi.cb = sizeof pi;
         if (K32GetPerformanceInfo(&pi, sizeof pi))
-            len += sprintf(buf + len, ", sistema: commit %llu de %llu MiB, RAM livre %llu MiB, kernel paged %llu nonpaged %llu MiB",
+            len += sprintf(buf + len, ", system: commit %llu of %llu MiB, free RAM %llu MiB, kernel paged %llu nonpaged %llu MiB",
                            (unsigned long long)pi.CommitTotal * pi.PageSize >> 20,
                            (unsigned long long)pi.CommitLimit * pi.PageSize >> 20,
                            (unsigned long long)pi.PhysicalAvailable * pi.PageSize >> 20,
@@ -3469,7 +3469,7 @@ static void vz_poll(LONG64 now)
         DWORD handles = 0;
         if (GetProcessHandleCount(GetCurrentProcess(), &handles)) len += sprintf(buf + len, ", handles %lu", handles);
     }
-    len += sprintf(buf + len, " | CPU ms/quadro:");
+    len += sprintf(buf + len, " | CPU ms/frame:");
     if (tsc_per_ms > 0) {
         uint32_t idx[VZ_TOP_THREADS], nt = vz_top(cpu, n, idx, VZ_TOP_THREADS);
         for (i = 0; i < nt && len < 1800; i++) {
@@ -3491,7 +3491,7 @@ static void vz_poll(LONG64 now)
         AcquireSRWLockExclusive(&vz_lock);
         for (i = 0; i < VZ_ORIGINS; i++) cnt[i] = (uint64_t)vz_orig[i].n;
         nt = vz_top(cnt, VZ_ORIGINS, top, 6);
-        len = sprintf(buf, "stutter: vazao: origem das listas abertas (1 em %d):", VZ_EVERY);
+        len = sprintf(buf, "stutter: throughput: origin of opened lists (1 in %d):", VZ_EVERY);
         for (i = 0; i < nt; i++) {
             len += sprintf(buf + len, " [%.0f%%", cnt[top[i]] * 100.0 * VZ_EVERY / opens);
             for (k = 0; k < VZ_KEY && vz_orig[top[i]].k[k]; k++) { st_label(one, (void *)vz_orig[top[i]].k[k]); len += sprintf(buf + len, "%s", one); }
@@ -3501,7 +3501,7 @@ static void vz_poll(LONG64 now)
         memset(vz_orig, 0, sizeof vz_orig);
         vz_orig_other = 0;
         ReleaseSRWLockExclusive(&vz_lock);
-        if (other) sprintf(buf + len, " outras %ld", other);
+        if (other) sprintf(buf + len, " others %ld", other);
     }
     wlog("%s", buf);
 }
@@ -3523,7 +3523,7 @@ static DWORD WINAPI st_sampler(void *arg)
     }
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        (LPCWSTR)(void *)st_sampler, &self_mod);
-    wlog("stutter: amostrador ligado (TSC %.0f MHz; quadro parado >= %d ms -> CPU por thread e RIPs a cada ~2 ms)",
+    wlog("stutter: sampler on (TSC %.0f MHz; frame stalled >= %d ms -> CPU per thread and RIPs every ~2 ms)",
          tsc_per_ms / 1000, ST_STALL_MS);
     for (;;) {
         LARGE_INTEGER due;
@@ -3585,14 +3585,14 @@ int cmdalloc_age_patch(int ms)
     DWORD old;
     if (!ms) return 0;
     if (memcmp(at, orig, sizeof orig)) {
-        wlog("stutter: idade dos command allocators (azimuth+%#x) nao confere -> sem patch", CA_AGE_RVA);
+        wlog("stutter: command allocator age (azimuth+%#x) does not match -> not patched", CA_AGE_RVA);
         return 0;
     }
     VirtualProtect(at, sizeof orig, PAGE_EXECUTE_READWRITE, &old);
     memcpy(at + 2, &v, 4);
     VirtualProtect(at, sizeof orig, old, &old);
     FlushInstructionCache(GetCurrentProcess(), at, sizeof orig);
-    wlog("stutter: command allocators ociosos destruidos so depois de %u ms (era 4000)", v);
+    wlog("stutter: idle command allocators destroyed only after %u ms (was 4000)", v);
     return 1;
 }
 
@@ -3624,10 +3624,10 @@ int retire_margin_patch(int n)
     if (n <= 0) return 0;
     rm_margin = (UINT64)n;
     if (!hook_function(RM_ENQUEUE_RVA, "48895c24084c894424184889542410", 15, (void *)rm_enqueue, (void **)&rm_orig)) {
-        wlog("d3d: fila do reaper do Azimuth (azimuth+%#x) nao confere -> sem RetireMargin", RM_ENQUEUE_RVA);
+        wlog("d3d: Azimuth reaper queue (azimuth+%#x) does not match -> no RetireMargin", RM_ENQUEUE_RVA);
         return 0;
     }
-    wlog("d3d: RetireMargin: volta dos slots de descritor do Azimuth ao pool atrasada em %d envios", n);
+    wlog("d3d: RetireMargin: return of Azimuth descriptor slots to the pool delayed by %d submissions", n);
     return 1;
 }
 
@@ -3656,10 +3656,10 @@ int tile_nohazard_patch(int on)
     int i;
     if (!on) return 0;
     if (memcmp(at, orig, sizeof orig) || memcmp(g_base + TN_MAP_RVA, "\x48\x8b\x43\x58", 4)) {
-        wlog("d3d: UpdateTileMappings do Azimuth (azimuth+%#x) nao confere -> sem NO_HAZARD", TN_SITE_RVA);
+        wlog("d3d: Azimuth UpdateTileMappings (azimuth+%#x) does not match -> no NO_HAZARD", TN_SITE_RVA);
         return 0;
     }
-    if (!(stub = alloc_near(g_base, 64))) { wlog("d3d: sem memoria perto do azimuth.exe para o NO_HAZARD"); return 0; }
+    if (!(stub = alloc_near(g_base, 64))) { wlog("d3d: no memory near azimuth.exe for NO_HAZARD"); return 0; }
     memcpy(stub, body, sizeof body);
     for (i = 0; i < 2; i++) {
         memcpy(stub + 0x11 + i * 14, "\xff\x25\0\0\0\0", 6);
@@ -3670,7 +3670,7 @@ int tile_nohazard_patch(int on)
     memcpy(jmp + 1, &rel, 4);
     write_mem(at, jmp, sizeof jmp);
     FlushInstructionCache(GetCurrentProcess(), at, sizeof jmp);
-    wlog("d3d: UpdateTileMappings do Azimuth com D3D12_TILE_MAPPING_FLAG_NO_HAZARD nos mapeamentos");
+    wlog("d3d: Azimuth UpdateTileMappings with D3D12_TILE_MAPPING_FLAG_NO_HAZARD on mappings");
     return 1;
 }
 
@@ -3694,10 +3694,10 @@ void stutter_install(void)
             *f2 = (void *)st_factory2;
             VirtualProtect(f1, 16, old, &old);
         } else {
-            wlog("stutter: IAT do dxgi (0x26f878/0x26f880) nao confere -> sem medicao do Present");
+            wlog("stutter: dxgi IAT (0x26f878/0x26f880) does not match -> Present not measured");
         }
     }
     for (i = 0; i < 7; i++) n += iat_swap(wait_iat[i], wait_names[i], wait_hooks[i], &wait_real[i]);
     CloseHandle(CreateThread(NULL, 0, st_sampler, NULL, 0, NULL));
-    wlog("stutter: ligado (picos >= 25 ms e >= 1,8x a media; %d de 7 esperas do azimuth.exe medidas)", n);
+    wlog("stutter: on (spikes >= 25 ms and >= 1.8x the average; %d of 7 azimuth.exe waits measured)", n);
 }

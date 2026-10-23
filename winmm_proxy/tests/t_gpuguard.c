@@ -216,11 +216,11 @@ TEST(gpuguard_copy_check)
     /* subrecurso 54 nao existe */
     dst.SubresourceIndex = 54;
     CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
-    CHECK(strstr(why, "destino: subrecurso 54 >= 54") != NULL);
+    CHECK(strstr(why, "destination: subresource 54 >= 54") != NULL);
     /* mip 3 (32x32) nao cabe 64x64 */
     dst.SubresourceIndex = 3;
     CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
-    CHECK(strstr(why, "fora de 32x32x1") != NULL);
+    CHECK(strstr(why, "outside 32x32x1") != NULL);
     /* com box 16x16 cabe em (16,16) do mip 3, nao em (17,0) */
     CHECK(!gg_copy_check(&cube, &dst, 16, 16, 0, &buf, &src, &box, why));
     CHECK(gg_copy_check(&cube, &dst, 17, 0, 0, &buf, &src, &box, why));
@@ -228,12 +228,12 @@ TEST(gpuguard_copy_check)
     dst.SubresourceIndex = 2;
     src.PlacedFootprint.Offset = 40960;
     CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
-    CHECK(strstr(why, "origem: footprint fora do buffer") != NULL);
+    CHECK(strstr(why, "source: footprint outside the buffer") != NULL);
     src.PlacedFootprint.Offset = 32768;                 /* termina exatamente no fim */
     CHECK(!gg_copy_check(&cube, &dst, 0, 0, 0, &buf, &src, NULL, why));
     /* footprint num recurso que nao e buffer */
     CHECK(gg_copy_check(&cube, &dst, 0, 0, 0, &cube, &src, NULL, why));
-    CHECK(strstr(why, "nao e buffer") != NULL);
+    CHECK(strstr(why, "not a buffer") != NULL);
     /* BC: mip 5 de 32x32 = 1x1, copia de bloco 4x4 inteiro e valida */
     src.PlacedFootprint.Offset = 0;
     src.PlacedFootprint.Footprint.Format = DXGI_FORMAT_BC1_UNORM;
@@ -287,8 +287,8 @@ TEST(gpuguard_debug7_skips_copies)
     hook_copytex((ID3D12GraphicsCommandList *)&cl, &dst, 0, 0, 0, &src, NULL);
     hook_copytex((ID3D12GraphicsCommandList *)&cl, &dst, 0, 0, 0, &src, NULL);
     CHECK_EQ(real_copies, 1);
-    CHECK(log_has("gpuguard: experimento: CopyTextureRegion #1 pulado"));
-    CHECK(log_has("gpuguard: experimento: CopyTextureRegion #2 pulado"));
+    CHECK(log_has("gpuguard: experiment: CopyTextureRegion #1 skipped"));
+    CHECK(log_has("gpuguard: experiment: CopyTextureRegion #2 skipped"));
     gg_trace_reset(&cl);
     gg_trace_on = saved;
 }
@@ -337,13 +337,13 @@ TEST(gpuguard_draw_trace_and_debug8)
     CHECK_EQ(s[1].op, GG_OP_DRAW_INDEXED);
     CHECK_EQ(s[1].arg[0], 36);
     CHECK_EQ(s[1].arg[2], 6);
-    CHECK(log_has("gpuguard: ponto novo de DrawInstanced (3,1,0)"));
+    CHECK(log_has("gpuguard: new DrawInstanced site (3,1,0)"));
     gg_trace_on = 6;
     hook_draw(l, 3, 1, 0, 0);
     hook_draw_indexed(l, 36, 2, 6, 0, 0);
     CHECK_EQ(real_draws, 2);
-    CHECK(log_has("gpuguard: experimento: draw do replayer #1 pulado"));   /* pilha fora do jogo */
-    CHECK(log_has("gpuguard: experimento: draw do replayer #2 pulado"));
+    CHECK(log_has("gpuguard: experiment: replayer draw #1 skipped"));   /* pilha fora do jogo */
+    CHECK(log_has("gpuguard: experiment: replayer draw #2 skipped"));
     gg_trace_reset(&cl);
     gg_trace_on = saved;
 }
@@ -361,7 +361,7 @@ TEST(gpuguard_debug9_skips_game_dispatch)
     gg_cl_rs(&cl, 1, &game_rs, 1);
     hook_dispatch(l, 4, 4, 1);
     CHECK_EQ(real_dispatches, 0);
-    CHECK(log_has("gpuguard: experimento: Dispatch fora da compute interna #1 pulado"));
+    CHECK(log_has("gpuguard: experiment: Dispatch outside the internal compute #1 skipped"));
     gg_cl_rs(&cl, 1, &internal, 1);
     hook_dispatch(l, 30, 1080, 1);
     CHECK_EQ(real_dispatches, 1);
@@ -398,7 +398,7 @@ TEST(gpuguard_draw_skip_classes)
     gg_draw_skip = 3;
     CHECK(gg_skip_draw(0, GG_OP_EXECUTE_INDIRECT, 0, 0));
     CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0));
-    CHECK(log_has("gpuguard: experimento: draw direto #"));
+    CHECK(log_has("gpuguard: experiment: direct draw #"));
     gg_trace_on = saved; gg_draw_skip = saved_skip;
 }
 
@@ -487,7 +487,7 @@ TEST(gpuguard_debug8_skip_ia_incomplete)
     CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0));
     CHECK(gg_skip_draw(0, GG_OP_DRAW_INDEXED, 4, 0));
     CHECK(gg_skip_draw(1, GG_OP_DRAW, 0x80000000u, 0));
-    CHECK(log_has("gpuguard: experimento: draw com IA incompleto #1 pulado"));
+    CHECK(log_has("gpuguard: experiment: draw with incomplete IA #1 skipped"));
     gg_trace_on = saved; gg_draw_skip = saved_skip;
 }
 
@@ -517,7 +517,7 @@ TEST(gpuguard_pso_hash_and_debug8_hash_list)
     CHECK(!gg_skip_draw(0, GG_OP_DRAW_INDEXED, 0, 0xfe));
     CHECK(!gg_skip_draw(1, GG_OP_DRAW_INDEXED, 0, 0xff));  /* direto */
     CHECK(!gg_skip_draw(0, GG_OP_DRAW, 0, 0xff));          /* outro tipo */
-    CHECK(log_has("gpuguard: experimento: DrawIndexedInstanced do replayer da lista de hashes #1 pulado"));
+    CHECK(log_has("gpuguard: experiment: DrawIndexedInstanced from the hash-list replayer #1 skipped"));
     gg_parse_hashes("");
     CHECK_EQ(gg_nskip_hash, 0);
     gg_trace_on = saved; gg_draw_skip = saved_skip;
@@ -537,9 +537,9 @@ TEST(gpuguard_pso_info_and_debug8_extra_stages)
     CHECK_EQ(gg_pso_info_of(b, &so, 3), 0x331);             /* VS + GS + SO */
     CHECK_EQ(gg_pso_info_of(a, NULL, 0), 0x3);
     gg_pso_info_str(0x331, str);
-    CHECK_STR(str, "VS GS SO topo 3");
+    CHECK_STR(str, "VS GS SO topology 3");
     gg_pso_info_str(0, str);
-    CHECK_STR(str, "topo 0");
+    CHECK_STR(str, "topology 0");
 
     log_capture();
     gg_trace_on = 6; gg_draw_skip = 8;
@@ -549,7 +549,7 @@ TEST(gpuguard_pso_info_and_debug8_extra_stages)
     CHECK(gg_skip_stages(0x331));
     CHECK(gg_skip_stages(0x30b));                            /* DS */
     CHECK(gg_skip_stages(0x413));                            /* HS, patch */
-    CHECK(log_has("gpuguard: experimento: draw com DS/HS/GS/SO #1 pulado"));
+    CHECK(log_has("gpuguard: experiment: draw with DS/HS/GS/SO #1 skipped"));
     gg_draw_skip = 5;
     CHECK(!gg_skip_stages(0x331));
     gg_trace_on = 1; gg_draw_skip = 8;
@@ -559,7 +559,7 @@ TEST(gpuguard_pso_info_and_debug8_extra_stages)
     CHECK(fresh_gs_pso(0x313));
     CHECK(!fresh_gs_pso(0x303));
     CHECK(!fresh_gs_pso(0x30b));                             /* DS sem GS */
-    CHECK(log_has("gpuguard: experimento: PSO com GS #1 criado fora da pipeline library"));
+    CHECK(log_has("gpuguard: experiment: PSO with GS #1 created outside the pipeline library"));
     gg_trace_on = 6;
     CHECK(!fresh_gs_pso(0x313));
     gg_trace_on = saved; gg_draw_skip = saved_skip;
@@ -634,7 +634,7 @@ TEST(gpuguard_null_uavs_without_trace)
     lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&pso1);
     lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
     CHECK(lite_draws == 3 && lite_tabs == 1);
-    CHECK(log_has("gpuguard: root signature da lista"));
+    CHECK(log_has("gpuguard: root signature of list"));
     lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&lite_cl);   /* PSO desconhecido: idem */
     lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
     CHECK(lite_draws == 4 && lite_tabs == 1);
@@ -779,7 +779,7 @@ TEST(gpuguard_descriptor_shadow)
         char buf[200];
         o.kind = GG_DK_SRV; o.flags = GG_DF_RESERVED;
         desc_text(buf, 7, &o);
-        CHECK(strstr(buf, "[7]SRV") && strstr(buf, "RESERVADO"));
+        CHECK(strstr(buf, "[7]SRV") && strstr(buf, "RESERVED"));
     }
     gg_heap_reset();
 }

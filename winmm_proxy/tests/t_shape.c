@@ -15,7 +15,7 @@ TEST(shape_opcodes_translated)
     CHECK_EQ(g[2], 0xffull << 8 | 0x10);          /* DMA */
     CHECK_EQ(g[3], 2);                            /* desconhecido: intacto e logado */
     CHECK_EQ(g[4], 0x1f);
-    CHECK(log_has("sem traducao"));
+    CHECK(log_has("not translated"));
 }
 
 static int graph_calls;
@@ -60,7 +60,7 @@ TEST(shape_fm6_graphs_logged_not_translated)
     fm6_graphs = 0;
     consume = 1;
     hook_shape_graph(NULL, graph);
-    CHECK(log_has("grafo do FM6 #1 (2 entradas)"));
+    CHECK(log_has("FM6 graph #1 (2 entries)"));
     CHECK(log_has("[1] 0000000000004004 op 4"));
     CHECK_EQ(data[0], 0x8002000001ull);           /* FM6: sem traducao */
     CHECK_EQ(data[1], 0x4004);

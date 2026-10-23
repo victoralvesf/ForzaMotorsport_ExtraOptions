@@ -83,12 +83,12 @@ static void *proxy_of(void *real)
             memcpy(p + 0x28, ctx_proxy_vtbl, SLOTS * 8);        /* tabela embutida do FM5 */
             *(void **)(p + CTX_REAL_OFF) = real;
             proxies[nproxies].real = real; proxies[nproxies].proxy = p; nproxies++;
-            wlog("d3d: contexto %p -> proxy %p (vtbl %p Draw %p DrawIndexed %p Map %p tipo %#x)", real, p, *(void **)real,
+            wlog("d3d: context %p -> proxy %p (vtbl %p Draw %p DrawIndexed %p Map %p type %#x)", real, p, *(void **)real,
                  (*(void ***)real)[0xe], (*(void ***)real)[0xd], (*(void ***)real)[0xf], *(UINT *)((uint8_t *)real + 0x38));
         }
     }
     ReleaseSRWLockExclusive(&proxy_lock);
-    if (!p) { wlog("d3d: sem proxy para o contexto %p", real); return real; }
+    if (!p) { wlog("d3d: no proxy for context %p", real); return real; }
     return p;
 }
 
@@ -246,7 +246,7 @@ void ctx_DrawIndexedInstanced(void *real, UINT count, UINT ic, UINT start, INT b
 
 void ctx_bad_slot(void *real, unsigned slot)
 {
-    wlog("d3d: contexto %p chamou o slot %#x do FM5, sem equivalente no Azimuth", real, slot);
+    wlog("d3d: context %p called FM5 slot %#x, no Azimuth equivalent", real, slot);
     RaiseException(0xE0F50001, EXCEPTION_NONCONTINUABLE, 0, NULL);
 }
 
@@ -282,7 +282,7 @@ static void trace_bundles_init(void)
     if (trace_bundles >= 0) return;
     GetEnvironmentVariableA("FM5_TRACE_BUNDLES", v, sizeof v);
     trace_bundles = atoi(v) != 0;
-    if (trace_bundles) { ctx_trace_on = 1; wlog("d3d: FM5_TRACE_BUNDLES=1 (trace de todos os draw bundles)"); }
+    if (trace_bundles) { ctx_trace_on = 1; wlog("d3d: FM5_TRACE_BUNDLES=1 (tracing all draw bundles)"); }
 }
 #define DEFCTX(name, fh2slot) \
     static long name(void *dev, UINT flags, void **out) { \
@@ -367,7 +367,7 @@ static void alias_track_ex(const UINT *desc, void *tex, int esram)
     else if (desc[5] <= 1 && desc[4] == 26 && (!esram || (desc[10] & 0x20000)) && !al_color1x && al_color2x &&
              desc[0] == al_w && desc[1] == al_h) al_set(&al_color1x, tex);
     ReleaseSRWLockExclusive(&alias_lock);
-    wlog("d3d: alias: cor2x=%p prof=%p,%p cor1x=%p (%ux%u)", al_color2x, al_depth_a, al_depth_b, al_color1x, al_w, al_h);
+    wlog("d3d: alias: color2x=%p depth=%p,%p color1x=%p (%ux%u)", al_color2x, al_depth_a, al_depth_b, al_color1x, al_w, al_h);
 }
 static void alias_track(const UINT *desc, void *tex) { alias_track_ex(desc, tex, 1); }
 
@@ -405,7 +405,7 @@ static int alias_fm6_dispatch(void *ctx, UINT x, UINT y, UINT z, int bundle, ali
     static volatile LONG nb;
     if (alias_test <= 0 || !al_w || x != (al_w + 7) / 8 || y != (al_h + 7) / 8 || z != 1) return 0;
     if (bundle) {
-        if (InterlockedIncrement(&nb) <= 3) wlog("d3d: alias: Dispatch %ux%ux%u num draw bundle %p: ignorado", x, y, z, ctx);
+        if (InterlockedIncrement(&nb) <= 3) wlog("d3d: alias: Dispatch %ux%ux%u in draw bundle %p: ignored", x, y, z, ctx);
         return 0;
     }
     AcquireSRWLockShared(&alias_lock);
@@ -413,7 +413,7 @@ static int alias_fm6_dispatch(void *ctx, UINT x, UINT y, UINT z, int bundle, ali
     ReleaseSRWLockShared(&alias_lock);
     al_ctx = ctx;
     if (InterlockedIncrement(&al_count) <= 3)
-        wlog("d3d: alias: FM6 Dispatch %ux%ux%u no contexto %p -> copia profundidade %p -> %p, resolve da cor pendente",
+        wlog("d3d: alias: FM6 Dispatch %ux%ux%u on context %p -> copy depth %p -> %p, color resolve pending",
              x, y, z, ctx, al_depth_a, al_depth_b);
     return 1;
 }
@@ -429,8 +429,8 @@ static void alias_fm6_leave_scene(void *ctx, UINT n, void *const *rtvs, int clea
     if (al_color2x && al_color1x) ((resolve_fn)fn(ctx, 0x39))(ctx, al_color1x, 0, al_color2x, 0, 26);
     ReleaseSRWLockShared(&alias_lock);
     if (InterlockedIncrement(&nr) <= 3)
-        wlog("d3d: alias: FM6 contexto %p saiu da cena (%s) -> resolve cor %p -> %p", ctx,
-             clear ? "ClearState" : "outro RT", al_color2x, al_color1x);
+        wlog("d3d: alias: FM6 context %p left the scene (%s) -> resolve color %p -> %p", ctx,
+             clear ? "ClearState" : "other RT", al_color2x, al_color1x);
 }
 
 /* Quality original das texturas MSAA do FM5 (o D3D12 recebe D3D12_STANDARD_MULTISAMPLE_PATTERN, abaixo). O GetDesc
@@ -491,7 +491,7 @@ static long dev_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
             if (sp[k] > 0x140001000 && sp[k] < 0x141400000) {
                 nb += snprintf(buf + nb, sizeof buf - nb, " %#llx", (unsigned long long)(sp[k] - 0x140000000)); n++;
             }
-        wlog("d3d:   pilha (game+):%s", n ? buf : " -");
+        wlog("d3d:   stack (game+):%s", n ? buf : " -");
     }
     if (desc && desc[0] >= 1280 && desc[5] <= 1) {     /* diagnostico: texturas de tela (ESRAM/aliasing) */
         hr = ((tex2d_fn)dev_orig[5])(dev, desc, init, out);
@@ -506,7 +506,7 @@ static long dev_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
     d[6] = 0xffffffff;
     hr = ((tex2d_fn)dev_orig[5])(dev, d, init, out);
     if (hr >= 0 && out && *out) msaa_q_set(*out, desc[6]);
-    wlog("d3d: CreateTexture2D %ux%u fmt=%u samples=%u quality %#x -> padrao, bind=%#x misc=%#x esram[0xb]=%#x hr=%#lx tex=%p ret=%p",
+    wlog("d3d: CreateTexture2D %ux%u fmt=%u samples=%u quality %#x -> default, bind=%#x misc=%#x esram[0xb]=%#x hr=%#lx tex=%p ret=%p",
          d[0], d[1], d[4], d[5], desc[6], d[8], d[10], d[11], hr, out ? *out : NULL, __builtin_return_address(0));
     if (hr >= 0 && out) alias_track(desc, *out);
     return hr;
@@ -562,7 +562,7 @@ static void *fmask_emul(void *dev, tex2d_fn create, UINT w, UINT h, UINT samples
     init.mem = buf; init.pitch = w * bpp; init.slice = (UINT)(n * bpp);
     hr = create(dev, d, &init, &tex);
     HeapFree(GetProcessHeap(), 0, buf);
-    wlog("d3d: FMASK %ux emulada %ux%u fmt %u (host %ux, valor %#x) hr=%#lx tex=%p", samples, w, h, fmt, host, val, hr, tex);
+    wlog("d3d: FMASK %ux emulated %ux%u fmt %u (host %ux, value %#x) hr=%#lx tex=%p", samples, w, h, fmt, host, val, hr, tex);
     if (hr < 0) tex = NULL;
     else if (nfmasks < 16) {
         fmasks[nfmasks].w = w; fmasks[nfmasks].h = h; fmasks[nfmasks].samples = samples; fmasks[nfmasks].fmt = fmt;
@@ -578,7 +578,7 @@ static long dev_CreateShaderResourceView(void *dev, void *res, const UINT *desc,
 {
     long hr = dev_CreateShaderResourceView_(dev, res, desc, out);
     const uint8_t *r = res;
-    wlog("d3d: CreateShaderResourceView res=%p (tipo %#x %ux%u fmt %u placement %p) view fmt=%u dim=%u -> hr=%#lx srv=%p",
+    wlog("d3d: CreateShaderResourceView res=%p (type %#x %ux%u fmt %u placement %p) view fmt=%u dim=%u -> hr=%#lx srv=%p",
          res, r ? *(const UINT *)(r + 0x38) : 0, r ? *(const UINT *)(r + 0x70) : 0, r ? *(const UINT *)(r + 0x74) : 0,
          r ? *(const UINT *)(r + 0x80) : 0, r ? *(void *const *)(r + 0x20) : 0, desc ? desc[0] : 0, desc ? desc[1] : 0,
          hr, out ? *out : NULL);
@@ -594,7 +594,7 @@ static long dev_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
     void *pages[4]; ULONG_PTR np = 4; ULONG gran = 0; UINT ww;
     VirtualQuery(addr, &mi, sizeof mi);
     ww = GetWriteWatch(0, mi.AllocationBase, 0x1000, pages, &np, &gran);
-    wlog("d3d:   write watch da alocacao: %s (err %lu) regiao %p..+%#zx", ww == 0 ? "SIM" : "NAO", ww ? GetLastError() : 0,
+    wlog("d3d:   allocation write watch: %s (err %lu) region %p..+%#zx", ww == 0 ? "YES" : "NO", ww ? GetLastError() : 0,
          mi.AllocationBase, (size_t)mi.RegionSize);
     wlog("d3d: CreatePlacementTexture2D %ux%u mips=%u arr=%u fmt=%u samples=%u usage=%u bind=%#x cpu=%#x misc=%#x tile=%u "
          "pitch=%u addr=%p (alloc %p type %#lx prot %#lx) -> hr=%#lx tex=%p", desc[0], desc[1], desc[2], desc[3], desc[4],
@@ -648,7 +648,7 @@ static long dev_CreateRenderTargetView(void *dev, void *res, const UINT *desc, v
     long hr = ((rtv_fn)dev_orig[9])(dev, res, desc, out);
     if (hr >= 0 && res && res == sc_buffer && !sc_rtv && out) sc_rtv = *out;
     const uint8_t *r = res;
-    wlog("d3d: CreateRenderTargetView res=%p (tipo %#x %ux%u fmt %u) desc fmt=%u dim=%u -> hr=%#lx rtv=%p", res,
+    wlog("d3d: CreateRenderTargetView res=%p (type %#x %ux%u fmt %u) desc fmt=%u dim=%u -> hr=%#lx rtv=%p", res,
          r ? *(const UINT *)(r + 0x38) : 0, r ? *(const UINT *)(r + 0x70) : 0, r ? *(const UINT *)(r + 0x74) : 0,
          r ? *(const UINT *)(r + 0x80) : 0, desc ? desc[0] : 0, desc ? desc[1] : 0, hr, out ? *out : NULL);
     return hr;
@@ -666,7 +666,7 @@ static long sc_GetBuffer(void *sc, UINT i, const GUID *iid, void **out)
 
 static void dev_bad_slot(void)
 {
-    wlog("d3d: device chamou um slot do FM5 sem equivalente no Azimuth");
+    wlog("d3d: device called an FM5 slot with no Azimuth equivalent");
     RaiseException(0xE0F50002, EXCEPTION_NONCONTINUABLE, 0, NULL);
 }
 
@@ -768,7 +768,7 @@ static void pd_anomaly(const char *what, const pdata *e, void *caller)
 {
     LONG n = InterlockedIncrement(&pd_anomalies);
     if (n <= 30 || (n & (n - 1)) == 0)
-        wlog("d3d: private data #%ld: %s obj=%p ptr=%p refs=%d tipo=%#x set em game+%#llx, chamador %p", n, what,
+        wlog("d3d: private data #%ld: %s obj=%p ptr=%p refs=%d type=%#x set at game+%#llx, caller %p", n, what,
              e->obj, *(void *const *)e->data, *(volatile LONG *)((uint8_t *)e->obj + 8),
              *(int *)((uint8_t *)e->obj + 0x38), (unsigned long long)game_off(e->setter), caller);
 }
@@ -797,7 +797,7 @@ static long pd_store(void *obj, const GUID *g, UINT size, const void *data, IUnk
     }
     AcquireSRWLockExclusive(&pd_lock);
     if ((pp = pd_find(obj, g))) {
-        if (pd_is_bytecode(*pp) && !(*pp)->taken) pd_anomaly("Set sobre bytecode ainda nao liberado", *pp, caller);
+        if (pd_is_bytecode(*pp) && !(*pp)->taken) pd_anomaly("Set over bytecode not yet released", *pp, caller);
         old = pd_unlink(pp);
     }
     if (e) { pp = &pd_tab[pd_hash(obj)]; e->next = *pp; *pp = e; }
@@ -819,7 +819,7 @@ static long pd_GetPrivateData(void *obj, const GUID *g, UINT *size, void *data)
     else if (caller == g_game + RVA_FM5_DTOR_GET_RET && pd_is_bytecode(*pp) &&
              InterlockedExchange(&(*pp)->taken, 1)) {
         /* o destrutor ja levou este ptr (o jogo da free nele): devolver de novo = double free */
-        pd_anomaly("2o Get do destrutor (double free evitado)", *pp, caller);
+        pd_anomaly("2nd Get from the destructor (double free avoided)", *pp, caller);
         *size = 0; hr = DXGI_ERROR_NOT_FOUND_;
     } else {
         *size = (*pp)->size;
@@ -855,7 +855,7 @@ static ULONG pd_release_hook(void *obj)
         while (*pp) {
             if ((*pp)->obj == obj) {
                 IUnknown *u;
-                if (pd_is_bytecode(*pp) && !(*pp)->taken) pd_anomaly("Release final antes do destrutor do jogo", *pp, caller);
+                if (pd_is_bytecode(*pp) && !(*pp)->taken) pd_anomaly("final Release before the game's destructor", *pp, caller);
                 u = pd_unlink(pp);
                 if (u && nd < 16) drop[nd++] = u;
             } else pp = &(*pp)->next;
@@ -911,7 +911,7 @@ static void pd_patch_table(void **t, int idx, int kind)
     if (t[set]  == g_base + (uintptr_t)stub_of[set])  { t[set]  = (void *)pd_SetPrivateData; n++; }
     if (t[seti] == g_base + (uintptr_t)stub_of[seti]) { t[seti] = (void *)pd_SetPrivateDataInterface; n++; }
     if (n && t[2] != g_base + RVA_RELEASE)
-        wlog("d3d: tipo %#x com Release diferente (%p), dados privados nao sao limpos", idx, t[2]);
+        wlog("d3d: type %#x with a different Release (%p), private data is not cleaned up", idx, t[2]);
 }
 
 /* tira um slot que o FM5 nao tem: FM5 s>=first = Azimuth s+1 (a tabela e alterada no lugar;
@@ -942,7 +942,7 @@ static void install_object_layouts(void)
         if (t == 0xc) {                                   /* Texture2D: GetDesc devolve o Quality do jogo */
             orig_tex2d_getdesc = (tex2d_getdesc_fn)tab[0xb];
             tab[0xb] = (void *)tex2d_GetDesc;
-            wlog("d3d: Texture2D GetDesc %#llx com wrapper (Quality do MSAA do FM5)",
+            wlog("d3d: Texture2D GetDesc %#llx wrapped (FM5 MSAA Quality)",
                  (unsigned long long)((uint8_t *)orig_tex2d_getdesc - g_base));
         }
         if (t == 6) {                                     /* DMA: contagem/trace por slot (d3d_thunks.S) */
@@ -958,7 +958,7 @@ static void install_object_layouts(void)
         if (t == 0xf) { orig_sc_getbuffer = (getbuf_fn)tab[0xa]; tab[0xa] = (void *)sc_GetBuffer; }
     }
     pd_patch_table(((alt_fn)(g_base + RVA_VTBL_ALTCTX))(), -1, K_CTX);
-    wlog("d3d: vtables dos objetos no layout do FM5 + Get/SetPrivateData (Release com hook, trampolim %p)", orig_release);
+    wlog("d3d: object vtables in the FM5 layout + Get/SetPrivateData (Release hooked, trampoline %p)", orig_release);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -1106,7 +1106,7 @@ void ctx_ResolveSubresource(void *real, void *dst, UINT dsub, void *src, UINT ss
     }
     if (s && ssamples <= 1) {
         if (InterlockedIncrement(&logged) <= 20)
-            wlog("d3d: ResolveSubresource c%d de 1 amostra -> copia: src %p sub %u (%ux%u fmt %u tipo %#x) dst %p sub %u"
+            wlog("d3d: ResolveSubresource c%d from 1 sample -> copy: src %p sub %u (%ux%u fmt %u type %#x) dst %p sub %u"
                  " (%ux%u fmt %u samples %u) fmt %u", proxy_index(real), src, ssub, *(const UINT *)(s + 0x70),
                  *(const UINT *)(s + 0x74), *(const UINT *)(s + 0x80), *(const UINT *)(s + 0x38), dst, dsub,
                  d ? *(const UINT *)(d + 0x70) : 0, d ? *(const UINT *)(d + 0x74) : 0, d ? *(const UINT *)(d + 0x80) : 0,
@@ -1178,7 +1178,7 @@ void ctx_Dispatch(void *real, UINT x, UINT y, UINT z)
         ReleaseSRWLockShared(&alias_lock);
         al_pending = 1;
         if (InterlockedIncrement(&al_count) <= 3)
-            wlog("d3d: alias: Dispatch %ux%ux%u -> copia profundidade %p -> %p, resolve da cor pendente", x, y, z,
+            wlog("d3d: alias: Dispatch %ux%ux%u -> copy depth %p -> %p, color resolve pending", x, y, z,
                  al_depth_a, al_depth_b);
     }
     ((disp_fn)(*(void ***)real)[0x29])(real, x, y, z);
@@ -1246,7 +1246,7 @@ static long WINAPI fm5_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     if (out_dev) *out_dev = NULL;
     if (out_ctx) *out_ctx = NULL;
     hr = ((createx_fn)(g_base + RVA_CREATE_DEVICEX))(desc, &dev, &ctx);
-    wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p contexto=%p", hr, dev, ctx);
+    wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p context=%p", hr, dev, ctx);
     if (hr < 0) return hr;
 
     install_object_layouts();
@@ -1302,7 +1302,7 @@ static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
     d[6] = 0xffffffff;
     hr = orig_fm6_create_tex2d(dev, d, init, out);
     if (hr >= 0 && out && *out) msaa_q_set(*out, desc[6]);
-    wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> padrao, bind=%#x misc=%#x) hr=%#lx tex=%p",
+    wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> default, bind=%#x misc=%#x) hr=%#lx tex=%p",
          d[0], d[1], d[4], d[5], desc[6], d[8], d[10], hr, out ? *out : NULL);
     if (hr >= 0 && out && *out) alias_track_ex(desc, *out, 0);
     return hr;
@@ -1410,14 +1410,14 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
         LONG k = InterlockedIncrement(&n);
         long hr = orig_fm6_create_tex2d(dev, desc, NULL, out);
         if (k <= 16 || (k & (k - 1)) == 0)
-            wlog("d3d: CreatePlacementTexture2D(FM6) so UAV #%ld %ux%u mips=%u fmt=%u addr=%p -> textura committed "
-                 "hr=%#lx tex=%p, chamador game+%#zx", k, desc[0], desc[1], desc[2], desc[4], addr, hr, out ? *out : NULL,
+            wlog("d3d: CreatePlacementTexture2D(FM6) UAV only #%ld %ux%u mips=%u fmt=%u addr=%p -> committed texture "
+                 "hr=%#lx tex=%p, caller game+%#zx", k, desc[0], desc[1], desc[2], desc[4], addr, hr, out ? *out : NULL,
                  fm6_game_caller());
         return hr;
     }
     if (desc && !az_placement_tex2d_ok(desc))
-        wlog("d3d: CreatePlacementTexture2D(FM6) recusada pelo Azimuth: %ux%u mips=%u arr=%u fmt=%u samples=%u/%#x "
-             "usage=%u bind=%#x cpu=%#x misc=%#x tile=%u pitch=%u addr=%p, chamador game+%#zx", desc[0], desc[1], desc[2],
+        wlog("d3d: CreatePlacementTexture2D(FM6) rejected by Azimuth: %ux%u mips=%u arr=%u fmt=%u samples=%u/%#x "
+             "usage=%u bind=%#x cpu=%#x misc=%#x tile=%u pitch=%u addr=%p, caller game+%#zx", desc[0], desc[1], desc[2],
              desc[3], desc[4], desc[5], desc[6], desc[7], desc[8], desc[9], desc[10], tile, pitch, addr,
              fm6_game_caller());
     if (pa_tracking()) {   /* PASSO 99: endereco/chamador/objeto da placed (stutter_fm6.c pa_live_report) */
@@ -1524,7 +1524,7 @@ static long fm6_defctx(int which, void *dev, UINT flags, void **out)
             fm6_dctx[i].idx = (int)i;
             fm6_dctx[i].ctx = *out;
         }
-        wlog("d3d: FM6 %s flags=%#x -> diferido d%ld %p, chamador game+%#zx", names[which], flags, i, *out, caller);
+        wlog("d3d: FM6 %s flags=%#x -> deferred d%ld %p, caller game+%#zx", names[which], flags, i, *out, caller);
     }
     return hr;
 }
@@ -1597,15 +1597,15 @@ static void fm6_rs_trace(int sc, uintptr_t ret, UINT n, const void *p)
             int j = 0;
             for (; g_fm6_game && sp < top && sp < (uint8_t **)__builtin_frame_address(0) + 0x400 && j < 5; sp++)
                 if (*sp > g_fm6_game && *sp < g_fm6_game + 0x1800000) st[j++] = (unsigned long long)(*sp - g_fm6_game);
-            wlog(sc ? "d3d: UiTrace: scissor n=%u %d,%d - %d,%d (chamador game+%#llx; pilha %#llx %#llx %#llx %#llx %#llx)"
-                    : "d3d: UiTrace: viewport n=%u %d,%d %dx%d (chamador game+%#llx; pilha %#llx %#llx %#llx %#llx %#llx)",
+            wlog(sc ? "d3d: UiTrace: scissor n=%u %d,%d - %d,%d (caller game+%#llx; stack %#llx %#llx %#llx %#llx %#llx)"
+                    : "d3d: UiTrace: viewport n=%u %d,%d %dx%d (caller game+%#llx; stack %#llx %#llx %#llx %#llx %#llx)",
                  n, v[0], v[1], v[2], v[3],
                  (unsigned long long)(ret - (uintptr_t)g_fm6_game), st[0], st[1], st[2], st[3], st[4]);
         }
         return;
     }
     ReleaseSRWLockExclusive(&lock);
-    if (k == 512 && InterlockedIncrement(&dropped) == 1) wlog("d3d: UiTrace: 512 entradas, o resto nao e logado");
+    if (k == 512 && InterlockedIncrement(&dropped) == 1) wlog("d3d: UiTrace: 512 entries, the rest is not logged");
 }
 static void fm6_imm_RSSetViewports(void *ctx, UINT n, const float *vp)
 {
@@ -1678,7 +1678,7 @@ static void fm6_def_remap(int srv, void *ctx, UINT ds, UINT dslot, UINT ss, UINT
     LONG k = InterlockedIncrement(&n[srv]);
     if (k <= 8 || (k & (k - 1)) == 0) {
         fm6_dctx_info *d = fm6_dctx_find(ctx);
-        wlog("d3d: heranca: Remap%sInheritance #%ld no diferido d%d (flags %#x): estagio %u slot %u <- estagio %u "
+        wlog("d3d: inheritance: Remap%sInheritance #%ld on deferred d%d (flags %#x): stage %u slot %u <- stage %u "
              "slot %u", srv ? "ShaderResource" : "ConstantBuffer", k, d ? d->idx : -1, d ? d->flags : 0, ds, dslot,
              ss, sslot);
     }
@@ -1838,7 +1838,7 @@ static void fm6_upd_apply(void *ctx, const fm6_om_item *o)
         ((upd_fn)(*(void ***)ctx)[AZ_SLOT_UPDATE_SUB])(ctx, o->upd[i].buf, 0, NULL, v->data, 0, 0);
         n = InterlockedIncrement(&fm6_upd_applied);
         if ((n & (n - 1)) == 0)
-            wlog("d3d: heranca: %ld versoes de placement buffer aplicadas no imediato (%ld iguais puladas); ultima buf "
+            wlog("d3d: inheritance: %ld placement buffer versions applied on the immediate (%ld identical skipped); last buf "
                  "%p (%u bytes)", n, fm6_upd_same, o->upd[i].buf, v->size);
     }
 }
@@ -1881,23 +1881,23 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
     }
     fm6_upd_apply(ctx, o);
     if (InterlockedIncrement(&logged) <= 4)
-        wlog("d3d: heranca: bundle aninhado executa com o OM do juntador (%u RTs, DS %p, %u viewports, %u scissors, "
-             "%u slots de CB e %u de SRV estacionados; blend %s%p, depth %s%p ref %u, rs %s%p)", o->st.nrtv, o->st.dsv,
-             o->st.nvp, o->st.nsc, ncb, nsrv, o->st.has & FM6_HAS_BLEND ? "" : "(nao ligado) ", o->st.blend,
-             o->st.has & FM6_HAS_DEPTH ? "" : "(nao ligado) ", o->st.depth, o->st.stencil_ref,
-             o->st.has & FM6_HAS_RS ? "" : "(nao ligado) ", o->st.rs);
+        wlog("d3d: inheritance: nested bundle runs with the joiner's OM (%u RTs, DS %p, %u viewports, %u scissors, "
+             "%u CB slots and %u SRV slots parked; blend %s%p, depth %s%p ref %u, rs %s%p)", o->st.nrtv, o->st.dsv,
+             o->st.nvp, o->st.nsc, ncb, nsrv, o->st.has & FM6_HAS_BLEND ? "" : "(not bound) ", o->st.blend,
+             o->st.has & FM6_HAS_DEPTH ? "" : "(not bound) ", o->st.depth, o->st.stencil_ref,
+             o->st.has & FM6_HAS_RS ? "" : "(not bound) ", o->st.rs);
     if (InterlockedIncrement(&logged_cb) <= 16) {   /* PASSO 49: quais slots de CB a copia liga */
         char buf[256];
         int len = 0;
         UINT i;
         for (s = 0; s < 6; s++) {
             if (!o->st.ncb[s]) continue;
-            len += wsprintfA(buf + len, " estagio %u:", s);
+            len += wsprintfA(buf + len, " stage %u:", s);
             for (i = 0; i < o->st.ncb[s]; i++)
                 len += wsprintfA(buf + len, "%c", !(o->st.cbset[s][0] >> i & 1) ? '-' : o->st.cb[s][i] ? 'x' : '.');
         }
-        wlog("d3d: heranca: CBs da copia no imediato %p (x = objeto, . = NULL, - = nao gravado):%s", ctx,
-             len ? buf : " nenhum");
+        wlog("d3d: inheritance: CBs of the copy on immediate %p (x = object, . = NULL, - = not recorded):%s", ctx,
+             len ? buf : " none");
     }
 }
 
@@ -1934,10 +1934,10 @@ static void fm6_nest_note(void *ctx, void *cl)
     if (i >= 64) return;
     seen[i].j = ctx;
     seen[i].w = w;
-    wlog("d3d: heranca: aninhado no diferido d%d (flags %#x, game+%#zx, %ld OMSet, %ld vazios) <- %s %p do "
-         "diferido d%d %p (flags %#x, game+%#zx, %ld OMSet, %ld vazios)",
+    wlog("d3d: inheritance: nested on deferred d%d (flags %#x, game+%#zx, %ld OMSet, %ld empty) <- %s %p from "
+         "deferred d%d %p (flags %#x, game+%#zx, %ld OMSet, %ld empty)",
          dj ? dj->idx : -1, dj ? dj->flags : 0, dj ? dj->caller : 0, dj ? dj->om : 0, dj ? dj->om_empty : 0,
-         fm6_is_bundle(cl) ? "bundle" : "lista", cl, dw ? dw->idx : -1, w, dw ? dw->flags : 0, dw ? dw->caller : 0,
+         fm6_is_bundle(cl) ? "bundle" : "list", cl, dw ? dw->idx : -1, w, dw ? dw->flags : 0, dw ? dw->caller : 0,
          dw ? dw->om : 0, dw ? dw->om_empty : 0);
 }
 
@@ -2139,7 +2139,7 @@ static fm6_upd *fm6_upd_get(void *ctx, uint8_t *res, UINT w)
     fm6_obj_ref(res, 1);                                       /* a sombra vive com o diferido */
     d->upd[free_i].buf = res;
     d->upd[free_i].size = w;
-    wlog("d3d: UpdateSubresource de placement buffer no diferido d%d %p: sombra de buf %p (%u bytes, memoria %p)",
+    wlog("d3d: placement buffer UpdateSubresource on deferred d%d %p: shadow of buf %p (%u bytes, memory %p)",
          d->idx, ctx, (void *)res, w, *(void **)(res + AZ_BUF_MEMORY));
     return &d->upd[free_i];
 }
@@ -2169,8 +2169,8 @@ static void fm6_UpdateSubresource(void *ctx, uint8_t *res, UINT sub, const UINT 
             } else
                 memcpy(*(uint8_t **)(res + AZ_BUF_MEMORY) + lo, src, hi - lo);
             if (k <= 8 || (k & (k - 1)) == 0)
-                wlog("d3d: UpdateSubresource #%ld de placement buffer no diferido %p: buf %p (%u bytes) [%u, %u) "
-                     "-> %s %p, chamador %p", k, ctx, (void *)res, w, lo, hi, u ? "sombra" : "memoria",
+                wlog("d3d: placement buffer UpdateSubresource #%ld on deferred %p: buf %p (%u bytes) [%u, %u) "
+                     "-> %s %p, caller %p", k, ctx, (void *)res, w, lo, hi, u ? "shadow" : "memory",
                      u ? (void *)u->cur->data : *(void **)(res + AZ_BUF_MEMORY), __builtin_return_address(0));
             return;
         }
@@ -2294,11 +2294,11 @@ static void fm6_batch_probe(const uint8_t *rec, void *obj)
     LONG k;
     ((ULONG (*)(void *))(*(void ***)obj)[2])(obj);
     if (InterlockedIncrement(&fm6_batch_probes) <= 4)
-        wlog("d3d: batch do FM6: sonda de referencia do SRV %p = %lu", obj, (unsigned long)c);
+        wlog("d3d: FM6 batch: SRV %p reference probe = %lu", obj, (unsigned long)c);
     if (c != 2) return;
     k = InterlockedIncrement(&fm6_batch_orphans);
     if (k <= 16 || !(k & (k - 1)))
-        wlog("d3d: batch do FM6: SRV %p ja solto pelo jogo ainda aplicado do registro %p (%ld vezes)", obj, rec, k);
+        wlog("d3d: FM6 batch: SRV %p already released by the game still applied from record %p (%ld times)", obj, rec, k);
 }
 
 static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size)
@@ -2315,8 +2315,8 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
         if ((hdr & 0xffff0000u) != FM6_BATCH_MAGIC || stage >= 6 || p + n > end) {
             static volatile LONG logged;
             if (InterlockedIncrement(&logged) <= 8)
-                wlog("d3d: SetFastResourcesFromBatch do FM6: registro desconhecido %#x em +%#x de %u bytes; resto "
-                     "ignorado", hdr, (UINT)(size - (end - p)), size);
+                wlog("d3d: FM6 SetFastResourcesFromBatch: unknown record %#x at +%#x of %u bytes; rest "
+                     "ignored", hdr, (UINT)(size - (end - p)), size);
             return;
         }
         memcpy(&obj, p + 4, 8);
@@ -2325,7 +2325,7 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
             LONG k = InterlockedIncrement(&logged);
             if (k <= 16) {
                 uint8_t *vt = obj ? *(uint8_t **)obj : NULL, *tabs = g_base + RVA_VTBL_TABLES;
-                wlog("d3d: batch do FM6 #%ld: %s estagio %u slot %u obj %p (tipo do Azimuth %d)", k,
+                wlog("d3d: FM6 batch #%ld: %s stage %u slot %u obj %p (Azimuth type %d)", k,
                      hdr & FM6_BATCH_SRV_FLAG ? "SRV" : "CB", stage, slot, obj,
                      vt >= tabs && vt < tabs + NTYPES * SLOTS * 8 ? (int)((vt - tabs) / (SLOTS * 8)) : -1);
             }
@@ -2444,14 +2444,14 @@ static void fm6_refs_note(LONG d, const char *why, int chain)
 {
     LONG v = InterlockedExchangeAdd(&fm6_refs_live, d) + d;
     if (v >= 64 && (v & (v - 1)) == 0 && InterlockedExchange(&fm6_refs_logged, v) != v)
-        wlog("d3d: %ld referencias de pecas aninhadas vivas (%s, cadeia de %d)", v, why, chain);
+        wlog("d3d: %ld references of live nested pieces (%s, chain of %d)", v, why, chain);
 }
 
 static void fm6_chain_free(fm6_chain *c)
 {
     int i;
     for (i = 0; i < c->n; i++) fm6_obj_release(c->items[i]);
-    if (c->n) fm6_refs_note(-c->n, "soltas", c->n);
+    if (c->n) fm6_refs_note(-c->n, "released", c->n);
     free(c->items);
 }
 
@@ -2506,11 +2506,11 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
            17_fm6.txt PASSO 37) -> so a lista entra nas pendencias */
         if (!*(void **)(c + AZ_CTX_D3D12_LIST)) {
             LONG k = InterlockedIncrement(&empty);
-            if ((k & (k - 1)) == 0) wlog("d3d: aninhado no diferido %p sem nada gravado antes: sem parte (#%ld)", ctx, k);
+            if ((k & (k - 1)) == 0) wlog("d3d: nested on deferred %p with nothing recorded before: no part (#%ld)", ctx, k);
         } else {
             HRESULT hr = ((finish_fn)az[AZ_SLOT_FINISH])(ctx, TRUE, &part);
             if (hr < 0 || !part) {
-                wlog("d3d: ExecuteCommandList aninhado no diferido %p: FinishCommandList(TRUE) hr=%#lx", ctx, hr);
+                wlog("d3d: nested ExecuteCommandList on deferred %p: FinishCommandList(TRUE) hr=%#lx", ctx, hr);
                 ((execute_fn)az[AZ_SLOT_EXECUTE])(ctx, cl, restore);
                 return;
             }
@@ -2530,22 +2530,22 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
             if (fm6_chain_push(p, cl)) fm6_obj_addref(cl);
             n = p->n;
             inner = e ? e->n : 0;
-            fm6_refs_note(n - before, "aninhado", n);
+            fm6_refs_note(n - before, "nested", n);
             {   /* lista que ja traz cadeia: mostra as primeiras e as cadeias recorde */
                 static volatile LONG shown, longest;
                 if (inner && (InterlockedIncrement(&shown) <= 8 || n > longest)) {
                     if (n > longest) longest = n;
-                    wlog("d3d: aninhado no diferido %p: lista %p ja tem cadeia de %d -> pendentes %d", ctx, cl, inner, n);
+                    wlog("d3d: nested on deferred %p: list %p already has a chain of %d -> pending %d", ctx, cl, inner, n);
                 }
             }
         }
         ReleaseSRWLockExclusive(&fm6_cl_lock);
-        if (!ok) wlog("d3d: ExecuteCommandList aninhado no diferido %p: sem memoria; lista %p perdida", ctx, cl);
+        if (!ok) wlog("d3d: nested ExecuteCommandList on deferred %p: out of memory; list %p lost", ctx, cl);
         /* restore FALSE no aninhado NAO limpa o juntador: no console o aninhado e um salto de command buffer e os
            registros continuam; o FM6 liga OM/PS uma vez e aninha varios bundles em seguida (17_fm6.txt PASSO 43) */
         fm6_nest_note(ctx, cl);
         if (InterlockedIncrement(&logged) <= 8)
-            wlog("d3d: ExecuteCommandList aninhado no diferido %p: lista %p (restore %d) -> parte %p, %d pendentes",
+            wlog("d3d: nested ExecuteCommandList on deferred %p: list %p (restore %d) -> part %p, %d pending",
                  ctx, cl, restore, part, n);
         return;
     }
@@ -2568,7 +2568,7 @@ static void fm6_ExecuteCommandList(void *ctx, void *cl, BOOL restore)
                 if (items[i] == items[j]) { dup = 1; break; }
         if (dup) {
             LONG k = InterlockedIncrement(&reps);
-            if ((k & (k - 1)) == 0) wlog("d3d: ExecuteCommandList %p com lista aninhada repetida (%d pecas) (#%ld)", cl, n, k);
+            if ((k & (k - 1)) == 0) wlog("d3d: ExecuteCommandList %p with a repeated nested list (%d pieces) (#%ld)", cl, n, k);
         }
     }
     for (i = 0; i < n; i++) {
@@ -2609,9 +2609,9 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
     if (stale.n) {
         static volatile LONG k;
         LONG c = InterlockedIncrement(&k);
-        if ((c & (c - 1)) == 0) wlog("d3d: FinishCommandList: lista %p reaproveitada sem Release, cadeia velha de %d (#%ld)", *out, stale.n, c);
+        if ((c & (c - 1)) == 0) wlog("d3d: FinishCommandList: list %p reused without Release, old chain of %d (#%ld)", *out, stale.n, c);
     }
-    if (p.n) wlog("d3d: FinishCommandList do diferido %p: %d pecas aninhadas perdidas", ctx, p.n);
+    if (p.n) wlog("d3d: FinishCommandList of deferred %p: %d nested pieces lost", ctx, p.n);
     fm6_chain_free(&p);
     fm6_chain_free(&stale);
     return hr;
@@ -2656,8 +2656,8 @@ static void fm6_apply_execute(uint8_t *ctx, uint8_t *cl, int restore, void *ret)
         if (unsent) az_submit(ctx, 0x10, 0);
         az_fence_wait(fence, last);
         if ((k & (k - 1)) == 0)
-            wlog("d3d: lista %p reexecutada antes da GPU terminar a anterior (fence %llu%s) -> espera (#%ld)", cl,
-                 (unsigned long long)last, unsent ? ", lote submetido antes" : "", k);
+            wlog("d3d: list %p re-executed before the GPU finished the previous run (fence %llu%s) -> wait (#%ld)", cl,
+                 (unsigned long long)last, unsent ? ", batch submitted before" : "", k);
     }
     orig_apply_execute(ctx, cl, restore, ret);
 }
@@ -2666,17 +2666,17 @@ int fm6_reexec_install(void)
 {
     if (!bytes_match(g_base + RVA_SUBMIT, "48895c24188954241055565741544155", 16) ||
         !bytes_match(g_base + RVA_FENCE_WAIT, "48895c24185556574881ec00010000", 15)) {
-        wlog("d3d: submit/espera de fence do Azimuth nao conferem; reexecucao sem espera");
+        wlog("d3d: Azimuth fence submit/wait do not match; re-execution without wait");
         return 0;
     }
     az_submit = (void *)(g_base + RVA_SUBMIT);
     az_fence_wait = (void *)(g_base + RVA_FENCE_WAIT);
     if (!hook_function(RVA_APPLY_EXECUTE, "48895c241855565741544155415641574883ec50", 16, (void *)fm6_apply_execute,
                        (void **)&orig_apply_execute)) {
-        wlog("d3d: execucao de lista do worker (%#x) nao confere; reexecucao sem espera", RVA_APPLY_EXECUTE);
+        wlog("d3d: worker list execution (%#x) does not match; re-execution without wait", RVA_APPLY_EXECUTE);
         return 0;
     }
-    wlog("d3d: FM6: reexecucao de lista espera a fence da execucao anterior");
+    wlog("d3d: FM6: list re-execution waits for the previous run's fence");
     return 1;
 }
 
@@ -2729,7 +2729,7 @@ static int ih_bind(void *ctx, UINT stage, UINT start, UINT n, void *const *views
         if (ih_addref(old) == 2) {                /* so a nossa (+ a sonda): o jogo ja soltou */
             LONG d = InterlockedIncrement(&ih_dead_bound);
             if (d <= 8 || !(d & (d - 1)))
-                wlog("d3d: SRV %p solta pelo jogo ainda ligada no imediato %p (estagio %u slot %u; %ld vezes)", old,
+                wlog("d3d: SRV %p released by the game still bound on immediate %p (stage %u slot %u; %ld times)", old,
                      ctx, stage, start + i, d);
         }
         ih_release(old);
@@ -2767,11 +2767,11 @@ int fm6_imm_srv_hold_install(void)
     ih_freq = f.QuadPart;
     if (!hook_function(RVA_IMM_SET_SRVS, "48895c240848896c24104889742418", 15, (void *)fm6_imm_set_srvs,
                        (void **)&orig_imm_srvs)) {
-        wlog("d3d: SetShaderResources imediato do Azimuth (%#x) nao confere; SRVs do imediato sem referencia",
+        wlog("d3d: Azimuth immediate SetShaderResources (%#x) does not match; immediate SRVs not referenced",
              RVA_IMM_SET_SRVS);
         return 0;
     }
-    wlog("d3d: FM6: SRVs do contexto imediato com referencia; a trocada sai %d ms depois", ih_hold_ms);
+    wlog("d3d: FM6: immediate context SRVs referenced; a replaced one is released %d ms later", ih_hold_ms);
     return 1;
 }
 
@@ -2786,15 +2786,15 @@ int fm6_batch_install(uint8_t *game)
     int i;
     for (i = 0; i < 2; i++)
         if (!bytes_match(game + site[i].rva, site[i].orig, strlen(site[i].orig) / 2)) {
-            wlog("d3d: montador de batch do FM6 em game+%#x nao confere; batches sem conversao", site[i].rva);
+            wlog("d3d: FM6 batch builder at game+%#x does not match; batches not converted", site[i].rva);
             return 0;
         }
     for (i = 0; i < 2; i++) abs_jmp(game + site[i].rva, site[i].fn, 14);
     fm6_batch_hold = dbg_int(L"BatchHoldRefs", 1) > 0;
     fm6_ui_trace = dbg_int(L"UiTrace", 0) > 0;
-    if (fm6_ui_trace) wlog("d3d: UiTrace=1 (viewports/scissors distintos no log)");
-    wlog("d3d: montadores de batch do FM6 (game+%#x CB, game+%#x SRV) -> registros com o objeto%s", FM6_BATCH_CB,
-         FM6_BATCH_SRV, fm6_batch_hold ? "; o batch segura referencia ao SRV" : "");
+    if (fm6_ui_trace) wlog("d3d: UiTrace=1 (distinct viewports/scissors in the log)");
+    wlog("d3d: FM6 batch builders (game+%#x CB, game+%#x SRV) -> records carry the object%s", FM6_BATCH_CB,
+         FM6_BATCH_SRV, fm6_batch_hold ? "; the batch holds a reference to the SRV" : "");
     return 1;
 }
 
@@ -2866,8 +2866,8 @@ static void *fm6_ctx_copy(void *dst, const void *src, size_t n, int deferred)
     t = fm6_ctx_table(dst, src, deferred);
     if (deferred) fm6_ctx_src_note((uint8_t *)dst - 0x3d0, src);
     if (InterlockedIncrement(&logged[deferred]) == 1)
-        wlog("d3d: contexto %s do FM6 %p: tabela embutida no layout do FM6 (0x%x slots, %d triviais do driver)",
-             deferred ? "diferido" : "imediato", (uint8_t *)dst - 0x3d0, FM6_CTX_SLOTS, t);
+        wlog("d3d: FM6 %s context %p: embedded table in the FM6 layout (0x%x slots, %d trivial driver slots)",
+             deferred ? "deferred" : "immediate", (uint8_t *)dst - 0x3d0, FM6_CTX_SLOTS, t);
     return dst;
 }
 
@@ -2888,11 +2888,11 @@ static int fm6_ctx_install(void)
         uint8_t *at = g_base + site[i].rva;
         if (at[0] != 0xe8 || at + 5 + *(int32_t *)(at + 1) != g_base + RVA_MEMCPY ||
             memcmp(at - 6, "\x41\xb8\x70\x08\x00\x00", 6) != 0) {
-            wlog("d3d: copia da tabela do contexto em %#x nao confere; contexto do FM6 sem conversao", site[i].rva);
+            wlog("d3d: context table copy at %#x does not match; FM6 context not converted", site[i].rva);
             return 0;
         }
     }
-    if (!(stubs = alloc_near(g_base, 32))) { wlog("d3d: sem memoria perto do azimuth.exe para o contexto do FM6"); return 0; }
+    if (!(stubs = alloc_near(g_base, 32))) { wlog("d3d: no memory near azimuth.exe for the FM6 context"); return 0; }
     for (i = 0; i < 2; i++) {
         uint8_t *at = g_base + site[i].rva, *st = stubs + i * 16, call[5] = { 0xe8 };
         int32_t rel = (int32_t)(st - (at + 5));
@@ -2903,7 +2903,7 @@ static int fm6_ctx_install(void)
     }
     FlushInstructionCache(GetCurrentProcess(), stubs, 32);
     done = 1;
-    wlog("d3d: contexto do FM6: copias da tabela embutida (%#x, %#x) -> layout do FM6", RVA_CTX_COPY_IMM, RVA_CTX_COPY_DEF);
+    wlog("d3d: FM6 context: embedded table copies (%#x, %#x) -> FM6 layout", RVA_CTX_COPY_IMM, RVA_CTX_COPY_DEF);
     return 1;
 }
 
@@ -2971,8 +2971,8 @@ static void fm6_object_layouts(void)
     factory = get(0xe);
     orig_fm6_create_sc_cw = (create_sc_cw_fn)factory[0x10];
     factory[0x10] = (void *)fm6_CreateSwapChainForCoreWindow;
-    wlog("d3d: vtables dos objetos no layout do FM6 (DeviceChild +slot 8, DXGI sem o slot 5, GetDesc do Texture2D "
-         "com o Quality do MSAA do jogo)");
+    wlog("d3d: object vtables in the FM6 layout (DeviceChild +slot 8, DXGI without slot 5, Texture2D GetDesc "
+         "with the game's MSAA Quality)");
 }
 
 /* FM6 (OS "era", XDK posterior ao do FH2): D3D11CreateDevice(0, 1, 0, 0x4000000, {0xb100}, 1, 0x20011, ...) em
@@ -2993,9 +2993,9 @@ static long WINAPI fm6_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     if (out_ctx) *out_ctx = NULL;
     fm6_ctx_install();
     hr = ((createx_fn)(g_base + RVA_CREATE_DEVICEX))(desc, &dev, &ctx);
-    wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p contexto=%p (FM6, device no layout do FH2)", hr, dev, ctx);
+    wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p context=%p (FM6, device in the FH2 layout)", hr, dev, ctx);
     if (hr < 0) return hr;
-    wlog("d3d: device do FM6: %d slots triviais do driver do console no lugar do stub fatal",
+    wlog("d3d: FM6 device: %d trivial console driver slots in place of the fatal stub",
          fm6_device_fixups(*(void ***)dev));
     fm6_object_layouts();
     if (out_level) *out_level = 0xb100;
@@ -3030,7 +3030,7 @@ static long WINAPI fm5_XAudio2Create(void **pp, UINT flags, UINT processor)
         HMODULE m = LoadLibraryExW(L"xaudio2_9.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
         if (m && InterlockedCompareExchangePointer((void **)hmod, m, NULL) == NULL)
             InterlockedCompareExchange(guard, (LONG)0x80000000, 0);
-        wlog("xaudio2: xaudio2_9.dll = %p (epoca da thread %d)", m,
+        wlog("xaudio2: xaudio2_9.dll = %p (thread epoch %d)", m,
              *(int *)(*(uint8_t **)__readgsqword(0x58) + 0x10));
     }
     hr = ((cxa2_fn)(g_base + RVA_CREATE_XAUDIO2))(pp, flags & 0x400, 0xffffffff, 0);
@@ -3077,7 +3077,7 @@ static void rdoc_maybe_capture(LONG n)
     for (i = 0; i < nframes; i++)
         if (frames[i] == n) {
             ((void (*)(void))api[15])();
-            wlog("rdoc: TriggerCapture no present #%ld", n);
+            wlog("rdoc: TriggerCapture at present #%ld", n);
         }
 }
 
@@ -3113,7 +3113,7 @@ static void fm5_DXGIXPresentArray(UINT sync, UINT threshold, UINT flags, UINT co
         typedef void (*clear_fn)(void *ctx, void *rtv, const float *c);
         static const float red[4] = { 1, 0, 0, 1 };
         if (dbg < 0) { char v[8] = ""; GetEnvironmentVariableA("FM5_DEBUG_CLEAR", v, sizeof v); dbg = dbg_clear = atoi(v);
-                       wlog("d3d: present na thread %lu, FM5_DEBUG_CLEAR=%d rtv=%p", GetCurrentThreadId(), dbg, sc_rtv); }
+                       wlog("d3d: present on thread %lu, FM5_DEBUG_CLEAR=%d rtv=%p", GetCurrentThreadId(), dbg, sc_rtv); }
         if (dbg == 1 && sc_rtv && nproxies)
             ((clear_fn)(*(void ***)proxies[0].real)[0x32])(proxies[0].real, sc_rtv, red);
     }
@@ -3130,7 +3130,7 @@ static void fm5_DXGIXPresentArray(UINT sync, UINT threshold, UINT flags, UINT co
         QueryPerformanceCounter(&b);
         prev = b; in_sum += b.QuadPart - a.QuadPart;
         if (++cnt == 600) {
-            wlog("d3d: present: media %.2f ms no host, %.2f ms no jogo (600 frames)", in_sum * 1000.0 / f.QuadPart / cnt,
+            wlog("d3d: present: average %.2f ms on the host, %.2f ms in the game (600 frames)", in_sum * 1000.0 / f.QuadPart / cnt,
                  out_sum * 1000.0 / f.QuadPart / cnt);
             cnt = 0; in_sum = out_sum = 0;
         }
@@ -3282,7 +3282,7 @@ static HRESULT fm6_DXGIXSetVLineNotification(UINT counter, UINT line, HANDLE eve
 {
     if (counter >= VLINE_N) return E_INVALIDARG;
     vline_event[counter] = event;
-    wlog("d3d: DXGIXSetVLineNotification(%u, linha %u, evento %p) -> %ld Hz", counter, line, event, vline_hz);
+    wlog("d3d: DXGIXSetVLineNotification(%u, line %u, event %p) -> %ld Hz", counter, line, event, vline_hz);
     if (event && !InterlockedExchange(&vline_started, 1)) CloseHandle(CreateThread(NULL, 0, vline_thread, NULL, 0, NULL));
     return S_OK;
 }
@@ -3315,7 +3315,7 @@ static FARPROC WINAPI fm6_GetProcAddress(HMODULE m, const char *name)
 {
     FARPROC p = az_GetProcAddress(m, name);
     if ((uint8_t *)p == g_base + RVA_CREATE_XAUDIO2) {
-        wlog("xaudio2: GetProcAddress(CreateXAudio2Object) -> ponte com processador -1 (FM6)");
+        wlog("xaudio2: GetProcAddress(CreateXAudio2Object) -> bridge with processor -1 (FM6)");
         p = (FARPROC)fm5_XAudio2Create;
     }
     return p;
@@ -3327,27 +3327,27 @@ static FARPROC hook_resolver(const uint8_t *entry)
     game_tls_apply();   /* 1o import: azimuth-tls.dll ja carregado, jogo ainda nao rodou */
     if (is_fm5()) {
         if (p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXPresentArray")) {
-            wlog("d3d: d3d11_x.dll!DXGIXPresentArray -> parametros de 12 dwords (XDK do FM5)");
+            wlog("d3d: d3d11_x.dll!DXGIXPresentArray -> 12-dword parameters (FM5 XDK)");
             return (FARPROC)fm5_DXGIXPresentArray;
         }
         if (p) return wp_hook(entry, p);
         if (str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "D3D11CreateDevice")) {
-            wlog("d3d: d3d11_x.dll!D3D11CreateDevice -> ponte do FM5");
+            wlog("d3d: d3d11_x.dll!D3D11CreateDevice -> FM5 bridge");
             p = (FARPROC)fm5_D3D11CreateDevice;
         } else if (str_is(entry, "xaudio2_9.dll") && str_is(entry + 0x20, "#1")) {
-            wlog("xaudio2: xaudio2_9.dll!#1 (XAudio2Create) -> CreateXAudio2Object do Azimuth");
+            wlog("xaudio2: xaudio2_9.dll!#1 (XAudio2Create) -> Azimuth CreateXAudio2Object");
             p = (FARPROC)fm5_XAudio2Create;
         }
     } else if (!is_fm6()) {
         return p;   /* FH2: exatamente o Azimuth */
     } else if (!p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "DXGIXSetVLineNotification")) {
-        wlog("d3d: d3d11_x.dll!DXGIXSetVLineNotification -> evento a 60 Hz");
+        wlog("d3d: d3d11_x.dll!DXGIXSetVLineNotification -> 60 Hz event");
         p = (FARPROC)fm6_DXGIXSetVLineNotification;
     } else if (!p && str_is(entry, "d3d11_x.dll") && str_is(entry + 0x20, "D3D11CreateDevice")) {
-        wlog("d3d: d3d11_x.dll!D3D11CreateDevice -> D3D11XCreateDeviceX do Azimuth (FM6)");
+        wlog("d3d: d3d11_x.dll!D3D11CreateDevice -> Azimuth D3D11XCreateDeviceX (FM6)");
         p = (FARPROC)fm6_D3D11CreateDevice;
     } else if (p && str_is(entry, "kernelx.dll") && str_is(entry + 0x20, "DeleteFileW")) {
-        if (!az_DeleteFileW) wlog("kernelx.dll!DeleteFileW -> d:\\ falha com ERROR_PATH_NOT_FOUND (sem PLS)");
+        if (!az_DeleteFileW) wlog("kernelx.dll!DeleteFileW -> d:\\ fails with ERROR_PATH_NOT_FOUND (no PLS)");
         az_DeleteFileW = (BOOL (WINAPI *)(const wchar_t *))p;
         p = (FARPROC)fm6_DeleteFileW;
     } else if (p && str_is(entry, "kernelx.dll") && str_is(entry + 0x20, "GetProcAddress")) {
@@ -3358,7 +3358,7 @@ static FARPROC hook_resolver(const uint8_t *entry)
     if (!p) {
         size_t nd, nn;
         const char *d = msvc_str(entry, &nd), *n = msvc_str(entry + 0x20, &nn);
-        wlog("import sem resolucao (thunk fatal se chamado): %.*s!%.*s", (int)nd, d, (int)nn, n);
+        wlog("unresolved import (fatal thunk if called): %.*s!%.*s", (int)nd, d, (int)nn, n);
     }
     return p;
 }
@@ -3388,7 +3388,7 @@ static void *hook_pso_lookup(uint8_t *ctx, int wait)
         int i = proxy_index(ctx);
         LONG n = InterlockedIncrement(&pso_null_counts[i < 0 ? 63 : i]);
         if (n <= 5 || (n & (n - 1)) == 0)
-            wlog("d3d: pipeline nulo #%ld no contexto c%d (esperar=%d) vs=%p ps=%p", n, i, wait,
+            wlog("d3d: null pipeline #%ld on context c%d (wait=%d) vs=%p ps=%p", n, i, wait,
                  *(void **)(ctx + 0x40d0), *(void **)(ctx + 0x40f0));
     }
     return p;
@@ -3400,9 +3400,9 @@ void trace_skips(void)
     int i, len = 0;
     for (i = 0; i < 64; i++)
         if (skip_counts[i] || pso_null_counts[i])
-            len += _snprintf(line + len, sizeof line - len, " c%d: pulados=%ld nulos=%ld", i == 63 ? -1 : i,
+            len += _snprintf(line + len, sizeof line - len, " c%d: skipped=%ld null=%ld", i == 63 ? -1 : i,
                              skip_counts[i], pso_null_counts[i]);
-    if (len) wlog("trace draws pulados (acumulado):%s", line);
+    if (len) wlog("trace skipped draws (cumulative):%s", line);
 }
 
 int d3d_install(void)

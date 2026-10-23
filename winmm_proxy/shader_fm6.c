@@ -204,7 +204,7 @@ static void log_unknown(unsigned op, unsigned len)
         LONG v = InterlockedCompareExchange(&seen[i], (LONG)op, 0);
         if (v == (LONG)op) return;
         if (v == 0) {
-            wlog("shader do FM6: opcode do console %#x (%u tokens) sem conversao (o D3D12 do PC nao aceita)", op, len);
+            wlog("FM6 shader: console opcode %#x (%u tokens) not converted (PC D3D12 does not accept it)", op, len);
             return;
         }
     }
@@ -260,7 +260,7 @@ uint8_t *fm6_shader_rewrite(const void *code, size_t size, size_t *out_size)
         if (op == OP_XB_MAX3 && !e) {
             static volatile LONG logged;
             if (InterlockedIncrement(&logged) <= 4)
-                wlog("shader do FM6: max3 (0x11a) com operandos nao suportados, shader sem conversao");
+                wlog("FM6 shader: max3 (0x11a) with unsupported operands, shader not converted");
             free(out);
             return NULL;
         }
@@ -292,8 +292,8 @@ uint8_t *fm6_shader_rewrite(const void *code, size_t size, size_t *out_size)
         static volatile LONG n;
         LONG k = InterlockedIncrement(&n);
         if (k <= 4 || (k & (k - 1)) == 0)
-            wlog("shader do FM6 #%ld: %u max3 do console -> max (%u -> %u bytes%s)", k, (unsigned)nmax3,
-                 (unsigned)size, (unsigned)*out_size, used_tmp ? ", temporario novo" : "");
+            wlog("FM6 shader #%ld: %u console max3 -> max (%u -> %u bytes%s)", k, (unsigned)nmax3,
+                 (unsigned)size, (unsigned)*out_size, used_tmp ? ", new temporary" : "");
     }
     return out;
 }

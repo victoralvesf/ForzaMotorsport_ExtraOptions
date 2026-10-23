@@ -70,12 +70,12 @@ TEST(audio_fm6_render_client_counts_game_frames)
     orig_get_service = fake_get_service;
     ac_init(NULL, 0, 0, 0, 0, &fmt, NULL);
     CHECK(fmt_block == 8 && fmt_bits == 32 && fmt_float);
-    CHECK(log_has("48000 Hz 32 bits bloco 8 float"));
+    CHECK(log_has("48000 Hz 32 bits block 8 float"));
     CHECK_EQ(ac_get_service(NULL, &iid_render_client, &out), 0);
     REQUIRE(out == &fake_rc);
     CHECK(fake_rc_vt[RC_GET_BUFFER] == (void *)rc_get_buffer);
     CHECK(fake_rc_vt[RC_RELEASE_BUFFER] == (void *)rc_release_buffer);
-    CHECK(log_has("GetBuffer/ReleaseBuffer com contagem"));
+    CHECK(log_has("GetBuffer/ReleaseBuffer counted"));
     /* 4 quadros de silencio, 4 com som, 4 com flag SILENT */
     memset(rc_buf, 0, sizeof rc_buf);
     rc_get_buffer(&fake_rc, 4, &d); rc_release_buffer(&fake_rc, 4, 0);
@@ -102,7 +102,7 @@ TEST(audio_fm6_game_hooks_on_real_exe)
     if (!game) { test_skip("exe do FM6 ausente"); return; }
     log_capture();
     audio_fm6_game_hooks(game);
-    CHECK(log_has("hooks do init do som / ACP instalados"));
+    CHECK(log_has("sound init / ACP hooks installed"));
     /* jmp absoluto (ff 25 00000000 + destino) nos 3 sites */
     CHECK_HEX(game + 0x79e0b0, "ff2500000000");
     CHECK(*(void **)(game + 0x79e0b6) == (void *)fm6_sound_init);
@@ -138,7 +138,7 @@ TEST(audio_fm6_acp_completion_tag_moved_to_fm6_offset)
     memcpy(&tag, m + 0x10, 8);
     CHECK(tag == 0x0000000500000003ull);                  /* FM6 le o tag em +0x10 */
     CHECK_HEX(m, "10000000000000000700000003000000");    /* tipo/comando/inicio do tag intactos */
-    CHECK(log_has("mensagem ACP 0x10 #"));
+    CHECK(log_has("ACP message 0x10 #"));
     /* outros tipos: intactos */
     make_completion(2, 0, 0x1234, 9);
     acp_pop(NULL, m);

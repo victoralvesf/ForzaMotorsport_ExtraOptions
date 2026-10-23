@@ -65,7 +65,7 @@ TEST(machine_storage_install_checks_slots)
     uint8_t *az = fake_azimuth(0);
     log_capture();
     CHECK(!install_machine_storage());
-    CHECK(log_has("LocalSpaceStatics 0x2b6628: nao confere"));
+    CHECK(log_has("LocalSpaceStatics 0x2b6628: does not match"));
     CHECK(*(void **)(az + 0x2b6628) == NULL);
     az = fake_storage_azimuth();
     az[0x2b62c0] = 'w';                                          /* nome da classe diferente */
@@ -94,7 +94,7 @@ TEST(user_storage_scid_forwards_to_slot6)
     CHECK_EQ(user_calls, 1);
     CHECK(user_self == (void *)0x10 && user_arg == (void *)0x20 && user_out == &out);
     CHECK(out == (void *)0x5678);
-    CHECK(log_has("service ID ignorado"));
+    CHECK(log_has("service ID ignored"));
 }
 
 /* GetForMachineAsync: LocalSpace do Azimuth em saves\machine (irma de player-1), criado uma vez */
@@ -130,7 +130,7 @@ TEST(machine_storage_local_space)
     CHECK(out == (void *)0x1234 && op_space == machine_space);
     CHECK_EQ(op_calls, 2);
     CHECK_EQ(wstr_inits, 1);
-    CHECK(log_has("GetForMachineAsync -> LocalSpace em"));
+    CHECK(log_has("GetForMachineAsync -> LocalSpace at"));
     RemoveDirectoryW(machine);
     machine_space = NULL;
 }
@@ -192,7 +192,7 @@ TEST(gamechat_manager_slots)
     args[1] = tok1;
     CHECK_EQ(gamechat_call(18, args, NULL, NULL), S_OK);
     CHECK_EQ(disp_calls, 0);
-    CHECK(log_has("__IChatManagerPublicNonVirtuals no layout do FM6"));
+    CHECK(log_has("__IChatManagerPublicNonVirtuals in the FM6 layout"));
 }
 
 TEST(gamechat_settings_counters_user)
@@ -251,7 +251,7 @@ TEST(gamechat_passthrough)
     fake_table_obj(obj, &d, "__IChatUserPublicNonVirtuals", 23);  /* ja no layout novo */
     gc_logged[GC_USER] = 0;
     CHECK_EQ(routed(obj, 22), 22);
-    CHECK(log_has("__IChatUserPublicNonVirtuals com 23 slots (esperado 21)"));
+    CHECK(log_has("__IChatUserPublicNonVirtuals with 23 slots (expected 21)"));
 }
 
 /* ---- FM6: CoreApplicationContext.CurrentUser = LocalUser do Azimuth ---- */
@@ -304,7 +304,7 @@ TEST(core_app_context_current_user)
         CHECK_EQ(((long (*)(void *, void **))f[6])(stat, &u), S_OK);   /* slot 6 = get_CurrentUser */
         CHECK(u == &user);
         CHECK_EQ(user_addrefs, 1);
-        CHECK(log_has("CurrentUser -> LocalUser do Azimuth"));
+        CHECK(log_has("CurrentUser -> Azimuth LocalUser"));
         /* LocalUser com outra vtable -> NULL sem AddRef */
         user = az + 0x29d720;
         CHECK_EQ(((long (*)(void *, void **))f[6])(stat, &u), S_OK);
@@ -314,7 +314,7 @@ TEST(core_app_context_current_user)
         az[0x41294] = 0x90;
         CHECK_EQ(((long (*)(void *, void **))f[6])(stat, &u), S_OK);
         CHECK(u == NULL && user_addrefs == 1);
-        CHECK(log_has("0x41290 nao confere"));
+        CHECK(log_has("0x41290 does not match"));
     }
     /* outra interface: recusada sem chegar ao Azimuth */
     CHECK_EQ(hook_get_factory(L"Windows.Xbox.ApplicationModel.Core.CoreApplicationContext", &other_iid, &out),

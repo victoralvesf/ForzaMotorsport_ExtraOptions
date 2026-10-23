@@ -117,8 +117,8 @@ TEST(stutter_install_checks_iat)
     CHECK(*(void **)(az + 0x26f878) == (void *)st_factory1 && *(void **)(az + 0x26f880) == (void *)st_factory2);
     CHECK(*(void **)(az + 0x26f320) == (void *)st_Sleep && wait_real[5] == sleep_fn);
     CHECK(*(void **)(az + 0x26f2b8) == (void *)0x1234);
-    CHECK(log_has("stutter: IAT 0x26f2b8 (WaitForSingleObject) nao confere"));
-    CHECK(log_has("1 de 7 esperas do azimuth.exe medidas"));
+    CHECK(log_has("stutter: IAT 0x26f2b8 (WaitForSingleObject) does not match"));
+    CHECK(log_has("1 of 7 azimuth.exe waits measured"));
     st_on = 0;
     dbgini_set(NULL);
 }
@@ -171,7 +171,7 @@ TEST(stutter_queue_throttle_install)
     log_capture();
     fq_install();
     CHECK(*slot == az + 0x1000);
-    CHECK(log_has("stutter: limitador da fila (game+0x195410 / IAT 0x101af88) nao confere"));
+    CHECK(log_has("stutter: queue limiter (game+0x195410 / IAT 0x101af88) does not match"));
     memcpy(game + 0x195410, call, sizeof call);
     *slot = (void *)0x1234;                                   /* fora do azimuth.exe */
     fq_install();
@@ -181,7 +181,7 @@ TEST(stutter_queue_throttle_install)
     fq_install();
     CHECK(*slot == (void *)st_switch_thunk && fq_real == (void *)(az + 0x1000));
     CHECK(fq_ret == (uintptr_t)game + 0x195416);
-    CHECK(log_has("stutter: limitador da fila do FM6 medido"));
+    CHECK(log_has("stutter: FM6 queue limiter measured"));
     /* chamada que nao vem do limitador: so repassa */
     fq_real = fake_switch;
     CHECK(st_switch_c(0x10, 0x20) == 7 && fq.q == 0);
@@ -195,13 +195,13 @@ TEST(stutter_queue_throttle_install)
         CHECK(fq.q == (uintptr_t)q && fq.spins == 2 && fq.pend0 == 9 && fq.lim == 4);
         log_capture();
         fq_poll(fq.last);                                     /* episodio ainda ativo */
-        CHECK(!log_has("stutter: fila"));
+        CHECK(!log_has("owner vt"));
         fq.t0 = fq.last - st_freq.QuadPart / 10;              /* durou 100 ms */
         fq_poll(fq.last + st_freq.QuadPart);                  /* 1 s sem voltas: acabou */
-        CHECK(log_has("girando (2 voltas)") && log_has("pendentes 9 (max 9) limite 4; candidatas: nenhuma"));
+        CHECK(log_has("spinning (2 spins)") && log_has("pending 9 (max 9) limit 4; candidates: none"));
         log_capture();
         fq_poll(fq.last + st_freq.QuadPart * 2);              /* ja registrado */
-        CHECK(!log_has("stutter: fila"));
+        CHECK(!log_has("owner vt"));
         fq.q = 0;
     }
     g_fm6_game = old6;
@@ -285,7 +285,7 @@ TEST(stutter_cmdalloc_age_patch)
     uint8_t *az = fake_azimuth(0);
     log_capture();
     CHECK(!cmdalloc_age_patch(60000));                         /* bytes zerados: nao confere */
-    CHECK(log_has("idade dos command allocators (azimuth+0xdeadd) nao confere"));
+    CHECK(log_has("command allocator age (azimuth+0xdeadd) does not match"));
     memcpy(az + 0xdeadd, orig, sizeof orig);
     CHECK(!cmdalloc_age_patch(0));
     CHECK(!memcmp(az + 0xdeadd, orig, sizeof orig));
@@ -306,7 +306,7 @@ TEST(stutter_retire_margin_patch)
     uint8_t *az = fake_azimuth(0);
     log_capture();
     CHECK(!retire_margin_patch(2000));                         /* bytes zerados: nao confere */
-    CHECK(log_has("sem RetireMargin"));
+    CHECK(log_has("no RetireMargin"));
     memcpy(az + 0xd9a40, orig, sizeof orig);
     CHECK(!retire_margin_patch(0));
     CHECK(!memcmp(az + 0xd9a40, orig, sizeof orig));
@@ -351,8 +351,8 @@ TEST(stutter_gpu_time_per_group)
     rb[1] = 1100;                                             /* grupo 2: 90 ms */
     gt_poll();
     CHECK_EQ(gt_tail, 1);
-    CHECK(log_has("GPU lenta 90.0 ms no ECL #7 (3 listas; grupo 2 de 2: 1 listas"));
-    CHECK(!log_has("grupo 1 de 2"));                          /* 10 ms: abaixo do limite */
+    CHECK(log_has("GPU slow 90.0 ms in ECL #7 (3 lists; group 2 of 2: 1 lists"));
+    CHECK(!log_has("group 1 of 2"));                          /* 10 ms: abaixo do limite */
     CHECK(rb[GT_TS - 1] == 0 && rb[1] == 0 && !gt_busy[0] && !gt_busy[1]);
     CHECK(gt_prev_end == 1100);
     e = &gt_ring[1];                                          /* proximo ECL comeca 200 ms depois do fim do anterior */
@@ -362,8 +362,8 @@ TEST(stutter_gpu_time_per_group)
     rb[2] = 1300; rb[3] = 1301;
     log_capture();
     gt_poll();
-    CHECK(log_has("GPU parada 200.0 ms ANTES do ECL #8"));
-    CHECK(!log_has("GPU lenta"));
+    CHECK(log_has("GPU idle 200.0 ms BEFORE ECL #8"));
+    CHECK(!log_has("GPU slow"));
     /* queda: ECL #9 com o grupo 2 comecado e nao terminado; ECL #10 nao comecou */
     gt_state = 1;
     e = &gt_ring[2];
@@ -378,15 +378,15 @@ TEST(stutter_gpu_time_per_group)
     gt_poll();
     CHECK_EQ(gt_tail, 2);                                     /* em voo: nada consumido */
     gt_dump();
-    CHECK(log_has("2 ECLs medidos em voo"));
-    CHECK(log_has("ECL #9 (3 listas, enviado ha"));
-    CHECK(log_has("grupo 2 de 3 COMECOU"));
-    CHECK(log_has("ECL #10 (1 listas em 1 grupos"));
-    CHECK(!log_has("parou ANTES"));                           /* o #10 nao e o 1o pendente */
+    CHECK(log_has("2 measured ECLs in flight"));
+    CHECK(log_has("ECL #9 (3 lists, submitted"));
+    CHECK(log_has("group 2 of 3 STARTED"));
+    CHECK(log_has("ECL #10 (1 lists in 1 groups"));
+    CHECK(!log_has("stopped BEFORE"));                           /* o #10 nao e o 1o pendente */
     gt_tail = 3;
     log_capture();
     gt_dump();
-    CHECK(log_has("parou ANTES dele"));
+    CHECK(log_has("stopped BEFORE it"));
     gt_state = 0;
     gt_head = gt_tail = 0;
 }
@@ -408,8 +408,8 @@ TEST(stutter_tile_profile)
     tl_note(r2, 2, NULL, heap, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NO_HAZARD, c2);
     tl_note(r2, 1, &sz, NULL, 0, NULL, NULL, D3D12_TILE_MAPPING_FLAG_NONE, c2);
     tl_format(buf, sizeof buf);
-    CHECK(strstr(buf, "stutter: tiles 10 s: 4 chamadas, 5 regioes, 18 tiles, 2 recursos distintos, 1 com flags, 2 sem heap, "
-                      "1 faixas NULL; chamadores: azimuth+0xe3d00 x2 azimuth+0xe3e00 x2") != NULL);
+    CHECK(strstr(buf, "stutter: tiles 10 s: 4 calls, 5 regions, 18 tiles, 2 distinct resources, 1 with flags, 2 without heap, "
+                      "1 NULL ranges; callers: azimuth+0xe3d00 x2 azimuth+0xe3e00 x2") != NULL);
     tl_reset();
 }
 
@@ -424,7 +424,7 @@ TEST(stutter_tile_nohazard_patch)
     uint8_t *az = fake_azimuth(0), *stub;
     log_capture();
     CHECK(!tile_nohazard_patch(1));                                    /* bytes zerados: nao confere */
-    CHECK(log_has("UpdateTileMappings do Azimuth (azimuth+0xe017d) nao confere"));
+    CHECK(log_has("Azimuth UpdateTileMappings (azimuth+0xe017d) does not match"));
     memcpy(az + 0xe017d, site, sizeof site);
     memcpy(az + 0xe0186, map, sizeof map);
     CHECK(!tile_nohazard_patch(0));
@@ -506,16 +506,16 @@ TEST(stutter_queue_profile_report)
 {
     log_capture();
     qp_report();
-    CHECK(!log_has("stutter: perfil"));
+    CHECK(!log_has("stutter: profile"));
     qp[0].n = 2;
     st_hist_add(qp[0].rips, QP_RIPS, &qp[0].nrip, 0x10);
     st_hist_add(qp[0].rips, QP_RIPS, &qp[0].nrip, 0x10);
     st_hist_add(qp[0].callers, QP_CALLERS, &qp[0].ncall, 0);
     st_hist_add(qp[0].callers, QP_CALLERS, &qp[0].ncall, 0);
     qp_report();
-    CHECK(log_has("stutter: perfil 'Azimuth queue' 10 s: 2 amostras"));
+    CHECK(log_has("stutter: profile 'Azimuth queue' 10 s: 2 samples"));
     CHECK(log_has("? 100%"));
-    CHECK(log_has("nenhum 100.0%"));
+    CHECK(log_has("none 100.0%"));
     CHECK(!qp[0].n && !qp[0].nrip && !qp[0].ncall);
 }
 
@@ -535,7 +535,7 @@ TEST(stutter_queue_list_methods)
     lt_add(LT_RESET, qpc() - f.QuadPart / 500);            /* ~2 ms */
     lt_add(LT_RESET, qpc() - f.QuadPart / 500);
     CHECK(lt_format(buf, sizeof buf, 2) > 0);
-    CHECK(strstr(buf, "stutter: lista na fila 10 s (por quadro): medidos 2.5"));
+    CHECK(strstr(buf, "stutter: list on the queue 10 s (per frame): measured 2.5"));
     CHECK(strstr(buf, " Reset 1 2.0") && strstr(buf, " Close 0 0.5"));
     CHECK(strstr(buf, "Reset") < strstr(buf, "Close"));
     CHECK(!lt_n[LT_RESET] && !lt_ticks[LT_CLOSE]);
@@ -817,7 +817,7 @@ TEST(stutter_defer_release_hold)
 TEST(stutter_blackbox_reexec_kind)
 {
     CHECK_EQ(CX_REEXEC, 8);                         /* d3d_fm5.c usa CX_REEXEC_KIND 8 */
-    CHECK(strstr(cx_names[CX_REEXEC], "reexecutada") != NULL);
+    CHECK(strstr(cx_names[CX_REEXEC], "re-executed") != NULL);
 }
 
 /* AllocatorShare: aberturas da mesma thread reusam o allocator enquanto nenhuma lista dele grava; volta ao pool do
@@ -968,13 +968,13 @@ TEST(stutter_alloc_share_setup)
     dbgini_set("[Debug]\nAllocatorShare=16\n");
     alloc_share_setup();                               /* bytes zerados: nao confere */
     CHECK(!as_on);
-    CHECK(log_has("pool de command allocators do Azimuth (azimuth+0xdea50) nao confere"));
+    CHECK(log_has("Azimuth command allocator pool (azimuth+0xdea50) does not match"));
     memcpy(az + 0xdea50, "\x48\x89\x5c\x24\x18\x55\x56\x57\x41\x54\x41\x55\x41\x56\x41\x57", 16);
     memcpy(az + 0xded10, "\x48\x89\x5c\x24\x10\x4c\x89\x44\x24\x18\x55\x56\x57\x41\x54", 15);
     alloc_share_setup();
     CHECK(as_on);
     CHECK_EQ(as_budget, 16);
-    CHECK(log_has("AllocatorShare: aberturas de command list da mesma thread reusam o allocator (ate 16"));
+    CHECK(log_has("AllocatorShare: command list opens on the same thread reuse the allocator (up to 16"));
     as_on = 0;
     as_orig_acq = NULL; as_orig_ret = NULL;
     dbgini_set(NULL);
@@ -1079,7 +1079,7 @@ TEST(stutter_guard_block_report)
     VirtualProtect(g + 0x80000, 0x1000, PAGE_NOACCESS, &old);
     log_capture();
     mg_report("teste");
-    CHECK(log_has("stutter: blocos com guarda teste:"));
+    CHECK(log_has("stutter: guarded blocks teste:"));
     CHECK(log_has("+0x1230 x"));
     VirtualFree(g, 0, MEM_RELEASE);
 }
@@ -1335,13 +1335,13 @@ TEST(stutter_placed_live_overlaps)
     s[3].addr = 0x200000; s[3].len = s[3].bytes = 8u << 20; s[3].seq = 4; s[3].born = 300; s[3].gone = 399;
     s[4].len = s[4].bytes = 4096; s[4].seq = 5; s[4].born = 400;
     pa_live_lines(s, 5, 400, l1, l2);
-    CHECK(strstr(l1, "5, 8 MiB | idade: <1 min 2/0 MiB <5 min 1/8 MiB <15 min 2/0 MiB <30 min 0/0 MiB") != NULL);
-    CHECK(strstr(l1, "tamanho: <=64K 4/0 MiB <=1M 0/0 MiB <=4M 0/0 MiB >4M 1/8 MiB") != NULL);
-    CHECK(strstr(l1, "objeto do jogo: vivo 2/0 MiB, solto <10s 1/8 MiB, solto ha mais 1/0 MiB, sem anotacao 1/0 MiB") != NULL);
-    CHECK(strstr(l2, "endereco: 4 anotadas") != NULL);
-    CHECK(strstr(l2, "sobrepostas por mais nova 2/0 MiB (objeto vivo 1/0 MiB: usadas depois de cobertas 0/0 MiB, so antes 0/0 MiB, "
-                     "nunca 1/0 MiB; mesma forma no mesmo endereco 0/0 MiB), mesmo endereco 1/0 MiB") != NULL);
-    CHECK(strstr(l2, "por chamador: game+0x21d6f0 1/0 MiB; formas: 64x64 f98 m7 1/0 MiB;") != NULL);
+    CHECK(strstr(l1, "5, 8 MiB | age: <1 min 2/0 MiB <5 min 1/8 MiB <15 min 2/0 MiB <30 min 0/0 MiB") != NULL);
+    CHECK(strstr(l1, "size: <=64K 4/0 MiB <=1M 0/0 MiB <=4M 0/0 MiB >4M 1/8 MiB") != NULL);
+    CHECK(strstr(l1, "game object: alive 2/0 MiB, released <10s 1/8 MiB, released longer ago 1/0 MiB, not annotated 1/0 MiB") != NULL);
+    CHECK(strstr(l2, "address: 4 annotated") != NULL);
+    CHECK(strstr(l2, "overlapped by a newer one 2/0 MiB (object alive 1/0 MiB: used after being covered 0/0 MiB, only before 0/0 MiB, "
+                     "never 1/0 MiB; same shape at the same address 0/0 MiB), same address 1/0 MiB") != NULL);
+    CHECK(strstr(l2, "per caller: game+0x21d6f0 1/0 MiB; shapes: 64x64 f98 m7 1/0 MiB;") != NULL);
     /* PASSO 100: A coberta por C (nasceu 100) e B (390) -> coberta em 100; B com a mesma forma de A -> outra view */
     memset(s, 0, sizeof s);
     s[0].addr = 0x100000; s[0].len = s[0].bytes = 65536; s[0].seq = 1; s[0].w = 64; s[0].h = 64; s[0].mips = 7; s[0].fmt = 98;
@@ -1361,13 +1361,13 @@ TEST(stutter_placed_live_overlaps)
     s[1].addr = 0x100000; s[1].len = s[1].bytes = 65536; s[1].seq = 3; s[1].born = 390; s[1].w = 64; s[1].h = 64; s[1].mips = 7;
     s[2].addr = 0x108000; s[2].len = s[2].bytes = 4096;  s[2].seq = 2; s[2].born = 100; s[2].used = 396;
     pa_live_lines(s, 3, 400, l1, l2);
-    CHECK(strstr(l2, "usadas depois de cobertas 2/0 MiB, so antes 0/0 MiB, nunca 0/0 MiB; mesma forma no mesmo endereco 1/0 MiB") != NULL);
+    CHECK(strstr(l2, "used after being covered 2/0 MiB, only before 0/0 MiB, never 0/0 MiB; same shape at the same address 1/0 MiB") != NULL);
     /* A usada so em 50 (antes de coberta) */
     memset(s, 0, sizeof s);
     s[0].addr = 0x100000; s[0].len = s[0].bytes = 65536; s[0].seq = 1; s[0].used = 51;
     s[1].addr = 0x100000; s[1].len = s[1].bytes = 65536; s[1].seq = 2; s[1].born = 100; s[1].w = 1;
     pa_live_lines(s, 2, 400, l1, l2);
-    CHECK(strstr(l2, "usadas depois de cobertas 0/0 MiB, so antes 1/0 MiB, nunca 0/0 MiB; mesma forma no mesmo endereco 0/0 MiB") != NULL);
+    CHECK(strstr(l2, "used after being covered 0/0 MiB, only before 1/0 MiB, never 0/0 MiB; same shape at the same address 0/0 MiB") != NULL);
 }
 
 /* PASSO 99: o wrapper anota endereco/chamador/objeto; Release do objeto a 0 marca solto; a ultima Release do recurso limpa */

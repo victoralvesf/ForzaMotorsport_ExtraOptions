@@ -51,7 +51,7 @@ static long STDMETHODCALLTYPE sf_QueryInterface(StubFactory *self, const GUID *i
         return S_OK;
     }
     *out = NULL;
-    wlog("winrt: fabrica stub %ls: QI %08lx-... recusado", self->cls, iid->Data1);
+    wlog("winrt: stub factory %ls: QI %08lx-... refused", self->cls, iid->Data1);
     return E_NOINTERFACE;
 }
 static ULONG STDMETHODCALLTYPE sf_AddRef(StubFactory *self) { (void)self; return 2; }
@@ -79,7 +79,7 @@ static long STDMETHODCALLTYPE sf_ActivateInstance(StubFactory *self, void **out)
 {
     if (!out) return E_POINTER;
     *out = NULL;
-    wlog("winrt: %ls ActivateInstance -> NULL (sem suporte)", self->cls);
+    wlog("winrt: %ls ActivateInstance -> NULL (not supported)", self->cls);
     return S_OK;
 }
 
@@ -123,7 +123,7 @@ static long STDMETHODCALLTYPE cac_QueryInterface(StubFactory *self, const GUID *
         return S_OK;
     }
     *out = NULL;
-    wlog("winrt: CoreApplicationContext: QI %08lx-... recusado", iid->Data1);
+    wlog("winrt: CoreApplicationContext: QI %08lx-... refused", iid->Data1);
     return E_NOINTERFACE;
 }
 
@@ -137,18 +137,18 @@ static long STDMETHODCALLTYPE cac_get_CurrentUser(StubFactory *self, void **out)
     if (!out) return E_POINTER;
     *out = NULL;
     if (!bytes_match(g_base + RVA_USER_STATICS, sig, 18)) {
-        wlog("winrt: CoreApplicationContext.CurrentUser: %#x nao confere -> NULL", RVA_USER_STATICS);
+        wlog("winrt: CoreApplicationContext.CurrentUser: %#x does not match -> NULL", RVA_USER_STATICS);
         return S_OK;
     }
     statics = ((user_statics_fn)(g_base + RVA_USER_STATICS))();
     user = statics ? *(void ****)(statics + USER_STATICS_USER) : NULL;
     if (!user || *user != (void **)(g_base + RVA_LOCAL_USER_VTBL)) {
-        wlog("winrt: CoreApplicationContext.CurrentUser: sem LocalUser do Azimuth -> NULL");
+        wlog("winrt: CoreApplicationContext.CurrentUser: no Azimuth LocalUser -> NULL");
         return S_OK;
     }
     ((ULONG (STDMETHODCALLTYPE *)(void *))(*user)[1])(user);
     *out = user;
-    wlog("winrt: CoreApplicationContext.CurrentUser -> LocalUser do Azimuth");
+    wlog("winrt: CoreApplicationContext.CurrentUser -> Azimuth LocalUser");
     return S_OK;
 }
 
@@ -163,7 +163,7 @@ static long hook_get_factory(const wchar_t *cls, const GUID *iid, void **out)
 {
     if (cls && out && is_fm6() && !wcscmp(cls, CORE_APP_CONTEXT)) {
         long hr = cac_QueryInterface(&core_app_context, iid, out);
-        wlog("winrt: activation %ls iid=%08lx-... -> statics do proxy hr=%#lx", cls, iid->Data1, hr);
+        wlog("winrt: activation %ls iid=%08lx-... -> proxy statics hr=%#lx", cls, iid->Data1, hr);
         return hr;
     }
     if (cls && out && is_fm5()) {
@@ -171,7 +171,7 @@ static long hook_get_factory(const wchar_t *cls, const GUID *iid, void **out)
         for (i = 0; i < sizeof stub_factories / sizeof stub_factories[0]; i++)
             if (!wcscmp(cls, stub_factories[i].cls)) {
                 long hr = sf_QueryInterface(&stub_factories[i], iid, out);
-                wlog("winrt: activation %ls iid=%08lx-... -> fabrica stub hr=%#lx", cls, iid->Data1, hr);
+                wlog("winrt: activation %ls iid=%08lx-... -> stub factory hr=%#lx", cls, iid->Data1, hr);
                 return hr;
             }
     }
@@ -251,7 +251,7 @@ static long hook_template_by_name(void *self, const LocalHString *name, void **o
                     }
                     if (*obj == tmpl_orig_vtbl) *obj = tmpl_vtbls[i];
                 }
-                wlog("winrt: GetTemplateByName(%ls) -> template offline (base %ls) hr=%#lx",
+                wlog("winrt: GetTemplateByName(%ls) -> offline template (base %ls) hr=%#lx",
                      t, global.buf, hr);
                 return hr;
             }
@@ -266,7 +266,7 @@ static int install_template_hook(void)
     const void *cookie = g_base + RVA_COOKIE, *back = at + TEMPLATE_STOLEN;
     /* mov [rsp+8],rbx ; push rdi ; sub rsp,0x90 ; mov rax,[rip+0x10fa9c] (cookie) */
     if (!bytes_match(at, "48895c240857" "4881ec90000000" "488b059cfa1000", TEMPLATE_STOLEN)) {
-        wlog("hook %#x: bytes nao conferem", RVA_TEMPLATE_BY_NAME);
+        wlog("hook %#x: bytes do not match", RVA_TEMPLATE_BY_NAME);
         return 0;
     }
     tramp = VirtualAlloc(NULL, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -277,7 +277,7 @@ static int install_template_hook(void)
     *p++ = 0xff; *p++ = 0x25; memset(p, 0, 4); p += 4; memcpy(p, &back, 8);  /* jmp [rip+0] */
     orig_template_by_name = (template_by_name_fn)tramp;
     abs_jmp(at, (const void *)hook_template_by_name, TEMPLATE_STOLEN);
-    wlog("hook %#x instalado", RVA_TEMPLATE_BY_NAME);
+    wlog("hook %#x installed", RVA_TEMPLATE_BY_NAME);
     return 1;
 }
 
@@ -325,9 +325,9 @@ static LocalSpace *machine_space_create(void)
     for (n = player.size; n && p[n - 1] != L'\\'; n--) ;
     if (n && n + 8 <= MAX_PATH) { memcpy(dir, p, n * 2); wcscpy(dir + n, L"machine"); }
     ((void (*)(MsvcWstr *))(g_base + RVA_WSTR_FREE))(&player);
-    if (!n || n + 8 > MAX_PATH) { wlog("storage: pasta do jogador inesperada"); return NULL; }
+    if (!n || n + 8 > MAX_PATH) { wlog("storage: unexpected player folder"); return NULL; }
     if (!CreateDirectoryW(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
-        wlog("storage: CreateDirectory %ls falhou (%lu)", dir, GetLastError());
+        wlog("storage: CreateDirectory %ls failed (%lu)", dir, GetLastError());
         return NULL;
     }
     s = ((void *(*)(size_t))(g_base + RVA_MALLOC))(sizeof *s);
@@ -338,7 +338,7 @@ static LocalSpace *machine_space_create(void)
     s->cls = (const wchar_t *)(g_base + RVA_LOCAL_SPACE_CLS);
     memset(&s->path, 0, sizeof s->path);
     ((void (*)(MsvcWstr *, const wchar_t *, size_t))(g_base + RVA_WSTR_INIT))(&s->path, dir, wcslen(dir));
-    wlog("storage: GetForMachineAsync -> LocalSpace em %ls", dir);
+    wlog("storage: GetForMachineAsync -> LocalSpace at %ls", dir);
     return s;
 }
 
@@ -361,7 +361,7 @@ static long STDMETHODCALLTYPE local_user_scid_async(void *self, void *user, void
     static LONG logged;
     (void)scid;
     if (!InterlockedExchange(&logged, 1))
-        wlog("storage: GetForUserAsync(user, serviceConfigId) -> GetForUserAsync(user), service ID ignorado");
+        wlog("storage: GetForUserAsync(user, serviceConfigId) -> GetForUserAsync(user), service ID ignored");
     return ((long (*)(void *, void *, void **))(g_base + RVA_USER_ASYNC))(self, user, out);
 }
 
@@ -372,7 +372,7 @@ static int install_machine_storage(void)
         *(void **)(g_base + RVA_STATICS_SCID) != g_base + RVA_SCID_STUB ||
         *(void **)(g_base + RVA_STATICS_SLOT6) != g_base + RVA_USER_ASYNC ||
         !bytes_match(g_base + RVA_LOCAL_SPACE_CLS, "570069006e0064006f0077007300", 14)) {
-        wlog("LocalSpaceStatics %#x: nao confere", RVA_STATICS_MACHINE);
+        wlog("LocalSpaceStatics %#x: does not match", RVA_STATICS_MACHINE);
         return 0;
     }
     write_mem(g_base + RVA_STATICS_MACHINE, &fn, sizeof fn);
@@ -485,12 +485,12 @@ static uint64_t gamechat_call(uint32_t slot, uint64_t *args, void *ret, double *
     if (iface < 0) return orig_table_dispatch(slot, args, ret, fargs);
     if (slots != gc_ifaces[iface].fh2_slots) {                  /* descritor inesperado: nao mexe */
         if (!InterlockedExchange(&gc_logged[iface], 1))
-            wlog("gamechat: %s com %u slots (esperado %u), sem renumerar", gc_ifaces[iface].name, slots,
+            wlog("gamechat: %s with %u slots (expected %u), not renumbered", gc_ifaces[iface].name, slots,
                  gc_ifaces[iface].fh2_slots);
         return orig_table_dispatch(slot, args, ret, fargs);
     }
     if (!InterlockedExchange(&gc_logged[iface], 1))
-        wlog("gamechat: %s no layout do FM6 (slots renumerados p/ os %u do FH2)", gc_ifaces[iface].name, slots);
+        wlog("gamechat: %s in the FM6 layout (slots renumbered to the %u of FH2)", gc_ifaces[iface].name, slots);
     to = gc_route(iface, slot);
     if (to < 0) return gc_own(iface, slot, args, fargs);
     return orig_table_dispatch((uint32_t)to, args, ret, fargs);

@@ -88,14 +88,14 @@ static DWORD WINAPI dred_watch(void *param)
     int shown = 0, total = 0, idx = 0;
     if (!ev || FAILED(dev->lpVtbl->CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence, (void **)&fence)) ||
         FAILED(fence->lpVtbl->SetEventOnCompletion(fence, UINT64_MAX, ev))) {
-        wlog("debug12: DRED: sem fence de espera");
+        wlog("debug12: DRED: no wait fence");
         return 0;
     }
     WaitForSingleObject(ev, INFINITE);
-    wlog("debug12: DRED: device removido hr=%#lx", (unsigned long)dev->lpVtbl->GetDeviceRemovedReason(dev));
+    wlog("debug12: DRED: device removed hr=%#lx", (unsigned long)dev->lpVtbl->GetDeviceRemovedReason(dev));
     if (FAILED(dev->lpVtbl->QueryInterface(dev, &IID_ID3D12DeviceRemovedExtendedData1, (void **)&dred)) ||
         FAILED(dred->lpVtbl->GetAutoBreadcrumbsOutput1(dred, &out))) {
-        wlog("debug12: DRED: sem breadcrumbs");
+        wlog("debug12: DRED: no breadcrumbs");
         return 0;
     }
     for (node = out.pHeadAutoBreadcrumbNode; node; node = node->pNext) total++;
@@ -112,11 +112,11 @@ static DWORD WINAPI dred_watch(void *param)
         for (i = 0; i < 64 && len < 400; i++)
             if (counts[i]) len += wsprintfA(buf + len, " %s=%u", dred_op_name(i), counts[i]);
         buf[len] = 0;
-        wlog("debug12: DRED: no %d/%d lista %p fila %p: %u de %u operacoes;%s", idx, total, (void *)node->pCommandList,
+        wlog("debug12: DRED: node %d/%d list %p queue %p: %u of %u operations;%s", idx, total, (void *)node->pCommandList,
              (void *)node->pCommandQueue, last, node->BreadcrumbCount, buf);
         gg_trace_dump(node->pCommandList);
     }
-    wlog("debug12: DRED: %d listas mostradas", shown);
+    wlog("debug12: DRED: %d lists shown", shown);
     if (gg_trace_on) gg_ring_dump();
     if (st_on) gt_dump();
     if (st_on) cx_dump();
@@ -129,14 +129,14 @@ static void enable_dred(void)
         (PFN_D3D12_GET_DEBUG_INTERFACE)GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12GetDebugInterface");
     ID3D12DeviceRemovedExtendedDataSettings1 *s = NULL;
     if (!get_debug || FAILED(get_debug(&IID_ID3D12DeviceRemovedExtendedDataSettings1, (void **)&s))) {
-        wlog("debug12: DRED: sem ID3D12DeviceRemovedExtendedDataSettings1");
+        wlog("debug12: DRED: no ID3D12DeviceRemovedExtendedDataSettings1");
         return;
     }
     s->lpVtbl->SetAutoBreadcrumbsEnablement(s, D3D12_DRED_ENABLEMENT_FORCED_ON);
     s->lpVtbl->SetPageFaultEnablement(s, D3D12_DRED_ENABLEMENT_FORCED_ON);
     s->lpVtbl->SetBreadcrumbContextEnablement(s, D3D12_DRED_ENABLEMENT_FORCED_ON);
     s->lpVtbl->Release(s);
-    wlog("debug12: DRED: breadcrumbs ligados");
+    wlog("debug12: DRED: breadcrumbs enabled");
 }
 
 /* chamado na primeira criacao de device (fora do DllMain/loader lock) */
@@ -150,7 +150,7 @@ static void enable_debug_layer(void)
     if (g_mode >= 3) { enable_dred(); return; }
     get_debug = (PFN_D3D12_GET_DEBUG_INTERFACE)GetProcAddress(GetModuleHandleW(L"d3d12.dll"), "D3D12GetDebugInterface");
     if (!get_debug || FAILED(get_debug(&IID_ID3D12Debug, (void **)&dbg))) {
-        wlog("debug12: D3D12GetDebugInterface falhou (Graphics Tools instalado?)");
+        wlog("debug12: D3D12GetDebugInterface failed (Graphics Tools installed?)");
         return;
     }
     dbg->lpVtbl->EnableDebugLayer(dbg);
@@ -162,7 +162,7 @@ static void enable_debug_layer(void)
         }
     }
     dbg->lpVtbl->Release(dbg);
-    wlog("debug12: debug layer do D3D12 ativada (modo %d)", g_mode);
+    wlog("debug12: D3D12 debug layer enabled (mode %d)", g_mode);
 }
 
 static int g_hooks = 1;                 /* debug.ini D3D12Hooks (debug12_install) */
@@ -204,10 +204,10 @@ HRESULT WINAPI debug12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level,
             wlog("debug12: InfoQueue1 callback hr=%#lx cookie=%lu", (unsigned long)h, cookie);
             q1->lpVtbl->Release(q1);
         } else if (SUCCEEDED(dev->lpVtbl->QueryInterface(dev, &IID_ID3D12InfoQueue, (void **)&q))) {
-            wlog("debug12: so ID3D12InfoQueue (sem InfoQueue1) - mensagens nao serao logadas");
+            wlog("debug12: only ID3D12InfoQueue (no InfoQueue1) - messages will not be logged");
             q->lpVtbl->Release(q);
         } else {
-            wlog("debug12: device sem InfoQueue (debug layer nao ativa?)");
+            wlog("debug12: device without InfoQueue (debug layer not active?)");
         }
     }
     wlog("debug12: D3D12CreateDevice(level %#x) -> hr=%#lx", (unsigned)level, (unsigned long)hr);
@@ -233,20 +233,20 @@ int debug12_install(void)
     g_hooks = g_mode ? 1 : dbg_int(L"D3D12Hooks", -1);
     if (g_hooks < 0) {
         g_hooks = debug12_wine() ? 3 : 1;
-        if (g_hooks == 3) wlog("debug12: Wine/Proton -> gpuguard desligado (D3D12Hooks=3 por padrao; D3D12Hooks=1 liga)");
+        if (g_hooks == 3) wlog("debug12: Wine/Proton -> gpuguard off (D3D12Hooks=3 by default; D3D12Hooks=1 turns it on)");
     }
     if (!g_hooks) {
-        wlog("debug12: D3D12Hooks=0 -> D3D12CreateDevice sem gancho (nenhum hook do proxy no D3D12)");
+        wlog("debug12: D3D12Hooks=0 -> D3D12CreateDevice not hooked (no proxy hooks in D3D12)");
         return 1;
     }
     /* call qword [rip+0x219083] (-> IAT 0x26f868) */
     if (!bytes_match(call, "ff1583902100", 6)) {
-        wlog("debug12: call do D3D12CreateDevice em %#x nao confere; trava e debug layer NAO ativadas",
+        wlog("debug12: D3D12CreateDevice call at %#x does not match; lock and debug layer NOT enabled",
              RVA_CALL_D3D12_CREATE_DEVICE);
         return 1;
     }
     if (!(ptr = alloc_near(g_base, 8))) {
-        wlog("debug12: sem memoria perto do azimuth.exe; trava e debug layer NAO ativadas");
+        wlog("debug12: no memory near azimuth.exe; lock and debug layer NOT enabled");
         return 1;
     }
     *(void **)ptr = (void *)debug12_create_device;
@@ -254,8 +254,8 @@ int debug12_install(void)
     VirtualProtect(call + 2, 4, PAGE_EXECUTE_READWRITE, &old);
     memcpy(call + 2, &disp, 4);
     VirtualProtect(call + 2, 4, old, &old);
-    wlog("debug12: hook no call %#x do D3D12CreateDevice (D3D12Debug=%d)", RVA_CALL_D3D12_CREATE_DEVICE, g_mode);
+    wlog("debug12: hook on D3D12CreateDevice call %#x (D3D12Debug=%d)", RVA_CALL_D3D12_CREATE_DEVICE, g_mode);
     if (g_hooks == 2 || g_hooks == 3)
-        wlog("debug12: D3D12Hooks=%d -> so os hooks %s no D3D12", g_hooks, g_hooks == 2 ? "do gpuguard" : "do stutter_fm6.c");
+        wlog("debug12: D3D12Hooks=%d -> only the %s hooks in D3D12", g_hooks, g_hooks == 2 ? "gpuguard" : "stutter_fm6.c");
     return 1;
 }

@@ -128,7 +128,7 @@ TEST(hook_at_refuses_wrong_bytes)
     CHECK(!hook_at(f, "48895c2408", 5, (void *)hook_body, &tramp));
     CHECK(tramp == NULL);
     CHECK_EQ(f[0], 0x90);                        /* nada escrito */
-    CHECK(log_has("bytes nao conferem"));
+    CHECK(log_has("bytes do not match"));
 }
 
 TEST(is_fm5_reads_game_record)
@@ -167,12 +167,12 @@ TEST(apply_patches_skips_fm6)
     CHECK_EQ(orig_apply_calls, 0);
     CHECK_HEX(az + 0xdeadd, "483dffffff7f");                            /* FM6: nunca destroi */
     CHECK(log_has("FM6"));
-    CHECK(log_has("APU: heap criado p/ o FM6"));                         /* XDK sem ApuCreateHeap */
+    CHECK(log_has("APU: heap created for FM6"));                         /* XDK sem ApuCreateHeap */
     CHECK_EQ(*(uint32_t *)(az + RVA_APU_HEAPS + 8), 0x1000000);
     VirtualFree(*(void **)(az + RVA_APU_HEAPS), 0, MEM_RELEASE);
     CHECK(slot0_game == game && slot0_n == 329 && game_tls_pending);   /* sites do slot 0 para o 1o import */
-    CHECK(log_has("montador de batch do FM6 em game+0xda9b94 nao confere"));   /* zerado: nada muda */
-    CHECK(log_has("FM6: SkipIntro: site 0xa06b33 nao confere, ignorado"));     /* opcoes do azimuth_fm6.ini */
+    CHECK(log_has("FM6 batch builder at game+0xda9b94 does not match"));   /* zerado: nada muda */
+    CHECK(log_has("FM6: SkipIntro: site 0xa06b33 does not match, ignored"));     /* opcoes do azimuth_fm6.ini */
     ini6_set(NULL);
     slot0_n = 0; game_tls_pending = 0;
     *(void **)(az + RVA_GAME_RECORD) = NULL;
@@ -224,7 +224,7 @@ TEST(fm6_tls_template_applied)
     WaitForSingleObject(th, INFINITE);
     CloseHandle(th);
     CHECK_HEX(tls_new_thread + 0x1f, "00ffffffff00");  /* thread nova copia do template do helper */
-    CHECK(log_has("TLS: template do jogo no azimuth-tls.dll"));
+    CHECK(log_has("TLS: game template in azimuth-tls.dll"));
     /* template ja zerado: nada pendente */
     take_tls_template(img);
     CHECK(!game_tls_pending);
@@ -273,7 +273,7 @@ TEST(tls_slot0_redirect_runs)
     f = (void *)(img + 0x1100); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[0]);
     f = (void *)(img + 0x1200); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[0]);
     tls_slot0_redirect(1);                                                                 /* ja patchado: nao confere */
-    CHECK(log_has("nao confere; nenhum alterado"));
+    CHECK(log_has("does not match; none changed"));
     memcpy(img + 0x1100, "\x65\x48\x8b\x04\x25\x58\x00\x00\x00\xc3", 10);
     memcpy(img + 0x1200, "\x65\x48\x8b\x0c\x25\x58\x00\x00\x00\x48\x89\xc8\xc3", 13);
     memcpy(img + 0x1300, "\x65\x4c\x8b\x1c\x25\x58\x00\x00\x00\x4c\x89\xd8\xc3", 13);
@@ -281,7 +281,7 @@ TEST(tls_slot0_redirect_runs)
     f = (void *)(img + 0x1100); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[5]);
     f = (void *)(img + 0x1200); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[5]);
     f = (void *)(img + 0x1300); CHECK_EQ(f(), (uint64_t)(uintptr_t)&tlsp[5]);
-    CHECK(log_has("TLS: 3 leituras do slot 0 do jogo -> indice 5 (3 stubs"));
+    CHECK(log_has("TLS: 3 reads of the game's slot 0 -> index 5 (3 stubs"));
     /* um site que nao confere: nenhum alterado */
     memcpy(img + 0x1100, "\x65\x48\x8b\x04\x25\x58\x00\x00\x00\xc3", 10);
     memcpy(img + 0x1300, "\x65\x48\x8b\x04\x25\x30\x00\x00\x00\xc3", 10);
@@ -346,7 +346,7 @@ TEST(debug12_hooks_switch)
     dbgini_set("[Debug]\nD3D12Hooks=2\n");                   /* bisseccao: com gancho, so o gpuguard */
     CHECK_EQ(debug12_install(), 1);
     CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);
-    CHECK(log_has("D3D12Hooks=2 -> so os hooks do gpuguard"));
+    CHECK(log_has("D3D12Hooks=2 -> only the gpuguard hooks"));
     memcpy(az + 0x567df, call, 6);
     dbgini_set(NULL);                                         /* padrao: com gancho */
     CHECK_EQ(debug12_install(), 1);
@@ -368,8 +368,8 @@ TEST(debug12_wine_default)
     dbgini_set(NULL);
     CHECK_EQ(debug12_install(), 1);
     CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);       /* gancho fica (hooks do stutter) */
-    CHECK(log_has("Wine/Proton -> gpuguard desligado"));
-    CHECK(log_has("D3D12Hooks=3 -> so os hooks do stutter_fm6.c"));
+    CHECK(log_has("Wine/Proton -> gpuguard off"));
+    CHECK(log_has("D3D12Hooks=3 -> only the stutter_fm6.c hooks"));
     memcpy(az + 0x567df, call, 6);
     log_capture();
     dbgini_set("[Debug]\nD3D12Hooks=1\n");                 /* explicito: gpuguard ligado */
@@ -440,10 +440,10 @@ TEST(fm6_skip_intro_patches_exe)
     for (i = 0; i < 3; i++) CHECK_HEX(game + sites[i], "4138b424d73000006690");
     CHECK_HEX(game + 0xa08eb6, "4438b8d7300000eb2f");
     CHECK(log_has("FM6: SkipIntro=1"));
-    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("does not match") && !log_has("do not match"));
     /* 2a vez: bytes ja trocados -> nada muda */
     fm6_patches(game);
-    CHECK(log_has("FM6: SkipIntro: site 0xa06b33 nao confere, ignorado"));
+    CHECK(log_has("FM6: SkipIntro: site 0xa06b33 does not match, ignored"));
     ini6_set(NULL);
     dbgini_set(NULL);
     pe_unmap(game);
@@ -466,11 +466,11 @@ TEST(fm6_skip_presentation_video_patches_exe)
     CHECK_HEX(game + 0xce1c55, "488d4b280f1f4400004533c0b201");
     CHECK_HEX(game + 0xce1eb4, "85c06690488d15");
     CHECK(log_has("FM6: SkipPresentationVideo=1"));
-    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("does not match") && !log_has("do not match"));
     CHECK(!log_has("FM6: SkipIntro=1"));
     /* 2a vez: bytes ja trocados -> nada muda */
     fm6_patches(game);
-    CHECK(log_has("FM6: SkipPresentationVideo: site nao confere, ignorado"));
+    CHECK(log_has("FM6: SkipPresentationVideo: site does not match, ignored"));
     CHECK_HEX(game + 0xce1eb4, "85c06690");
     ini6_set(NULL);
     dbgini_set(NULL);
@@ -494,11 +494,11 @@ TEST(fm6_unlock_dlc_patches_exe)
     CHECK_HEX(game + 0xa8ad80, "b801000000c35741");
     CHECK_HEX(game + 0x43be01, "488dbba0000000b201488bcfe86a000000");
     CHECK(log_has("FM6: UnlockDLC=1"));
-    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("does not match") && !log_has("do not match"));
     CHECK(!log_has("FM6: SkipIntro=1"));
     /* 2a vez: bytes ja trocados -> nada muda */
     fm6_patches(game);
-    CHECK(log_has("FM6: UnlockDLC: sites nao conferem, ignorado"));
+    CHECK(log_has("FM6: UnlockDLC: sites do not match, ignored"));
     CHECK_HEX(game + 0x43be08, "b201");
     ini6_set(NULL);
     dbgini_set(NULL);
@@ -518,20 +518,20 @@ TEST(fm6_frame_rate_patches_exe)
     CHECK(*(void **)(game + 0x19f4008 + 0x1a0) == (void *)fm5_frame_set_sync_stub);
     CHECK(*(void **)(game + 0x19f38e8 + 0x1a0) == (void *)fm5_frame_set_sync_stub);
     CHECK(*(uint8_t **)(game + 0x1a089f0 + 0x98) == game + 0x849940);   /* PresentationView11 */
-    CHECK(log_has("FM6: fps: frame_rate 60 -> present sempre com intervalo 1"));
+    CHECK(log_has("FM6: fps: frame_rate 60 -> present always with interval 1"));
     CHECK(fps_force && fps_queue_ret == 0);
     CHECK_HEX(game + 0x3fe908, "ff2500000000");   /* getter do FrameRate dos cenarios */
-    CHECK(!log_has("getter do FrameRate"));
+    CHECK(!log_has("FrameRate getter"));
     CHECK_HEX(game + 0x25d011, "80bb71250000000f85f0287000");   /* 60: passo fixo 1/59.94 mantido */
     CHECK(*(void **)(game + 0x19f38e8 + 0x158) == (void *)fm6_present_hook);      /* medicao de fps */
     CHECK(*(void **)(game + 0x19f38e8 + 0x108) == (void *)fm6_vline_wait_hook);
     CHECK(fm6_present_orig == (fm6_vcall4)(game + 0x207868) && fm6_vline_wait_orig == (fm6_vcall4)(game + 0x25cc90));
     fm5_frame_set_sync(frame, 1, 0, (uintptr_t)game + 0x1234);
     CHECK_EQ(*(uint32_t *)(frame + 0xa0), 0);    /* 30 fps pedido -> 60 */
-    CHECK(log_has("FM6: fps: modo de present 1 -> 0 (chamador game+0x1234)"));
+    CHECK(log_has("FM6: fps: present mode 1 -> 0 (caller game+0x1234)"));
     /* 2a vez: slots ja trocados -> nada muda */
     fm6_frame_rate(game, 30);
-    CHECK(log_has("FM6: fps: setter/Present nao conferem, ignorado"));
+    CHECK(log_has("FM6: fps: setter/Present do not match, ignored"));
     CHECK(fps_force);
     pe_unmap(game);
     game = pe_map(FM6_EXE, NULL);
@@ -545,7 +545,7 @@ TEST(fm6_frame_rate_patches_exe)
     game = pe_map(FM6_EXE, NULL);
     fm6_frame_rate(game, 180);
     CHECK_HEX(game + 0x25d011, "80bb7125000000660f1f440000");
-    CHECK(log_has("FM6: fps: vline a 180 Hz, simulacao com dt medido"));
+    CHECK(log_has("FM6: fps: vline at 180 Hz, simulation with measured dt"));
     fm6_frame_rate(game, 180);                    /* 2a vez: bytes ja trocados -> nada muda */
     CHECK_HEX(game + 0x25d011, "80bb7125000000660f1f440000");
     fm6_vline_rate(60);
@@ -577,14 +577,14 @@ TEST(fm6_resolution_patches_exe)
     if (!game) { test_skip("exe do FM6 ausente"); return; }
     log_capture();
     fm6_resolution(game, 1440, 2560);
-    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("does not match") && !log_has("do not match"));
     CHECK_HEX(game + 0x552dff, "c78378250000a0050000");                  /* mov dword [rbx+0x2578], 1440 */
     CHECK_HEX(game + 0x55c6a0, "ba000a0000");                            /* mov edx, 2560 */
     CHECK_HEX(game + 0x9faf52, "b80000f044894538" "b80000874489453c" "0f1f840000000000" "0f1f840000000000" "6690");
     CHECK_HEX(game + 0x9faf74, "488b01");                                /* depois: mov rax,[rcx] intacto */
     CHECK_HEX(game + 0x127ea5, "ff152d090000");                          /* call [rip -> 0x1287d8] */
     CHECK(*(void **)(game + 0x1287d8) == (void *)fm5_ui_vcall);
-    CHECK(log_has("FM6: resolucao: viewport da UI escalado para 2560x1440"));
+    CHECK(log_has("FM6: resolution: UI viewport scaled to 2560x1440"));
     obj[0x538 / 8] = (void *)ui6_fake_setvp;
     ((void (*)(void *, uint32_t, const float *, uintptr_t))t_call_from(game + 0x127ea5 + 6,
                                                                       (void *)fm5_ui_vcall))(obj, 1, vp, 0);
@@ -601,11 +601,11 @@ TEST(fm6_resolution_patches_exe)
         fm6_chart_vcall(robj, rect);
         CHECK(chart_seen[0] == 1875 && chart_seen[1] == 927 && chart_seen[2] == 529 && chart_seen[3] == 226);
         CHECK(chart_seen[5] == 0x3f800000 && rect[0] == 1406);
-        CHECK(log_has("FM6: grafico da UI 1406,695 397x170 -> 1875,927 529x226"));
+        CHECK(log_has("FM6: UI graphic 1406,695 397x170 -> 1875,927 529x226"));
     }
     /* 2a vez: bytes ja trocados -> nada muda */
     fm6_resolution(game, 1440, 2560);
-    CHECK(log_has("FM6: resolucao: site da altura 0x552dff nao confere, ignorado"));
+    CHECK(log_has("FM6: resolution: height site 0x552dff does not match, ignored"));
     pe_unmap(game);
     /* so a altura (720): largura = altura * 16/9 do proprio jogo */
     game = pe_map(FM6_EXE, NULL);
@@ -640,7 +640,7 @@ TEST(fm6_fps_meter_logs)
         t += f / 30;
         fm6_fps_sample(t - f / 1000, t);
     }
-    CHECK(log_has("FM6: fps 30 (quadro 33.33 ms: Present 1.00 ms, espera do vline 20.00 ms)"));
+    CHECK(log_has("FM6: fps 30 (frame 33.33 ms: Present 1.00 ms, vline wait 20.00 ms)"));
     fm6_present_orig = fm6_vline_wait_orig = fake_vcall;
     CHECK_EQ(fm6_present_hook(0, 0, 0, 0), 7);
     CHECK_EQ(fm6_vline_wait_hook(0, 0, 0, 0), 7);
@@ -659,7 +659,7 @@ TEST(fm6_get_frame_rate_scenario)
     fps_force = 1;
     fake_frame_rate_val = 30;
     CHECK_EQ(fm6_get_frame_rate(NULL, 0), 60);
-    CHECK(log_has("FM6: fps: FrameRate do cenario 30 -> 60"));
+    CHECK(log_has("FM6: fps: scenario FrameRate 30 -> 60"));
     fake_frame_rate_val = 60;
     CHECK_EQ(fm6_get_frame_rate(NULL, 0), 60);
     fps_force = 0;
@@ -683,9 +683,9 @@ TEST(fm6_debug5_committed_placement)
     dbgini_set("[Debug]\nD3D12Debug=5\nPlacementCommitted=0\n");
     fm6_patches(game);
     CHECK_HEX(az + 0x13bae0, "31c0c324105556574881");        /* D3D12Debug=5 antigo ainda liga */
-    CHECK(log_has("FM6: placement textures como recurso committed"));
+    CHECK(log_has("FM6: placement textures as committed resources"));
     fm6_patches(game);                            /* bytes ja trocados -> nada muda */
-    CHECK(log_has("FM6: placement textures committed: site 0x13bae0 nao confere, ignorado"));
+    CHECK(log_has("FM6: placement textures committed: site 0x13bae0 does not match, ignored"));
     CHECK_HEX(az + 0x13bae0, "31c0c3");
     pe_unmap(az);
     az = pe_map(AZIMUTH_EXE, NULL);
@@ -719,7 +719,7 @@ TEST(fm6_debug6_leak_gfx_objects)
     dbgini_set("[Debug]\nD3D12Debug=6\n");
     fm6_patches(game);
     CHECK_HEX(az + 0xda270, "ff2500000000");
-    CHECK(log_has("FM6: D3D12Debug=6: recursos/views nunca destruidos"));
+    CHECK(log_has("FM6: D3D12Debug=6: resources/views never destroyed"));
     orig_gfx_destroy = fake_gfx_destroy;          /* nao roda o destroy real do Azimuth */
     for (i = 0; i < sizeof leak / sizeof *leak; i++) {
         destroyed_obj = NULL;
@@ -727,7 +727,7 @@ TEST(fm6_debug6_leak_gfx_objects)
         fm6_leak_destroy(obj);
         CHECK(destroyed_obj == NULL);
     }
-    CHECK(log_has("destroy pulado tipo 0xc (1)"));
+    CHECK(log_has("destroy skipped type 0xc (1)"));
     for (i = 0; i < sizeof keep / sizeof *keep; i++) {
         destroyed_obj = NULL;
         *(uint32_t *)(obj + 0x38) = keep[i];
@@ -735,7 +735,7 @@ TEST(fm6_debug6_leak_gfx_objects)
         CHECK(destroyed_obj == obj);
     }
     fm6_patches(game);                            /* bytes ja trocados -> nada muda */
-    CHECK(log_has("FM6: D3D12Debug=6: site 0xda270 nao confere, ignorado"));
+    CHECK(log_has("FM6: D3D12Debug=6: site 0xda270 does not match, ignored"));
     dbgini_set(NULL);
     pe_unmap(game);
     pe_unmap(az);
@@ -768,12 +768,12 @@ TEST(fm6_graphics_protect_translated)
     orig_az_valloc = fake_az_valloc;               /* nao roda o VirtualAlloc real do Azimuth */
     CHECK(fm6_az_valloc(NULL, 0x52000, 0x30003000, 0x40404) == (void *)0x1230000);
     CHECK_EQ(seen_valloc_protect, 4);
-    CHECK(log_has("FM6: VirtualAlloc grafico #1"));
-    CHECK(log_has("protecao 0x40404 -> 0x4"));
+    CHECK(log_has("FM6: graphics VirtualAlloc #1"));
+    CHECK(log_has("protection 0x40404 -> 0x4"));
     fm6_az_valloc(NULL, 0x1000, 0x3000, 0x40404);
     CHECK_EQ(seen_valloc_protect, 0x40404);
     CHECK(!fm6_graphics_protect_install());       /* bytes ja trocados -> nada muda */
-    CHECK(log_has("VirtualAlloc do Azimuth (0xaad30) nao confere"));
+    CHECK(log_has("Azimuth VirtualAlloc (0xaad30) does not match"));
     pe_unmap(az);
     dump_log_on_fail();
 }
@@ -1020,8 +1020,8 @@ TEST(install_on_real_azimuth)
     fh2_rec = *(uint8_t **)(az + RVA_ALLOW_ARRAY);
     CHECK(fh2_rec > az && fh2_rec < az + 0x3b9000);  /* relocado para dentro da imagem */
     REQUIRE(install());
-    CHECK(!log_has("nao confere"));
-    CHECK(log_has("FmodAudioClient (vtable 0x2a1da0) com diagnostico do FM6"));   /* slots do Azimuth conferidos */
+    CHECK(!log_has("does not match") && !log_has("do not match"));
+    CHECK(log_has("FmodAudioClient (vtable 0x2a1da0) with FM6 diagnostics"));   /* slots do Azimuth conferidos */
     /* allow list {fh2, fh2 f&f, fm5, fm6} */
     span = (void *)(az + RVA_ALLOW_SPAN);
     CHECK_EQ(span->count, 4);
@@ -1049,9 +1049,9 @@ TEST(install_on_real_azimuth)
     CHECK_HEX((uint8_t *)orig_apply_patches, "48895c2418488974242055574154");
     CHECK(*(uint8_t **)((uint8_t *)orig_apply_patches + 14 + 6) == az + RVA_APPLY_PATCHES + 14);
     /* hooks de d3d/winrt/shape: todos instalados (log "hook %#x instalado") */
-    CHECK(log_has("hook 0x12b780 instalado") && log_has("hook 0x1338e0 instalado") && log_has("hook 0x3a290 instalado"));
-    CHECK(log_has("hook 0xda9e0 instalado") && log_has("hook 0x9a680 instalado") && log_has("hook 0x208790 instalado"));
-    CHECK(log_has("hook 0x203b60 instalado"));                  /* despacho de tabela (GameChat do FM6) */
+    CHECK(log_has("hook 0x12b780 installed") && log_has("hook 0x1338e0 installed") && log_has("hook 0x3a290 installed"));
+    CHECK(log_has("hook 0xda9e0 installed") && log_has("hook 0x9a680 installed") && log_has("hook 0x208790 installed"));
+    CHECK(log_has("hook 0x203b60 installed"));                  /* despacho de tabela (GameChat do FM6) */
     /* LocalSpaceStatics slot 8 (GetForMachineAsync): stub fatal 0x189bd0 -> proxy (winrt_fm5.c) */
     CHECK(*(uint8_t **)(az + 0x2b6628) != az + 0x189bd0 && log_has("patch 0x2b6628: LocalSpaceStatics"));
     /* D3D12CreateDevice (debug12_fm5.c): o call [rip] em 0x567df passa a ler um ponteiro nosso, nao a IAT 0x26f868
@@ -1063,7 +1063,7 @@ TEST(install_on_real_azimuth)
         memcpy(&disp, call + 2, 4);
         CHECK(call + 6 + disp != az + 0x26f868);
         CHECK(*(void **)(call + 6 + disp) == (void *)debug12_create_device);
-        CHECK(log_has("debug12: hook no call 0x567df"));
+        CHECK(log_has("debug12: hook on D3D12CreateDevice call 0x567df"));
     }
     dump_log_on_fail();
     pe_unmap(az);
@@ -1079,7 +1079,7 @@ TEST(install_writes_nothing_if_any_site_differs)
     memcpy(copy, az, 0x3b9000);
     log_capture();
     CHECK(!install());
-    CHECK(log_has("bytes nao conferem em 0xbe70d"));
+    CHECK(log_has("bytes do not match at 0xbe70d"));
     CHECK(!memcmp(copy, az, 0x3b9000));          /* imagem intacta */
     free(copy);
     pe_unmap(az);
@@ -1135,8 +1135,8 @@ TEST(fm5_patches_all_options_ultra)
     g = r.game;
     links_a = *(int32_t *)(r.az + RVA_LINKS_END_A + 3);
     links_b = *(int32_t *)(r.az + RVA_LINKS_END_B + 3);
-    CHECK(!log_has("nao confere"));
-    CHECK(!log_has("ignorado"));
+    CHECK(!log_has("does not match") && !log_has("do not match"));
+    CHECK(!log_has("ignored"));
     CHECK(g_game == g);
     /* Live table: fim dos links recuado em um link (PartyConfig) */
     CHECK_EQ(links_a, 0x1651e5 - LINK_SIZE);
@@ -1184,7 +1184,7 @@ TEST(fm5_patches_low_no_ini)
     ini_set(NULL);
     if (!fm5_run(&r, 0, 0, 30, 0, 0, 0, NULL)) return;
     g = r.game;
-    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("does not match") && !log_has("do not match"));
     /* sem .ini: nada das opcoes */
     for (i = 0; i < 3; i++) CHECK_HEX(g + fm5_splash_intro_cmps[i], "80be9f30000000");
     CHECK_HEX(g + FM5_IE_VIDEO_PLAY, "4883ec78");
@@ -1215,7 +1215,7 @@ TEST(fm5_patches_default_levels_untouched)
     ini_set(NULL);
     if (!fm5_run(&r, 1080, 1920, 60, 1, 1, 1, NULL)) return;
     g = r.game;
-    CHECK(!log_has("nao confere"));
+    CHECK(!log_has("does not match") && !log_has("do not match"));
     CHECK(!is_hook(g + 0x8433c0) && !is_hook(g + 0x859710) && !is_hook(g + 0x735910));
     CHECK_EQ(imm32(g + 0x6d6977 + 1), 512);
     CHECK_EQ(imm32(g + 0x73adc3 + 1), 768);

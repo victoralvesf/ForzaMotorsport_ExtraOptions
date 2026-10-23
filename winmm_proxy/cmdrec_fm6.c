@@ -101,7 +101,7 @@ static void *rc_put(rc_list *l, int op, size_t n)
         while (cap < l->len + sz) cap *= 2;
         if (cap > 0x40000000 || !(b = realloc(l->buf, cap))) {
             l->oom = 1;
-            if (!InterlockedExchange(&rc_oom_logged, 1)) wlog("d3d: gravadora de command list sem memoria (%u bytes gravados)", l->len);
+            if (!InterlockedExchange(&rc_oom_logged, 1)) wlog("d3d: command list recorder out of memory (%u bytes recorded)", l->len);
             return NULL;
         }
         l->buf = b;
@@ -695,7 +695,7 @@ static rc_slot *rc_take(rc_queue *rq, UINT64 done)
     rq->n++;
     {
         LONG t = InterlockedIncrement(&rc_slots_total);
-        if ((t & (t - 1)) == 0) wlog("d3d: listas unificadas: %ld listas reais do proxy (%u nesta fila)", t, rq->n);
+        if ((t & (t - 1)) == 0) wlog("d3d: unified lists: %ld real proxy lists (%u on this queue)", t, rq->n);
     }
     return s;
 }
@@ -729,7 +729,7 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
         if (!rc_is(l[i])) { rq->out[k++] = l[i++]; continue; }
         for (j = i; j < n && rc_is(l[j]); j++) {}
         if (!(s = rc_take(rq, done))) {
-            if (!rq->fail_logged++) wlog("d3d: listas unificadas: sem lista real/allocator do proxy; %u gravadoras descartadas", j - i);
+            if (!rq->fail_logged++) wlog("d3d: unified lists: no real proxy list/allocator; %u recorders dropped", j - i);
             i = j;
             continue;
         }
@@ -745,7 +745,7 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
             pred = f->pred;
             if (f->open || f->oom) {
                 static volatile LONG warned;
-                if (InterlockedIncrement(&warned) <= 8) wlog("d3d: listas unificadas: gravadora %p %s no ExecuteCommandLists", f, f->oom ? "incompleta (sem memoria)" : "aberta");
+                if (InterlockedIncrement(&warned) <= 8) wlog("d3d: unified lists: recorder %p %s in ExecuteCommandLists", f, f->oom ? "incomplete (out of memory)" : "open");
             }
             rc_play(g, f);
             InterlockedAdd(&rc_cmds, (LONG)f->ncmd);
@@ -755,7 +755,7 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
         if (FAILED(hr = g->lpVtbl->Close(g))) {
             static volatile LONG bad;
             LONG c = InterlockedIncrement(&bad);
-            if (c <= 8 || (c & (c - 1)) == 0) wlog("d3d: listas unificadas: Close da lista real %p falhou hr=%#lx (#%ld)", g, hr, c);
+            if (c <= 8 || (c & (c - 1)) == 0) wlog("d3d: unified lists: Close of real list %p failed hr=%#lx (#%ld)", g, hr, c);
         }
         s->fence = fence;
         InterlockedIncrement(&rc_reals);
@@ -765,7 +765,7 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
     {
         static volatile LONG first;
         if (!first && !InterlockedExchange(&first, 1))
-            wlog("d3d: listas unificadas: 1o ExecuteCommandLists com gravadoras: %u listas -> %u", n, k);
+            wlog("d3d: unified lists: 1st ExecuteCommandLists with recorders: %u lists -> %u", n, k);
     }
     *outv = rq->out;
     return k;
@@ -778,8 +778,8 @@ int rc_format(char *buf, int cap, double frames)
     if (!rc_on) return 0;
     if (!rc_freq.QuadPart) QueryPerformanceFrequency(&rc_freq);
     ms = (double)InterlockedExchange64(&rc_ticks, 0) * 1000.0 / (double)rc_freq.QuadPart;
-    return snprintf(buf, cap, " | gravadoras: abertas %.0f/quadro, executadas %.0f/quadro em %.1f listas reais/quadro (%.0f comandos, "
-                    "%.2f ms), %ld vivas, %ld listas reais do proxy", InterlockedExchange(&rc_opens, 0) / frames,
+    return snprintf(buf, cap, " | recorders: opened %.0f/frame, executed %.0f/frame in %.1f real lists/frame (%.0f commands, "
+                    "%.2f ms), %ld alive, %ld real proxy lists", InterlockedExchange(&rc_opens, 0) / frames,
                     InterlockedExchange(&rc_execs, 0) / frames, InterlockedExchange(&rc_reals, 0) / frames,
                     InterlockedExchange(&rc_cmds, 0) / frames, ms / frames, rc_live, rc_slots_total);
 }
@@ -792,9 +792,9 @@ void rc_setup(void *inner)
     rc_inner_create = (rc_create_fn)inner;
     if (!inner || !rc_wanted()) return;
     if (!g_base || !bytes_match(g_base + RC_OPEN_CALL_RVA, "ff5060eb0c", 5)) {
-        wlog("d3d: CreateCommandList do Azimuth (azimuth+%#x) nao confere -> sem listas unificadas", RC_OPEN_CALL_RVA);
+        wlog("d3d: Azimuth CreateCommandList (azimuth+%#x) does not match -> no unified lists", RC_OPEN_CALL_RVA);
         return;
     }
     rc_on = 1;
-    wlog("d3d: listas unificadas: o Azimuth grava em listas do proxy; cada ExecuteCommandLists envia uma lista real por sequencia");
+    wlog("d3d: unified lists: Azimuth records into proxy lists; each ExecuteCommandLists submits one real list per sequence");
 }
