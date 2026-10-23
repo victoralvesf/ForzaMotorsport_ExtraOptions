@@ -1682,3 +1682,20 @@ TEST(fm6_reexecuted_list_waits_for_gpu)
     CHECK(rx_orig == 5 && rx_waits == 2);
     orig_apply_execute = NULL; az_submit = NULL; az_fence_wait = NULL;
 }
+
+/* UiTrace: cada viewport/scissor distinto (chamador + valores) entra no log uma vez */
+TEST(fm6_ui_trace_logs_distinct_rects)
+{
+    static const float vp[6] = { 0, 0, 1920, 1080, 0, 1 };
+    static const LONG sc[4] = { 10, 20, 300, 400 };
+    const char *t, *a;
+    log_capture();
+    fm6_rs_trace(0, 0x1234, 1, vp);
+    fm6_rs_trace(0, 0x1234, 1, vp);
+    fm6_rs_trace(1, 0x1234, 1, sc);
+    fm6_rs_trace(1, 0x1234, 0, sc);              /* n = 0: nada */
+    t = log_text();
+    a = strstr(t, "d3d: UiTrace: viewport n=1 0,0 1920x1080");
+    CHECK(a && !strstr(a + 1, "d3d: UiTrace: viewport"));
+    CHECK(strstr(t, "d3d: UiTrace: scissor n=1 10,20 - 300,400") != NULL);
+}

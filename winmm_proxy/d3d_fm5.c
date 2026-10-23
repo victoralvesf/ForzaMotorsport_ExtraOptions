@@ -1566,9 +1566,54 @@ static void fm6_Dispatch(void *ctx, UINT x, UINT y, UINT z)
     alias_fm6_dispatch(ctx, x, y, z, d && (d->flags & 0x60000) == 0x60000, fm6_az_fn);
     ((void (*)(void *, UINT, UINT, UINT))fm6_az_fn(ctx, AZ_SLOT_DISPATCH))(ctx, x, y, z);
 }
+/* UiTrace (debug.ini, dev): cada viewport/scissor distinto (chamador no jogo + valores) vai para o log uma vez, para
+   achar elementos que ficam fora do lugar com a resolucao do launcher (UI em 1920x1080, render maior) */
+int fm6_ui_trace;
+static void fm6_rs_trace(int sc, uintptr_t ret, UINT n, const void *p)
+{
+    static struct { uintptr_t ret; int32_t v[4]; uint8_t sc; } seen[512];
+    static volatile LONG nseen, dropped;
+    static SRWLOCK lock = SRWLOCK_INIT;
+    int32_t v[4] = { 0 };
+    LONG i, k;
+    if (!p || !n) return;
+    for (i = 0; i < 4; i++) v[i] = sc ? ((const LONG *)p)[i] : (int32_t)((const float *)p)[i];
+    AcquireSRWLockExclusive(&lock);
+    for (k = 0; k < nseen; k++)
+        if (seen[k].ret == ret && seen[k].sc == sc && !memcmp(seen[k].v, v, sizeof v)) break;
+    if (k == nseen && nseen < 512) {
+        seen[nseen].ret = ret; seen[nseen].sc = (uint8_t)sc; memcpy(seen[nseen].v, v, sizeof v); nseen++;
+        ReleaseSRWLockExclusive(&lock);
+        {   /* pilha: ate 5 valores que caem na imagem do jogo (o jogo nao tem unwind registrado; pode ter lixo) */
+            uint8_t **sp = __builtin_frame_address(0), **top = ((NT_TIB *)NtCurrentTeb())->StackBase;
+            unsigned long long st[5] = { 0 };
+            int j = 0;
+            for (; g_fm6_game && sp < top && sp < (uint8_t **)__builtin_frame_address(0) + 0x400 && j < 5; sp++)
+                if (*sp > g_fm6_game && *sp < g_fm6_game + 0x1800000) st[j++] = (unsigned long long)(*sp - g_fm6_game);
+            wlog(sc ? "d3d: UiTrace: scissor n=%u %d,%d - %d,%d (chamador game+%#llx; pilha %#llx %#llx %#llx %#llx %#llx)"
+                    : "d3d: UiTrace: viewport n=%u %d,%d %dx%d (chamador game+%#llx; pilha %#llx %#llx %#llx %#llx %#llx)",
+                 n, v[0], v[1], v[2], v[3],
+                 (unsigned long long)(ret - (uintptr_t)g_fm6_game), st[0], st[1], st[2], st[3], st[4]);
+        }
+        return;
+    }
+    ReleaseSRWLockExclusive(&lock);
+    if (k == 512 && InterlockedIncrement(&dropped) == 1) wlog("d3d: UiTrace: 512 entradas, o resto nao e logado");
+}
+static void fm6_imm_RSSetViewports(void *ctx, UINT n, const float *vp)
+{
+    fm6_rs_trace(0, (uintptr_t)__builtin_return_address(0), n, vp);
+    ((void (*)(void *, UINT, const float *))fm6_az_fn(ctx, AZ_SLOT_VIEWPORTS))(ctx, n, vp);
+}
+static void fm6_imm_RSSetScissorRects(void *ctx, UINT n, const RECT *r)
+{
+    fm6_rs_trace(1, (uintptr_t)__builtin_return_address(0), n, r);
+    ((void (*)(void *, UINT, const RECT *))fm6_az_fn(ctx, AZ_SLOT_SCISSORS))(ctx, n, r);
+}
 static void fm6_def_RSSetViewports(void *ctx, UINT n, const float *vp)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (fm6_ui_trace) fm6_rs_trace(0, (uintptr_t)__builtin_return_address(0), n, vp);
     if (d) {
         d->st.nvp = n > 16 ? 16 : n;
         if (vp) memcpy(d->st.vp, vp, d->st.nvp * sizeof d->st.vp[0]);
@@ -1578,6 +1623,7 @@ static void fm6_def_RSSetViewports(void *ctx, UINT n, const float *vp)
 static void fm6_def_RSSetScissorRects(void *ctx, UINT n, const RECT *r)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
+    if (fm6_ui_trace) fm6_rs_trace(1, (uintptr_t)__builtin_return_address(0), n, r);
     if (d) {
         d->st.nsc = n > 16 ? 16 : n;
         if (r) memcpy(d->st.sc, r, d->st.nsc * sizeof *r);
@@ -2738,6 +2784,8 @@ int fm6_batch_install(uint8_t *game)
         }
     for (i = 0; i < 2; i++) abs_jmp(game + site[i].rva, site[i].fn, 14);
     fm6_batch_hold = dbg_int(L"BatchHoldRefs", 1) > 0;
+    fm6_ui_trace = dbg_int(L"UiTrace", 0) > 0;
+    if (fm6_ui_trace) wlog("d3d: UiTrace=1 (viewports/scissors distintos no log)");
     wlog("d3d: montadores de batch do FM6 (game+%#x CB, game+%#x SRV) -> registros com o objeto%s", FM6_BATCH_CB,
          FM6_BATCH_SRV, fm6_batch_hold ? "; o batch segura referencia ao SRV" : "");
     return 1;
@@ -2774,6 +2822,10 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
     dst[0x23] = (void *)fm6_def_OMSetRenderTargetsUAV;
     dst[0x2a] = (void *)fm6_Dispatch;
     dst[0x6f] = (void *)fm6_def_ClearState;
+    if (!deferred && fm6_ui_trace) {
+        dst[0x2d] = (void *)fm6_imm_RSSetViewports;
+        dst[0x2e] = (void *)fm6_imm_RSSetScissorRects;
+    }
     if (deferred) {   /* heranca do OM no aninhado: acompanha RT/DS, viewports e scissors de cada diferido */
         dst[0x2d] = (void *)fm6_def_RSSetViewports;
         dst[0x2e] = (void *)fm6_def_RSSetScissorRects;
