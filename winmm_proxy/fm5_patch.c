@@ -1122,6 +1122,7 @@ extern void placed_textures_setup(void);
 extern int fm6_batch_install(uint8_t *game);
 extern int fm6_reexec_install(void);
 extern int fm6_imm_srv_hold_install(void);
+extern void fm6_livery_log_install(uint8_t *game);
 
 /* EXPERIMENTO D3D12Debug=5 (17_fm6.txt PASSO 24): o criterio 0x14013bae0 de title_storage (so chamado por
    CreatePlacementTexture2D/3D) escolhe recurso reservado (tiled) em vez de committed; com tiled tier 4 vale p/
@@ -1300,6 +1301,8 @@ static void hook_apply_patches(void *image, const void *options)
         fm6_graphics_protect_install();
         /* audio_fm6_game_hooks(game): desligado - suspeito de travar o carregamento (17_fm6.txt PASSO 53) */
         fm6_patches(game);
+        /* diagnostico da plotagem (16_opcoes_graficas.txt PASSO 12) */
+        if (dbg_int(L"LiveryLog", 0) > 0) fm6_livery_log_install(game);
         fm6_resolution(game, *(const uint32_t *)((const uint8_t *)options + 4),
                        *(const uint32_t *)((const uint8_t *)options + 8));
         fm6_frame_rate(game, *(const uint32_t *)((const uint8_t *)options + 0xc));

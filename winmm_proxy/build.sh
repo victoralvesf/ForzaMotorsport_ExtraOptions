@@ -4,7 +4,7 @@ cd "$(dirname "$0")"
 python ../tools/gen_winmm_stubs.py . || exit 1
 python ../tools/gen_d3d_thunks.py . || exit 1
 mkdir -p build
-/c/mingw64/bin/gcc -O2 -Wall -shared -o build/winmm.dll fm5_patch.c d3d_fm5.c winrt_fm5.c shape_fm5.c audio_fm6.c debug12_fm5.c gpuguard_fm6.c stutter_fm6.c cmdrec_fm6.c gfx_fm5.c shader_fm6.c d3d_thunks.S winmm_stubs.S \
+/c/mingw64/bin/gcc -O2 -Wall -shared -o build/winmm.dll fm5_patch.c d3d_fm5.c winrt_fm5.c shape_fm5.c audio_fm6.c debug12_fm5.c gpuguard_fm6.c stutter_fm6.c cmdrec_fm6.c gfx_fm5.c shader_fm6.c livery_fm6.c d3d_thunks.S winmm_stubs.S \
   winmm_exports.def -static-libgcc -static -Wl,--enable-stdcall-fixup -luser32 -lkernel32 || exit 1
 # testes (tests/run_tests.sh, ~10 s): SKIP_TESTS=1 pula
 [ -n "$SKIP_TESTS" ] || sh tests/run_tests.sh > build/tests.txt 2>&1 || { tail -40 build/tests.txt; echo "TESTES FALHARAM (build/tests.txt)"; exit 1; }

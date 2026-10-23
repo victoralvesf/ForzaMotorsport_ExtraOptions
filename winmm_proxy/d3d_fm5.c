@@ -18,6 +18,15 @@ extern void wlog(const char *fmt, ...);
 extern int is_fm5(void);
 extern int is_fm6(void);
 extern void game_tls_apply(void);
+/* diagnostico da plotagem do FM6 (livery_fm6.c, debug.ini LiveryLog) */
+extern void liv_note_pso(void *pso, int wait, int ctx);
+extern void liv_note_skip(int ctx);
+extern void liv_note_resolve(int ctx, UINT sw, UINT sh, UINT sfmt, UINT ss, UINT dw, UINT dh, UINT dfmt, UINT ds,
+                             UINT fmt);
+extern void liv_note_dispatch(UINT x, UINT y, UINT z);
+extern void liv_note_texture(const UINT *d, long hr);
+extern int liv_in_window(void);
+extern int liv_log;
 /* stutter_fm6.c (PASSO 99): rastreio das placement textures placed */
 int pa_tracking(void);
 void pa_note_begin(const void *addr, uintptr_t caller);
@@ -1291,6 +1300,7 @@ static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
     long hr;
     if (!desc || desc[5] <= 1 || desc[6] == 0 || desc[6] == 0xffffffff) {
         hr = orig_fm6_create_tex2d(dev, desc, init, out);
+        liv_note_texture(desc, hr);
         if (desc && desc[0] >= 1280 && hr >= 0 && out && *out) {   /* texturas de tela: aliasing da ESRAM */
             wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u bind=%#x misc=%#x esram[0xb]=%#x) hr=%#lx tex=%p",
                  desc[0], desc[1], desc[4], desc[5], desc[8], desc[10], desc[11], hr, *out);
@@ -1301,6 +1311,7 @@ static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
     memcpy(d, desc, 12 * sizeof(UINT));
     d[6] = 0xffffffff;
     hr = orig_fm6_create_tex2d(dev, d, init, out);
+    liv_note_texture(desc, hr);
     if (hr >= 0 && out && *out) msaa_q_set(*out, desc[6]);
     wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> default, bind=%#x misc=%#x) hr=%#lx tex=%p",
          d[0], d[1], d[4], d[5], desc[6], d[8], d[10], hr, out ? *out : NULL);
@@ -1570,8 +1581,22 @@ static void fm6_def_OMSetRenderTargetsUAV(void *ctx, UINT n, void *const *rtvs, 
 static void fm6_Dispatch(void *ctx, UINT x, UINT y, UINT z)
 {
     fm6_dctx_info *d = fm6_dctx_find(ctx);
+    liv_note_dispatch(x, y, z);
     alias_fm6_dispatch(ctx, x, y, z, d && (d->flags & 0x60000) == 0x60000, fm6_az_fn);
     ((void (*)(void *, UINT, UINT, UINT))fm6_az_fn(ctx, AZ_SLOT_DISPATCH))(ctx, x, y, z);
+}
+/* ResolveSubresource (FM6 0x3a = Azimuth 0x39): so repassa; dentro da janela da plotagem vai para o log */
+#define AZ_SLOT_RESOLVE  0x39
+static void fm6_ResolveSubresource(void *ctx, void *dst, UINT dsub, void *src, UINT ssub, UINT fmt)
+{
+    if (liv_in_window()) {
+        const uint8_t *s = src, *d = dst;
+        liv_note_resolve(proxy_index(ctx), s ? *(const UINT *)(s + 0x70) : 0, s ? *(const UINT *)(s + 0x74) : 0,
+                         s ? *(const UINT *)(s + 0x80) : 0, s ? *(const UINT *)(s + 0x84) : 0,
+                         d ? *(const UINT *)(d + 0x70) : 0, d ? *(const UINT *)(d + 0x74) : 0,
+                         d ? *(const UINT *)(d + 0x80) : 0, d ? *(const UINT *)(d + 0x84) : 0, fmt);
+    }
+    ((void (*)(void *, void *, UINT, void *, UINT, UINT))fm6_az_fn(ctx, AZ_SLOT_RESOLVE))(ctx, dst, dsub, src, ssub, fmt);
 }
 /* UiTrace (debug.ini, dev): cada viewport/scissor distinto (chamador no jogo + valores) vai para o log uma vez, para
    achar elementos que ficam fora do lugar com a resolucao do launcher (UI em 1920x1080, render maior) */
@@ -2828,6 +2853,7 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
     dst[0x22] = (void *)fm6_def_OMSetRenderTargets;
     dst[0x23] = (void *)fm6_def_OMSetRenderTargetsUAV;
     dst[0x2a] = (void *)fm6_Dispatch;
+    if (liv_log) dst[0x3a] = (void *)fm6_ResolveSubresource;
     dst[0x6f] = (void *)fm6_def_ClearState;
     if (!deferred && fm6_ui_trace) {
         dst[0x2d] = (void *)fm6_imm_RSSetViewports;
@@ -3378,12 +3404,14 @@ static void hook_draw_skip(uint8_t *ctx)
 {
     int i = proxy_index(ctx);
     InterlockedIncrement(&skip_counts[i < 0 ? 63 : i]);
+    liv_note_skip(i);
     orig_draw_skip(ctx);
 }
 
 static void *hook_pso_lookup(uint8_t *ctx, int wait)
 {
     void *p = orig_pso_lookup(ctx, wait);
+    liv_note_pso(p, wait, proxy_index(ctx));
     if (!p) {
         int i = proxy_index(ctx);
         LONG n = InterlockedIncrement(&pso_null_counts[i < 0 ? 63 : i]);
