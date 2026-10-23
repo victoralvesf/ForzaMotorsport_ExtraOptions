@@ -476,3 +476,60 @@ void fm6_car_detail(uint8_t *game, int level)
                 (void **)&fm6_orig_focus);
     wlog("FM6: car_detail %d (%s): car LOD getters hooked", level, level_name(level));
 }
+
+/*
+ * shadows do FM6 (docs\contexto\fm6\07_opcoes_graficas.txt, PASSO 110). Mesmos controles do FM5 (getters (mgr, idx)
+ * -> int, prologo FM6_GETTER_PROLOGUE):
+ *   ShadowMapResolution (id 0x3a, getter 0x4410e4, 1 chamador 0xe42219): compara com o cache [x+0x188] e chama
+ *       SetResolution(w = h = res) do gerador de sombras ([game+0x1dfa5d8] slot 1 -> 0x36008c), que recria os
+ *       shadow maps. Global/Race 512, FrontEnd 1024, CarSelect/321 2048, Hidden 64 (fica).
+ *   MaxHiDefShadows (id 0x3b, getter 0x4582d8, chamador 0x204fe4): orcamento de objetos com sombra hi-def nas
+ *       cascatas. Global/FrontEnd 16; 1/8/12/16/24-Car 0 (corridas).
+ * Niveis (como no FM5): low = resolucao /2 (min 256); high = x2 (max 4096) e hi-def >= 16; ultra = x4 (max 4096)
+ *   e hi-def >= 64. Resolucoes <= 256 (cenario Hidden) nao mudam.
+ */
+#define FM6_GET_SHADOW_MAP_RES    0x4410e4
+#define FM6_GET_MAX_HIDEF_SHADOWS 0x4582d8
+
+static getter_int_fn fm6_orig_shadow_res, fm6_orig_hidef;
+static int fm6_shadow_level;
+
+static int fm6_get_shadow_res(void *mgr, int idx)
+{
+    static int last = -99;
+    int o = fm6_orig_shadow_res(mgr, idx), v = o;
+    if (o > 256) {
+        if (fm6_shadow_level == 0) v = o / 2 < 256 ? 256 : o / 2;
+        else if (o < 4096) { v = o * (fm6_shadow_level == 2 ? 2 : 4); if (v > 4096) v = 4096; }
+    }
+    if (o != last) { last = o; wlog("FM6: shadows: ShadowMapResolution %d -> %d", o, v); }
+    return v;
+}
+
+static int fm6_get_hidef(void *mgr, int idx)
+{
+    static int last = -99;
+    int o = fm6_orig_hidef(mgr, idx), min = fm6_shadow_level == 2 ? 16 : 64, v = o < min ? min : o;
+    if (o != last) { last = o; wlog("FM6: shadows: MaxHiDefShadows %d -> %d", o, v); }
+    return v;
+}
+
+void fm6_shadows(uint8_t *game, int level)
+{
+    if (level == 1 || level < 0 || level > 3) {
+        wlog("FM6: shadows %d (%s): original shadows", level, level_name(level));
+        return;
+    }
+    if (!bytes_match(game + FM6_GET_SHADOW_MAP_RES, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN) ||
+        (level >= 2 && !bytes_match(game + FM6_GET_MAX_HIDEF_SHADOWS, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN))) {
+        wlog("FM6: shadows: getters do not match, ignored");
+        return;
+    }
+    fm6_shadow_level = level;
+    hook_at(game + FM6_GET_SHADOW_MAP_RES, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN, (void *)fm6_get_shadow_res,
+            (void **)&fm6_orig_shadow_res);
+    if (level >= 2)
+        hook_at(game + FM6_GET_MAX_HIDEF_SHADOWS, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN, (void *)fm6_get_hidef,
+                (void **)&fm6_orig_hidef);
+    wlog("FM6: shadows %d (%s): shadow getters hooked", level, level_name(level));
+}

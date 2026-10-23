@@ -235,3 +235,52 @@ TEST(fm6_car_detail_on_fm6_exe)
         pe_unmap(g);
     }
 }
+
+/* ------------------------------------------------------------------------ */
+/* FM6: shadows (ShadowMapResolution / MaxHiDefShadows)                      */
+/* ------------------------------------------------------------------------ */
+TEST(fm6_shadow_values_per_level)
+{
+    fm6_orig_shadow_res = fake_get_int;
+    fm6_orig_hidef = fake_get_int;
+    fm6_shadow_level = 0;
+    fake_int = 512;  CHECK_EQ(fm6_get_shadow_res(NULL, 0), 256);
+    fake_int = 1024; CHECK_EQ(fm6_get_shadow_res(NULL, 0), 512);
+    fake_int = 64;   CHECK_EQ(fm6_get_shadow_res(NULL, 0), 64);     /* Hidden fica */
+    fm6_shadow_level = 2;
+    fake_int = 512;  CHECK_EQ(fm6_get_shadow_res(NULL, 0), 1024);
+    fake_int = 2048; CHECK_EQ(fm6_get_shadow_res(NULL, 0), 4096);
+    fake_int = 64;   CHECK_EQ(fm6_get_shadow_res(NULL, 0), 64);
+    fake_int = 0;    CHECK_EQ(fm6_get_hidef(NULL, 0), 16);
+    fake_int = 20;   CHECK_EQ(fm6_get_hidef(NULL, 0), 20);
+    fm6_shadow_level = 3;
+    fake_int = 512;  CHECK_EQ(fm6_get_shadow_res(NULL, 0), 2048);
+    fake_int = 1024; CHECK_EQ(fm6_get_shadow_res(NULL, 0), 4096);
+    fake_int = 2048; CHECK_EQ(fm6_get_shadow_res(NULL, 0), 4096);
+    fake_int = 4096; CHECK_EQ(fm6_get_shadow_res(NULL, 0), 4096);
+    fake_int = 16;   CHECK_EQ(fm6_get_hidef(NULL, 0), 64);
+}
+
+TEST(fm6_shadows_on_fm6_exe)
+{
+    int level;
+    for (level = 0; level < 4; level++) {
+        uint8_t *g = pe_map(FM6_EXE, NULL);
+        if (!g) { test_skip(FM6_EXE " ausente"); return; }
+        CHECK_HEX(g + 0x4410e4, "40574883ec4048c7442420feffffff48895c2458");
+        CHECK_HEX(g + 0x4582d8, "40574883ec4048c7442420feffffff48895c2458");
+        log_capture();
+        fm6_shadows(g, level);
+        CHECK(!log_has("do not match"));
+        if (level == 1) {
+            CHECK(log_has("FM6: shadows 1 (default): original shadows"));
+            CHECK_HEX(g + 0x4410e4, "40574883ec40");
+        } else {
+            CHECK(hooked_to(g + 0x4410e4, (void *)fm6_get_shadow_res));
+            CHECK_EQ(level >= 2, hooked_to(g + 0x4582d8, (void *)fm6_get_hidef));
+            CHECK_HEX((uint8_t *)fm6_orig_shadow_res, "40574883ec4048c7442420feffffff48895c2458");
+            CHECK(*(uint8_t **)((uint8_t *)fm6_orig_shadow_res + 20 + 6) == g + 0x4410e4 + 20);
+        }
+        pe_unmap(g);
+    }
+}

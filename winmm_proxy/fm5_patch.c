@@ -795,6 +795,7 @@ static void fm6_frame_rate(uint8_t *game, uint32_t fps)
 
 extern void fm5_car_detail(uint8_t *game, int level);
 extern void fm6_car_detail(uint8_t *game, int level);
+extern void fm6_shadows(uint8_t *game, int level);
 extern void fm5_shadows(uint8_t *game, int level);
 extern void fm5_reflections(uint8_t *game, int level);
 
@@ -1303,6 +1304,7 @@ static void hook_apply_patches(void *image, const void *options)
                        *(const uint32_t *)((const uint8_t *)options + 8));
         fm6_frame_rate(game, *(const uint32_t *)((const uint8_t *)options + 0xc));
         fm6_car_detail(game, ((const int32_t *)((const uint8_t *)options + 0x14))[2]);
+        fm6_shadows(game, ((const int32_t *)((const uint8_t *)options + 0x14))[0]);
         slot0_game = game; slot0_sites = fm6_tls_slot0; slot0_n = FM6_TLS_SLOT0_N;
         game_tls_pending = 1;
         return;
