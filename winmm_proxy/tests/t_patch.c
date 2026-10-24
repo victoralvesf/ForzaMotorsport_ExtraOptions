@@ -1196,6 +1196,48 @@ TEST(xg_fm5_create_export_rounds_up)
     CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 67);
 }
 
+/* envio por subrecurso: mapa comprimido mais baixo que as linhas do registro (lente 960x540 BC7, mip 1: 120x67,
+   tiles 15x9, registro de 68 linhas) sobe para 68; fora disso nada muda */
+static void *xg_send_seen;
+static void *xg_fake_send(uint64_t *cl, uint64_t item) { (void)item; xg_send_seen = cl; return (void *)0x1234; }
+
+TEST(xg_send_map_height_raised)
+{
+    static uint8_t map[0x140];
+    static uint32_t rec[0x24 * 2], it[4 * 2];
+    static uint64_t items, recs, cl[4];
+    fake_azimuth(1);
+    memset(map, 0, sizeof map);
+    map[0] = 1;
+    *(uint32_t *)(map + 8) = 120; *(uint32_t *)(map + 0xc) = 67;
+    *(uint32_t *)(map + 0x14) = 15; *(uint32_t *)(map + 0x18) = 9;
+    memset(rec, 0, sizeof rec);
+    rec[0x24 + 0] = 1; rec[0x24 + 8] = 2048; rec[0x24 + 10] = 68;
+    *(uint8_t **)(rec + 0x24 + 0x18) = map;
+    memset(it, 0, sizeof it);
+    it[4] = 1;                                     /* item 1 -> registro 1 */
+    items = (uint64_t)(uintptr_t)it; recs = (uint64_t)(uintptr_t)rec;
+    cl[0] = (uint64_t)(uintptr_t)&items; cl[1] = (uint64_t)(uintptr_t)&recs;
+    orig_xg_send = xg_fake_send;
+    CHECK(hook_xg_send(cl, 1) == (void *)0x1234);
+    CHECK(xg_send_seen == cl);
+    CHECK_EQ(*(uint32_t *)(map + 0xc), 68);
+    /* tiles nao cobrem (8 x 8 = 64 < 68): nao mexe */
+    *(uint32_t *)(map + 0xc) = 63; *(uint32_t *)(map + 0x18) = 8;
+    hook_xg_send(cl, 1);
+    CHECK_EQ(*(uint32_t *)(map + 0xc), 63);
+    /* mapa nao comprimido (lista): nao mexe */
+    *(uint32_t *)(map + 0x18) = 9; *(uint32_t *)(map + 0xc) = 67; map[0] = 0;
+    hook_xg_send(cl, 1);
+    CHECK_EQ(*(uint32_t *)(map + 0xc), 67);
+    /* fora do FM5: nao mexe */
+    map[0] = 1;
+    fake_azimuth(2);
+    hook_xg_send(cl, 1);
+    CHECK_EQ(*(uint32_t *)(map + 0xc), 67);
+    fake_azimuth(1);
+}
+
 /* ------------------------------------------------------------------------ */
 /* azimuth.exe real: install() (travas, allow list, hooks)                    */
 /* ------------------------------------------------------------------------ */
@@ -1241,6 +1283,7 @@ TEST(install_on_real_azimuth)
     CHECK(xg_match_target == az + RVA_XG_NAME_MATCH && xg_next_target == az + RVA_XG_NAME_NEXT);
     CHECK(hooked_to(az + RVA_APPLY_PATCHES, (void *)hook_apply_patches));
     CHECK(hooked_to(az + RVA_XG_COMPUTER, (void *)hook_xg_computer));
+    CHECK(hooked_to(az + RVA_XG_SEND, (void *)hook_xg_send));
     /* trampolim do apply_patches: 14 bytes originais + jmp de volta */
     CHECK_HEX((uint8_t *)orig_apply_patches, "48895c2418488974242055574154");
     CHECK(*(uint8_t **)((uint8_t *)orig_apply_patches + 14 + 6) == az + RVA_APPLY_PATCHES + 14);

@@ -1624,6 +1624,33 @@ uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch
     return n;
 }
 
+/* Envio por subrecurso das placement textures (0x14014c2f0; closure: [0] itens de 0x10 bytes {registro, ...}, [1]
+   registros de 0x90 bytes {subrecurso, ..., [8] row pitch, [10] linhas de blocos, +0x60 mapa}). O ramo de GPU usa o
+   mapa comprimido do Azimuth (0x1400a0090: +0 valido, +8/+0xc largura/altura em elementos, +0x14/+0x18 tiles 8x8,
+   +0x1c padrao de 64, +0x120 bases por tile), que nas lentes do FM5 sai com a altura do XG do FM5 (mip 1: 120x67,
+   tiles 15x9) apesar de o registro pedir 68 linhas -> a ultima linha de blocos dos mips BC nunca era escrita (a linha
+   do flare do sol; diag "send" e dump da memoria x captura, PASSO FLARE cont. 8). Se os tiles ja cobrem as linhas do
+   registro, a altura do mapa sobe para elas: os enderecos novos cabem no padrao 8x8 (tools/xg_layout_probe.c fix). */
+#define RVA_XG_SEND 0x14c2f0
+static void *(*orig_xg_send)(uint64_t *cl, uint64_t item);
+static void *hook_xg_send(uint64_t *cl, uint64_t item)
+{
+    const uint32_t *it = (const uint32_t *)((item & 0xffffffff) * 0x10 + *(uint64_t *)cl[0]);
+    const uint32_t *rec = (const uint32_t *)((uint64_t)it[0] * 0x90 + *(uint64_t *)cl[1]);
+    uint8_t *map = *(uint8_t **)(rec + 0x18);
+    if (is_fm5() && map && map[0]) {
+        uint32_t *h = (uint32_t *)(map + 0xc), rows = rec[10];
+        if (*h < rows && *(const uint32_t *)(map + 0x18) * 8 >= rows && rows - *h < 8) {
+            static LONG logged;
+            if (InterlockedIncrement(&logged) <= 16)
+                wlog("XG: address map %ux%u -> %u rows (subresource %u of an upload of %u rows)",
+                     *(const uint32_t *)(map + 8), *h, rows, rec[0], rows);
+            *h = rows;
+        }
+    }
+    return orig_xg_send(cl, item);
+}
+
 /* ------------------------------------------------------------------------ */
 
 static int install(void)
@@ -1688,6 +1715,9 @@ static int install(void)
     if (!hook_function(RVA_XG_COMPUTER, "48895c24205556574154415541564157", XG_COMPUTER_STOLEN,
                        (void *)hook_xg_computer, (void **)&orig_xg_computer)) return 0;
     wlog("patch %#x: XG texture computer hooked (FM5 desc layout)", RVA_XG_COMPUTER);
+    if (hook_function(RVA_XG_SEND, "405355565741544155415641574883ec48", 17, (void *)hook_xg_send,
+                      (void **)&orig_xg_send))
+        wlog("patch %#x: placement texture upload hooked (FM5 BC mip map height)", RVA_XG_SEND);
 
     /* 8) ativacao WinRT: classes do XDK do FM5 sem equivalente (SpeechRecognizer) -> fabrica stub */
     if (!winrt_install()) return 0;
