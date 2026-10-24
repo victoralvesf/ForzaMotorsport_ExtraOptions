@@ -1441,14 +1441,17 @@ static uint32_t check_ia(ID3D12GraphicsCommandList *l, uint32_t op, const uint32
 /* alpha-to-coverage sem dithering (azimuth_fm6.ini AlphaToCoverageNoDither, padrao 1; fm6 PASSO 112): PSO com A2C e
    MSAA -> PS reescrito (common/shader.c shader_a2c: cobertura do alpha em SV_Coverage) e A2C desligado. Sem isso
    o driver do PC espalha a cobertura em xadrez (bordas da plotagem, cercas, folhagem). */
-static int a2c_mode = -1;
+static int a2c_mode = -1, a2c_game_known;
 static volatile LONG a2c_done, a2c_failed;
 
+/* o Azimuth cria os PSOs da pipeline library antes do apply_patches registrar o jogo: decide sem ele (game_a2c_no_dither)
+   e de novo quando o jogo aparece (desde a separacao por jogo ficava 0 para sempre) */
 static int a2c_on(void)
 {
-    if (a2c_mode < 0) {
-        const game *g = game_current();
-        a2c_mode = g && g->a2c_no_dither ? g->a2c_no_dither() : 0;
+    const game *g = game_current();
+    if (a2c_mode < 0 || (g && !a2c_game_known)) {
+        a2c_game_known = g != NULL;
+        a2c_mode = game_a2c_no_dither();
         wlog("%s: AlphaToCoverageNoDither=%d (%s)", g ? g->tag : "-", a2c_mode,
              a2c_mode ? "alpha-to-coverage written by the pixel shader, without the driver's dithering"
                       : "alpha-to-coverage left to the driver");

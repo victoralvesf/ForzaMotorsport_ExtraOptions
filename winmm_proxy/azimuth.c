@@ -51,6 +51,15 @@ const game *game_current(void)
     return NULL;
 }
 
+int game_a2c_no_dither(void)
+{
+    const game *g = game_current();
+    int i, r = 1;
+    if (g) return g->a2c_no_dither ? g->a2c_no_dither() : 0;
+    for (i = 0; i < GAME_COUNT; i++) r &= games[i]->a2c_no_dither && games[i]->a2c_no_dither();
+    return r;
+}
+
 /* ------------------------------------------------------------------------ */
 /* Escrita com conferencia                                                    */
 /* ------------------------------------------------------------------------ */

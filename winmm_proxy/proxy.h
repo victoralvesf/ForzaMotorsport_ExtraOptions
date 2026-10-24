@@ -82,6 +82,8 @@ extern uint8_t *g_game;                  /* exe do jogo carregado (apply_patches
 extern uint8_t *g_trace_game;            /* = g_game se defaults.trace_game_frames, senao NULL */
 const game *game_current(void);          /* jogo carregado; NULL = antes do launcher escolher, ou FH2 */
 #define GAME_DEFAULT(f) (game_current() ? game_current()->defaults.f : 0)
+/* a2c_no_dither do jogo carregado; antes dele (PSOs da pipeline library criados no boot) 1 so se todos os jogos querem */
+int game_a2c_no_dither(void);
 void xg_computer_orig(void *out, const char *name, uint32_t *desc);
 uint64_t shape_graph_orig(uint8_t *proc, uint8_t *graph);
 

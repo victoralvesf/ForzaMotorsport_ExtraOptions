@@ -147,6 +147,23 @@ TEST(is_fm5_reads_game_record)
     CHECK(is_fm5());
 }
 
+/* A2C sem xadrez: os PSOs da pipeline library nascem antes do registro do jogo -> vale se todos os jogos querem */
+TEST(game_a2c_no_dither_before_and_after_record)
+{
+    fake_azimuth(0);
+    ini6_set("[FM6]\nAlphaToCoverageNoDither=1\n");
+    CHECK_EQ(game_a2c_no_dither(), 1);                 /* jogo ainda desconhecido: FM5 (1) e FM6 (ini 1) */
+    ini6_set("[FM6]\nAlphaToCoverageNoDither=0\n");
+    CHECK_EQ(game_a2c_no_dither(), 0);                 /* um jogo nao quer: nada antes do registro */
+    fake_azimuth(1);
+    CHECK_EQ(game_a2c_no_dither(), 1);                 /* FM5 carregado: sempre */
+    fake_azimuth(2);
+    CHECK_EQ(game_a2c_no_dither(), 0);                 /* FM6 carregado: o ini */
+    ini6_set(NULL);
+    CHECK_EQ(game_a2c_no_dither(), 1);                 /* FM6 sem a chave: padrao 1 */
+    fake_azimuth(0);
+}
+
 static int orig_apply_calls;
 static void fake_orig_apply(void *image, const void *options) { (void)image; (void)options; orig_apply_calls++; }
 
