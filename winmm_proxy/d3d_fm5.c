@@ -600,6 +600,8 @@ static long dev_CreateShaderResourceView(void *dev, void *res, const UINT *desc,
 typedef long (*ptex2d_fn)(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out);
 static long dev_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
 {
+    /* antes do original: o Azimuth ja envia o conteudo da memoria (carregado antes da criacao) dentro dele */
+    uint32_t zeroed = is_fm5() ? xg_fm5_zero_bc_tail(desc, tile, pitch, addr) : 0;
     long hr = ((ptex2d_fn)dev_orig[0x40])(dev, desc, tile, pitch, addr, out);
     MEMORY_BASIC_INFORMATION mi = {0};
     void *pages[4]; ULONG_PTR np = 4; ULONG gran = 0; UINT ww;
@@ -611,11 +613,10 @@ static long dev_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
          "pitch=%u addr=%p (alloc %p type %#lx prot %#lx) -> hr=%#lx tex=%p", desc[0], desc[1], desc[2], desc[3], desc[4],
          desc[5], desc[7], desc[8], desc[9], desc[10], tile, pitch, addr, mi.AllocationBase, mi.Type, mi.Protect, hr,
          out ? *out : NULL);
-    if (hr >= 0 && is_fm5()) {
-        uint32_t n = xg_fm5_zero_bc_tail(desc, tile, pitch, addr);
+    if (zeroed) {
         static LONG logged;
-        if (n && InterlockedIncrement(&logged) <= 16)
-            wlog("d3d:   %u BC mip elements past the FM5 XG count zeroed (as on the console)", n);
+        if (InterlockedIncrement(&logged) <= 16)
+            wlog("d3d:   %u BC mip elements past the FM5 XG count zeroed before creation (as on the console)", zeroed);
     }
     return hr;
 }

@@ -1524,8 +1524,9 @@ static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
 
 /* Os blocos que xg_fix_bc_mips acrescenta nao tem conteudo no asset (o XG do FM5 nunca os conta; o jogo nunca escreve
    ali): na memoria do jogo fica o que sobrou de outro uso do pool (0 numa sessao, blocos de outra textura em outra:
-   captura flare7), no console a memoria nova vem zerada. CreatePlacementTexture2D do FM5 chama isto apos criar a textura: zera esses
-   elementos nos enderecos do proprio XG (dentro de SizeBytes, +0x54b8). Devolve quantos elementos zerou. */
+   captura flare7), no console a memoria nova vem zerada. CreatePlacementTexture2D do FM5 chama isto ANTES de criar a
+   textura (o Azimuth ja envia o conteudo na criacao; zerado depois nao chegava, captura flare8): zera esses elementos
+   nos enderecos do proprio XG (dentro de SizeBytes, +0x54b8). Devolve quantos elementos zerou. */
 uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch, uint8_t *addr)
 {
     uint32_t d[16] = {0}, mips, mip, slice, arr, w, h, ow, oh, bpe, x, y, n = 0;
