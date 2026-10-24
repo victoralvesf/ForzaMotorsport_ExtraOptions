@@ -1718,3 +1718,67 @@ TEST(fm6_ui_trace_logs_distinct_rects)
     CHECK(strstr(t, "d3d: UiTrace: scissor n=1 10,20 - 300,400") != NULL);
 }
 
+
+/* sampler nulo -> sampler padrao do D3D11, criado uma vez pelo CreateSamplerState do Azimuth (0x1400626f0) */
+static void *ss_seen[16];
+static UINT ss_stage, ss_start, ss_n, ss_calls;
+static void ss_orig(void *ctx, UINT stage, UINT start, UINT n, void *const *pp)
+{
+    UINT i;
+    (void)ctx;
+    ss_stage = stage; ss_start = start; ss_n = n; ss_calls++;
+    for (i = 0; i < n && i < 16; i++) ss_seen[i] = pp ? pp[i] : (void *)(uintptr_t)0xdead;
+}
+static uint32_t ss_desc[13];
+static void *ss_dev;
+static int ss_creates;
+static void *ss_obj_vt[3], *ss_obj[1] = { ss_obj_vt };
+static long ss_create(void *dev, const void *desc, void **out)
+{
+    ss_dev = dev; ss_creates++;
+    memcpy(ss_desc, desc, sizeof ss_desc);
+    *out = ss_obj;
+    return 0;
+}
+
+TEST(null_sampler_binds_default_state)
+{
+    uint8_t *az = fake_azimuth(1);
+    void *a = (void *)(uintptr_t)0x1111, *b = (void *)(uintptr_t)0x2222;
+    void *pp[3] = { a, NULL, b };
+    float f;
+    log_capture();
+    /* CreateSamplerState do Azimuth: jmp absoluto p/ o falso */
+    az[RVA_CREATE_SAMPLER] = 0xff; az[RVA_CREATE_SAMPLER + 1] = 0x25;
+    memset(az + RVA_CREATE_SAMPLER + 2, 0, 4);
+    *(void **)(az + RVA_CREATE_SAMPLER + 6) = (void *)ss_create;
+    orig_set_samplers = ss_orig;
+    g_default_sampler = NULL;
+    g_az_device = (void *)(uintptr_t)0x5000;
+    ss_calls = 0; ss_creates = 0;
+    /* nenhum nulo: repassa como esta */
+    hook_set_samplers((void *)1, 4, 0, 1, pp);
+    CHECK(ss_calls == 1 && ss_seen[0] == a && ss_creates == 0);
+    /* slot do meio nulo: vira o padrao */
+    hook_set_samplers((void *)1, 4, 2, 3, pp);
+    CHECK(ss_calls == 2 && ss_stage == 4 && ss_start == 2 && ss_n == 3);
+    CHECK(ss_seen[0] == a && ss_seen[1] == (void *)ss_obj && ss_seen[2] == b);
+    CHECK(ss_creates == 1 && ss_dev == (void *)(uintptr_t)0x5000);
+    /* desc padrao do D3D11, escrito aqui: MIN_MAG_MIP_LINEAR, CLAMP x3, bias 0, aniso 1, NEVER, borda 1, LOD +-FLT_MAX */
+    CHECK_EQ(ss_desc[0], 0x15);
+    CHECK(ss_desc[1] == 3 && ss_desc[2] == 3 && ss_desc[3] == 3);
+    CHECK_EQ(ss_desc[4], 0);
+    CHECK(ss_desc[5] == 1 && ss_desc[6] == 1);
+    CHECK(ss_desc[7] == 0x3f800000 && ss_desc[10] == 0x3f800000);
+    memcpy(&f, &ss_desc[11], 4); CHECK(f < -3.4e38f);
+    memcpy(&f, &ss_desc[12], 4); CHECK(f > 3.4e38f);
+    /* array nulo (Set*(start, n, NULL)): todos viram o padrao; o sampler e criado uma vez so */
+    hook_set_samplers((void *)1, 0, 0, 2, NULL);
+    CHECK(ss_seen[0] == (void *)ss_obj && ss_seen[1] == (void *)ss_obj && ss_creates == 1);
+    CHECK(log_has("d3d: default sampler") && log_has("null sampler bind #1: stage 4 slots 2+3 (1 null)"));
+    /* fora do FM5/FM6: repassa */
+    fake_azimuth(0);
+    hook_set_samplers((void *)1, 4, 0, 3, pp);
+    CHECK(ss_seen[1] == NULL);
+    orig_set_samplers = NULL; g_default_sampler = NULL; g_az_device = NULL;
+}

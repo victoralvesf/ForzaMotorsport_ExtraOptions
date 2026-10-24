@@ -1241,6 +1241,7 @@ static DWORD WINAPI trace_thread(void *arg)
 /* ------------------------------------------------------------------------ */
 typedef long (*createx_fn)(const void *desc, void **dev, void **ctx);
 
+static void *g_az_device;
 static long WINAPI fm5_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, UINT flags,
                                          const UINT *levels, UINT nlevels, UINT sdk,
                                          void **out_dev, UINT *out_level, void **out_ctx)
@@ -1259,6 +1260,7 @@ static long WINAPI fm5_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p context=%p", hr, dev, ctx);
     if (hr < 0) return hr;
 
+    g_az_device = dev;
     install_object_layouts();
     install_device_vtable(dev);
     ctx = proxy_of(ctx);
@@ -3049,6 +3051,7 @@ static long WINAPI fm6_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     hr = ((createx_fn)(g_base + RVA_CREATE_DEVICEX))(desc, &dev, &ctx);
     wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p context=%p (FM6, device in the FH2 layout)", hr, dev, ctx);
     if (hr < 0) return hr;
+    g_az_device = dev;
     wlog("d3d: FM6 device: %d trivial console driver slots in place of the fatal stub",
          fm6_device_fixups(*(void ***)dev));
     fm6_object_layouts();
@@ -3420,6 +3423,57 @@ static FARPROC hook_resolver(const uint8_t *entry)
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 
 /* ------------------------------------------------------------------------ */
+/* Sampler nulo = sampler padrao do D3D11                                     */
+/* ------------------------------------------------------------------------ */
+/* No D3D11 um slot de sampler nulo usa o estado padrao (MIN_MAG_MIP_LINEAR, CLAMP, LOD sem limite). O *SetSamplers
+ * do Azimuth (0x1401b2b20, comum aos 6 estagios e ao PSSetFastSampler do FM5) grava o ponteiro nulo e a tabela de
+ * samplers do D3D12 fica com um descritor nunca escrito: o FM5/FM6 liga s0 = NULL no lensflare_lenstexture
+ * (sujeira da lente) -> filtro/enderecamento indefinidos na GPU -> a linha na borda de baixo do flare do sol.
+ * Aqui os nulos viram um sampler com o desc padrao, criado uma vez pelo CreateSamplerState do Azimuth. */
+#define RVA_SET_SAMPLERS   0x1b2b20   /* (ctx, estagio, inicio, n, pp) */
+#define RVA_CREATE_SAMPLER 0x626f0    /* CreateSamplerState(device, desc, out) = slot 0x17 do device */
+static void *volatile g_default_sampler;
+static void (*orig_set_samplers)(void *ctx, UINT stage, UINT start, UINT n, void *const *pp);
+volatile LONG null_sampler_binds;
+
+void *default_sampler(void)
+{
+    typedef long (*create_sampler_fn)(void *dev, const void *desc, void **out);
+    static const struct { UINT filter, u, v, w; float bias; UINT aniso, cmp; float border[4], minlod, maxlod; } desc = {
+        0x15, 3, 3, 3, 0.0f, 1, 1, { 1.0f, 1.0f, 1.0f, 1.0f }, -3.402823466e+38f, 3.402823466e+38f };
+    void *s = g_default_sampler, *made = NULL;
+    long hr;
+    if (s || !g_az_device) return s;
+    hr = ((create_sampler_fn)(g_base + RVA_CREATE_SAMPLER))(g_az_device, &desc, &made);
+    if (hr < 0 || !made) { wlog("d3d: default sampler: CreateSamplerState hr=%#lx", hr); return NULL; }
+    if ((s = InterlockedCompareExchangePointer((void *volatile *)&g_default_sampler, made, NULL)) != NULL)
+        ((ULONG (*)(void *))(*(void ***)made)[2])(made);   /* outra thread criou antes: fica com aquele */
+    else {
+        s = made;
+        wlog("d3d: default sampler %p (null sampler slots get the D3D11 default state)", s);
+    }
+    return s;
+}
+
+static void hook_set_samplers(void *ctx, UINT stage, UINT start, UINT n, void *const *pp)
+{
+    void *fixed[16], *def;
+    UINT i, nulls = 0;
+    if (n && n <= 16 && (is_fm5() || is_fm6())) {
+        for (i = 0; i < n; i++) nulls += !pp || !pp[i];
+        if (nulls && (def = default_sampler()) != NULL) {
+            LONG k = InterlockedIncrement(&null_sampler_binds);
+            for (i = 0; i < n; i++) fixed[i] = pp && pp[i] ? pp[i] : def;
+            if (k <= 8) wlog("d3d: null sampler bind #%ld: stage %u slots %u+%u (%u null) -> default", k, stage, start, n,
+                             nulls);
+            orig_set_samplers(ctx, stage, start, n, fixed);
+            return;
+        }
+    }
+    orig_set_samplers(ctx, stage, start, n, pp);
+}
+
+/* ------------------------------------------------------------------------ */
 /* Diagnostico: draws pulados (0x14012b780) e busca de pipeline (0x1401338e0)   */
 /* ------------------------------------------------------------------------ */
 #define RVA_DRAW_SKIP   0x12b780   /* draw descartado: 0x14012a6d0 nao achou pipeline */
@@ -3469,6 +3523,8 @@ int d3d_install(void)
                        (void **)&orig_pso_lookup)) return 0;
     if (!hook_function(RVA_RELEASE, RELEASE_HEX, RELEASE_STOLEN, (void *)pd_release_hook,
                        (void **)&orig_release)) return 0;
+    if (!hook_function(RVA_SET_SAMPLERS, "48895c241048896c24184889742420", 15, (void *)hook_set_samplers,
+                       (void **)&orig_set_samplers)) return 0;
     return hook_function(RVA_RESOLVER, "48895c2410488974241848897c2420", RESOLVER_STOLEN,
                          (void *)hook_resolver, (void **)&orig_resolver);
 }
