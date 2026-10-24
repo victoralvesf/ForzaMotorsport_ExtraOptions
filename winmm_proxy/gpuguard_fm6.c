@@ -1413,12 +1413,104 @@ static uint32_t check_ia(ID3D12GraphicsCommandList *l, uint32_t op, const uint32
     return miss;
 }
 
+/* alpha-to-coverage sem dithering (azimuth_fm6.ini AlphaToCoverageNoDither, padrao 1; fm6 PASSO 112): PSO com A2C e
+   MSAA -> PS reescrito (shader_fm6.c fm6_shader_a2c: cobertura do alpha em SV_Coverage) e A2C desligado. Sem isso
+   o driver do PC espalha a cobertura em xadrez (bordas da plotagem, cercas, folhagem). */
+extern uint8_t *fm6_shader_a2c(const void *code, size_t size, unsigned samples, size_t *out_size);
+extern int cfg6_int(const wchar_t *key, int def);
+static int a2c_mode = -1;
+static volatile LONG a2c_done, a2c_failed;
+
+static int a2c_on(void)
+{
+    if (a2c_mode < 0) {
+        a2c_mode = cfg6_int(L"AlphaToCoverageNoDither", 1) > 0;
+        wlog("FM6: AlphaToCoverageNoDither=%d (%s)", a2c_mode,
+             a2c_mode ? "alpha-to-coverage written by the pixel shader, without the driver's dithering"
+                      : "alpha-to-coverage left to the driver");
+    }
+    return a2c_mode;
+}
+
+/* PS novo (malloc) para um PSO com A2C; NULL = PSO sem A2C/MSAA ou shader que nao deu para converter */
+static uint8_t *a2c_ps(const D3D12_BLEND_DESC *b, const DXGI_SAMPLE_DESC *s, const D3D12_SHADER_BYTECODE *ps, size_t *n)
+{
+    uint8_t *r;
+    LONG k;
+    if (!b || !b->AlphaToCoverageEnable || !s || s->Count < 2 || !ps || !ps->pShaderBytecode || !a2c_on()) return NULL;
+    r = fm6_shader_a2c(ps->pShaderBytecode, ps->BytecodeLength, s->Count, n);
+    if (!r) {
+        k = InterlockedIncrement(&a2c_failed);
+        if (k <= 8 || (k & (k - 1)) == 0)
+            wlog("FM6: alpha-to-coverage PSO #%ld: pixel shader (%zu bytes) not converted, A2C left to the driver", k,
+                 (size_t)ps->BytecodeLength);
+        return NULL;
+    }
+    k = InterlockedIncrement(&a2c_done);
+    if (k <= 4 || (k & (k - 1)) == 0)
+        wlog("FM6: alpha-to-coverage PSO #%ld: %u samples, coverage from the pixel shader (%zu -> %zu bytes)", k,
+             s->Count, (size_t)ps->BytecodeLength, *n);
+    return r;
+}
+
+/* desc trocado em *t (A2C desligado, PS novo em *blob) ou d */
+static const D3D12_GRAPHICS_PIPELINE_STATE_DESC *a2c_desc(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d,
+                                                          D3D12_GRAPHICS_PIPELINE_STATE_DESC *t, uint8_t **blob)
+{
+    size_t n;
+    *blob = d ? a2c_ps(&d->BlendState, &d->SampleDesc, &d->PS, &n) : NULL;
+    if (!*blob) return d;
+    *t = *d;
+    t->BlendState.AlphaToCoverageEnable = FALSE;
+    t->PS.pShaderBytecode = *blob;
+    t->PS.BytecodeLength = n;
+    memset(&t->CachedPSO, 0, sizeof t->CachedPSO);
+    return t;
+}
+
+/* stream copiado em *blob (malloc: stream + PS novo) ou d */
+static const D3D12_PIPELINE_STATE_STREAM_DESC *a2c_stream(const D3D12_PIPELINE_STATE_STREAM_DESC *d,
+                                                          D3D12_PIPELINE_STATE_STREAM_DESC *t, uint8_t **blob)
+{
+    const void *st = d ? d->pPipelineStateSubobjectStream : NULL;
+    const D3D12_BLEND_DESC *b;
+    const DXGI_SAMPLE_DESC *s;
+    const D3D12_SHADER_BYTECODE *ps;
+    D3D12_CACHED_PIPELINE_STATE *cache;
+    uint8_t *ns, *c;
+    size_t n;
+    *blob = NULL;
+    if (!st) return d;
+    b = gg_stream_find(st, d->SizeInBytes, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND);
+    s = gg_stream_find(st, d->SizeInBytes, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC);
+    ps = gg_stream_find(st, d->SizeInBytes, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS);
+    ns = a2c_ps(b, s, ps, &n);
+    if (!ns) return d;
+    c = malloc(d->SizeInBytes + n);
+    if (!c) { free(ns); return d; }
+    memcpy(c, st, d->SizeInBytes);
+    memcpy(c + d->SizeInBytes, ns, n);
+    free(ns);
+    ((D3D12_BLEND_DESC *)(c + ((const uint8_t *)b - (const uint8_t *)st)))->AlphaToCoverageEnable = FALSE;
+    ((D3D12_SHADER_BYTECODE *)(c + ((const uint8_t *)ps - (const uint8_t *)st)))->pShaderBytecode = c + d->SizeInBytes;
+    ((D3D12_SHADER_BYTECODE *)(c + ((const uint8_t *)ps - (const uint8_t *)st)))->BytecodeLength = n;
+    cache = (D3D12_CACHED_PIPELINE_STATE *)gg_stream_find(c, d->SizeInBytes, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_CACHED_PSO);
+    if (cache) memset(cache, 0, sizeof *cache);
+    t->SizeInBytes = d->SizeInBytes;
+    t->pPipelineStateSubobjectStream = c;
+    *blob = c;
+    return t;
+}
+
 static HRESULT (STDMETHODCALLTYPE *real_gpso)(ID3D12Device *, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *, REFIID, void **);
 static HRESULT (STDMETHODCALLTYPE *real_spso)(ID3D12Device2 *, const D3D12_PIPELINE_STATE_STREAM_DESC *, REFIID, void **);
 
 static HRESULT STDMETHODCALLTYPE hook_gpso(ID3D12Device *dev, const D3D12_GRAPHICS_PIPELINE_STATE_DESC *d, REFIID riid, void **out)
 {
-    HRESULT hr = real_gpso(dev, d, riid, out);
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC t;
+    uint8_t *blob;
+    HRESULT hr = real_gpso(dev, a2c_desc(d, &t, &blob), riid, out);
+    free(blob);
     if (SUCCEEDED(hr) && out && *out && d) {
         uint32_t info, h = desc_hash(d, &info);
         gg_pso_add(*out, &d->InputLayout, h, info, d->pRootSignature);
@@ -1428,7 +1520,10 @@ static HRESULT STDMETHODCALLTYPE hook_gpso(ID3D12Device *dev, const D3D12_GRAPHI
 
 static HRESULT STDMETHODCALLTYPE hook_spso(ID3D12Device2 *dev, const D3D12_PIPELINE_STATE_STREAM_DESC *d, REFIID riid, void **out)
 {
-    HRESULT hr = real_spso(dev, d, riid, out);
+    D3D12_PIPELINE_STATE_STREAM_DESC t;
+    uint8_t *blob;
+    HRESULT hr = real_spso(dev, a2c_stream(d, &t, &blob), riid, out);
+    free(blob);
     if (SUCCEEDED(hr) && out && *out && d) {
         uint32_t info, h = stream_hash(d, &info);
         gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), h, info, gg_stream_rs(d));
@@ -1483,14 +1578,19 @@ static HRESULT STDMETHODCALLTYPE hook_lib_gfx(ID3D12PipelineLibrary *lib, LPCWST
 {
     uint32_t info = 0, h = d ? desc_hash(d, &info) : 0;
     HRESULT hr;
+    D3D12_GRAPHICS_PIPELINE_STATE_DESC t;
+    uint8_t *blob;
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC *u = a2c_desc(d, &t, &blob);
     if (d) dump_gs(h, info, &d->VS, &d->GS);
     ID3D12Device *dev = NULL;
-    if (d && fresh_gs_pso(info) && SUCCEEDED(lib->lpVtbl->GetDevice(lib, &IID_ID3D12Device, (void **)&dev))) {
-        hr = dev->lpVtbl->CreateGraphicsPipelineState(dev, d, riid, out);
+    /* PSO com A2C trocado: fora da library (o desc nao bate mais com o guardado em azimuth.pipelines) */
+    if (d && (blob || fresh_gs_pso(info)) && SUCCEEDED(lib->lpVtbl->GetDevice(lib, &IID_ID3D12Device, (void **)&dev))) {
+        hr = dev->lpVtbl->CreateGraphicsPipelineState(dev, u, riid, out);
         dev->lpVtbl->Release(dev);
     } else {
         hr = real_lib_gfx(lib, name, d, riid, out);
     }
+    free(blob);
     if (SUCCEEDED(hr) && out && *out && d) gg_pso_add(*out, &d->InputLayout, h, info, d->pRootSignature);
     return hr;
 }
@@ -1500,15 +1600,19 @@ static HRESULT STDMETHODCALLTYPE hook_lib_stream(ID3D12PipelineLibrary1 *lib, LP
 {
     uint32_t info = 0, h = d ? stream_hash(d, &info) : 0;
     HRESULT hr;
+    D3D12_PIPELINE_STATE_STREAM_DESC t;
+    uint8_t *blob;
+    const D3D12_PIPELINE_STATE_STREAM_DESC *u = a2c_stream(d, &t, &blob);
     ID3D12Device2 *dev = NULL;
     if (d) dump_gs(h, info, gg_stream_find(d->pPipelineStateSubobjectStream, d->SizeInBytes, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_VS),
                    gg_stream_find(d->pPipelineStateSubobjectStream, d->SizeInBytes, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_GS));
-    if (d && fresh_gs_pso(info) && SUCCEEDED(lib->lpVtbl->GetDevice(lib, &IID_ID3D12Device2, (void **)&dev))) {
-        hr = dev->lpVtbl->CreatePipelineState(dev, d, riid, out);
+    if (d && (blob || fresh_gs_pso(info)) && SUCCEEDED(lib->lpVtbl->GetDevice(lib, &IID_ID3D12Device2, (void **)&dev))) {
+        hr = dev->lpVtbl->CreatePipelineState(dev, u, riid, out);
         dev->lpVtbl->Release(dev);
     } else {
         hr = real_lib_stream(lib, name, d, riid, out);
     }
+    free(blob);
     if (SUCCEEDED(hr) && out && *out && d)
         gg_pso_add(*out, gg_stream_layout(d->pPipelineStateSubobjectStream, d->SizeInBytes), h, info, gg_stream_rs(d));
     return hr;

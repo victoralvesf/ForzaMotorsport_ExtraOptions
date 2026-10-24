@@ -297,3 +297,200 @@ uint8_t *fm6_shader_rewrite(const void *code, size_t size, size_t *out_size)
     }
     return out;
 }
+
+/* ---- alpha-to-coverage sem o dithering do driver (16_opcoes_graficas.txt PASSO 12, fm6 PASSO 112) ----
+ * O console converte o alpha do SV_Target0 em cobertura direto (N amostras -> N+1 niveis por pixel); os drivers do
+ * PC espalham a cobertura entre pixels vizinhos (dithering) -> xadrez de 1 pixel nas bordas da plotagem, cercas,
+ * folhagem. O PS do PSO com A2C passa a escrever a cobertura ele mesmo (SV_Coverage) e o PSO fica sem A2C:
+ *   - as escritas em o0 vao para um temporario novo rT;
+ *   - antes de cada ret/retc do programa principal: o0 = rT; oMask = (1 << uint(saturate(rT.w) * N + 0.5)) - 1;
+ *   - dcl_output oMask, dcl_temps + 2 (rT e rU), elemento SV_Coverage no OSGN; hash refeito.
+ * Encoding conferido com o d3dcompiler_47 (tools\dxbc_compile.py). */
+#define OP_FTOU         0x1c
+#define OP_IADD         0x1e
+#define OP_ISHL         0x29
+#define OP_LABEL        0x2c
+#define OP_MAD          0x32
+#define OP_MOV          0x36
+#define OP_RET          0x3e
+#define OP_RETC         0x3f
+#define OP_DCL_OUTPUT   0x65
+#define OP_IFACE_CALL   0x78
+#define OPND_OUTPUT     2
+#define OPND_OMASK      0xf
+#define A2C_EPILOGUE    37
+
+static int is_decl(unsigned op) { return (op >= 0x58 && op <= 0x6a) || (op >= 0x8f && op <= 0xa2); }
+
+/* epilogo (A2C_EPILOGUE tokens) */
+static uint32_t *a2c_epilogue(uint32_t *o, unsigned o0mask, uint32_t t, uint32_t u, unsigned samples)
+{
+    float fn = (float)samples;
+    uint32_t n;
+    memcpy(&n, &fn, 4);
+    *o++ = 0x05000000u | OP_MOV; *o++ = 0x00102002u | o0mask << 4; *o++ = 0; *o++ = 0x00100e46u; *o++ = t;
+    *o++ = 0x05000000u | OPTOK_SAT | OP_MOV; *o++ = 0x00100012u; *o++ = u; *o++ = 0x0010003au; *o++ = t;
+    *o++ = 0x09000000u | OP_MAD; *o++ = 0x00100012u; *o++ = u; *o++ = 0x0010000au; *o++ = u;
+    *o++ = 0x00004001u; *o++ = n; *o++ = 0x00004001u; *o++ = 0x3f000000u;
+    *o++ = 0x05000000u | OP_FTOU; *o++ = 0x00100012u; *o++ = u; *o++ = 0x0010000au; *o++ = u;
+    *o++ = 0x07000000u | OP_ISHL; *o++ = 0x00100012u; *o++ = u; *o++ = 0x00004001u; *o++ = 1;
+    *o++ = 0x0010000au; *o++ = u;
+    *o++ = 0x06000000u | OP_IADD; *o++ = 0x0000f001u; *o++ = 0x0010000au; *o++ = u; *o++ = 0x00004001u;
+    *o++ = 0xffffffffu;
+    return o;
+}
+
+/* troca o0 por rT nos operandos de uma instrucao (ja copiada); 0 = operando ilegivel/nao suportado */
+static int a2c_retarget(uint32_t *ins, size_t len, uint32_t t)
+{
+    size_t pos = 1;
+    while (ins[pos - 1] & OPTOK_EXT)                            /* tokens estendidos do opcode */
+        if (++pos > len) return 0;
+    while (pos < len) {
+        size_t k = operand_len(ins + pos, len - pos), e = pos + 1;
+        uint32_t tok = ins[pos];
+        if (!k) return 0;
+        if ((tok >> 12 & 0xff) == OPND_OUTPUT) {
+            while (ins[e - 1] & OPTOK_EXT) e++;
+            if ((tok >> 20 & 3) != 1 || (tok >> 22 & 7) != 0) return 0;   /* oN com indice relativo */
+            if (ins[e] == 0) {
+                ins[pos] = tok & ~(0xffu << 12);                /* OUTPUT -> TEMP */
+                ins[e] = t;
+            }
+        } else if ((tok >> 12 & 0xff) == OPND_OMASK) return 0;   /* ja escreve a cobertura */
+        pos += k;
+    }
+    return 1;
+}
+
+/* devolve um container novo (malloc) do PS com a cobertura calculada (sem dithering), ou NULL se nao der */
+uint8_t *fm6_shader_a2c(const void *code, size_t size, unsigned samples, size_t *out_size)
+{
+    const uint8_t *d = code;
+    uint32_t total, nchunks, i, shex = 0, osgn = 0, csize, gsize, ndw, ncount = 0, t = 0, o0mask = 0;
+    const uint32_t *src;
+    uint32_t *dst, *o;
+    size_t pos, nret = 0, o0decl = 0, tempsdecl = 0;
+    int in_main = 1;
+    uint8_t *out;
+    if (!d || size < 0x20 || memcmp(d, "DXBC", 4) || samples < 2 || samples > 16) return NULL;
+    memcpy(&total, d + 0x18, 4);
+    memcpy(&nchunks, d + 0x1c, 4);
+    if (total != size || nchunks > 64 || 0x20 + nchunks * 4 > size) return NULL;
+    for (i = 0; i < nchunks; i++) {
+        uint32_t off;
+        memcpy(&off, d + 0x20 + i * 4, 4);
+        if (off + 8 > size) return NULL;
+        if (!memcmp(d + off, "SHEX", 4) || !memcmp(d + off, "SHDR", 4)) shex = off;
+        else if (!memcmp(d + off, "OSGN", 4)) osgn = off;
+    }
+    if (!shex || !osgn) return NULL;
+    memcpy(&csize, d + shex + 4, 4);
+    memcpy(&gsize, d + osgn + 4, 4);
+    if (shex + 8 + (size_t)csize > size || csize < 8 || osgn + 8 + (size_t)gsize > size || gsize < 8 || (gsize & 3))
+        return NULL;
+    src = (const uint32_t *)(d + shex + 8);
+    ndw = src[1];
+    if ((size_t)ndw * 4 != csize || (src[0] >> 16) != 0 || (src[0] >> 4 & 0xf) < 5) return NULL;   /* ps_5_x */
+    {   /* OSGN: alvo no registrador 0 e nenhum SV_Coverage */
+        const uint8_t *g = d + osgn + 8;
+        uint32_t k, have0 = 0;
+        memcpy(&ncount, g, 4);
+        if (ncount > 16 || 8 + ncount * 24 > gsize) return NULL;
+        for (k = 0; k < ncount; k++) {
+            uint32_t no, reg;
+            memcpy(&no, g + 8 + k * 24, 4);
+            memcpy(&reg, g + 8 + k * 24 + 16, 4);
+            if (no >= gsize) return NULL;
+            if (!strncmp((const char *)g + no, "SV_Coverage", gsize - no)) return NULL;
+            if (reg == 0) have0 = 1;
+        }
+        if (!have0) return NULL;
+    }
+    for (pos = 2; pos < ndw; ) {    /* 1a passada: declaracoes e rets */
+        unsigned op = src[pos] & 0x7ff;
+        size_t len = op == OP_CUSTOMDATA ? (pos + 1 < ndw ? src[pos + 1] : 0) : src[pos] >> 24 & 0x7f;
+        if (!len || pos + len > ndw || op > OP_LAST_PC || op == OP_IFACE_CALL || (op >= 0x90 && op <= 0x92))
+            return NULL;
+        if (op == OP_DCL_TEMPS && len == 2) { tempsdecl = pos; t = src[pos + 1]; }
+        else if (op == OP_DCL_OUTPUT && len >= 3 && (src[pos + 1] >> 12 & 0xff) == OPND_OUTPUT && src[pos + 2] == 0) {
+            o0decl = pos;
+            o0mask = src[pos + 1] >> 4 & 0xf;
+        } else if (op == OP_DCL_OUTPUT && (src[pos + 1] >> 12 & 0xff) == OPND_OMASK) return NULL;
+        else if (op == OP_LABEL) in_main = 0;
+        else if (in_main && (op == OP_RET || op == OP_RETC)) nret++;
+        pos += len;
+    }
+    if (!o0decl || !(o0mask & 8) || !nret) return NULL;
+    out = malloc(size + 40 + (4 + nret * A2C_EPILOGUE) * 4);
+    if (!out) return NULL;
+    memcpy(out, d, shex + 8);
+    dst = (uint32_t *)(out + shex + 8);
+    dst[0] = src[0];
+    o = dst + 2;
+    in_main = 1;
+    for (pos = 2; pos < ndw; ) {    /* 2a passada: corpo reescrito */
+        unsigned op = src[pos] & 0x7ff;
+        size_t len = op == OP_CUSTOMDATA ? src[pos + 1] : src[pos] >> 24 & 0x7f;
+        if (op == OP_LABEL) in_main = 0;
+        if (in_main && (op == OP_RET || op == OP_RETC)) o = a2c_epilogue(o, o0mask, t, t + 1, samples);
+        memcpy(o, src + pos, len * 4);
+        if (pos == tempsdecl) o[1] = t + 2;
+        else if (op != OP_CUSTOMDATA && !is_decl(op) && !a2c_retarget(o, len, t)) {
+            free(out);
+            return NULL;
+        }
+        o += len;
+        if (pos == o0decl) {        /* dcl_output oMask (+ dcl_temps 2 se o shader nao tinha temporarios) */
+            *o++ = 0x02000000u | OP_DCL_OUTPUT; *o++ = 0x0000f000u;
+            if (!tempsdecl) { *o++ = 0x02000000u | OP_DCL_TEMPS; *o++ = 2; }
+        }
+        pos += len;
+    }
+    {
+        uint32_t nd = (uint32_t)(o - dst), c2 = nd * 4, k, n1 = ncount + 1, el, no, v;
+        size_t at = shex + 8 + c2, rest = size - (shex + 8 + csize), gat;
+        int32_t dshex = (int32_t)c2 - (int32_t)csize, dosgn = 36;
+        const uint8_t *og = d + osgn + 8;
+        uint8_t *g;
+        dst[1] = nd;
+        memcpy(out + shex + 4, &c2, 4);
+        memcpy(out + at, d + shex + 8 + csize, rest);            /* chunks depois do SHEX */
+        /* OSGN reconstruido no lugar: +1 elemento (24 bytes) e o nome "SV_Coverage" (12) */
+        gat = osgn > shex ? osgn + dshex : osgn;
+        g = out + gat + 8;
+        memmove(g + gsize + dosgn, g + gsize, (at + rest) - (gat + 8 + gsize));
+        memcpy(g, &n1, 4);
+        memcpy(g + 4, og + 4, 4);
+        for (k = 0; k < ncount; k++) {
+            memcpy(g + 8 + k * 24, og + 8 + k * 24, 24);
+            memcpy(&no, g + 8 + k * 24, 4);
+            no += 24;
+            memcpy(g + 8 + k * 24, &no, 4);
+        }
+        el = 8 + ncount * 24;
+        memcpy(g + el + 24, og + el, gsize - el);                /* nomes */
+        no = gsize + 24;
+        memcpy(g + el, &no, 4);
+        memset(g + el + 4, 0, 8);                                /* indice 0, system value 0 */
+        v = 1; memcpy(g + el + 12, &v, 4);                       /* uint */
+        v = 0xffffffffu; memcpy(g + el + 16, &v, 4);             /* sem registrador */
+        g[el + 20] = 1; g[el + 21] = 0xe; g[el + 22] = 0; g[el + 23] = 0;
+        memcpy(g + no, "SV_Coverage", 11);
+        g[no + 11] = 0;
+        v = gsize + (uint32_t)dosgn;
+        memcpy(out + gat + 4, &v, 4);
+        total = (uint32_t)((int32_t)size + dshex + dosgn);
+        for (i = 0; i < nchunks; i++) {
+            uint32_t off;
+            memcpy(&off, out + 0x20 + i * 4, 4);
+            if (off > shex) off += dshex;
+            if (off > gat) off += dosgn;
+            memcpy(out + 0x20 + i * 4, &off, 4);
+        }
+        memcpy(out + 0x18, &total, 4);
+        dxbc_checksum(out, total, out + 4);
+        *out_size = total;
+    }
+    return out;
+}
