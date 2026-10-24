@@ -3420,41 +3420,6 @@ static FARPROC hook_resolver(const uint8_t *entry)
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 
 /* ------------------------------------------------------------------------ */
-/* Tabelas de samplers: o fim do bloco recebe o sampler nulo do Azimuth        */
-/* ------------------------------------------------------------------------ */
-/* Por draw o Azimuth monta a tabela de samplers do estagio (0x140127740): n = maior sampler que o shader declara + 1,
- * slots sem sampler -> o sampler nulo do device (+0x6958, criado em 0x140141c0a com o desc padrao do D3D11) e pede um
- * bloco do heap de 2048 (0x14010ec50(alocador = device+0x2420, out, chave, handles, n, cerca, fixar)): blocos de
- * 4/8/16 (tabela 0x1402afce0) reaproveitados pela chave, e so os n primeiros slots sao copiados. O shader do
- * lensflare_lenstexture (sujeira da lente, FM5 e FM6) le o slot 3 (bindPoint do RDEF) de um bloco escrito com 3 ->
- * descritor nunca escrito na GPU (lixo; LOD solto le os mips pequenos, cuja borda de baixo tem lixo: a linha do
- * flare do sol). Aqui o bloco e completado ate o tamanho da classe com o sampler nulo (padrao do D3D11). */
-#define RVA_SAMPLER_BLOCK   0x10ec50   /* (alocador, out, chave, handles, n, cerca, fixar) */
-#define RVA_SAMPLER_CLASSES 0x2afce0   /* {tamanho, primeiro, quantidade} x 3 */
-#define SAMPLER_NULL_FROM_ALLOC 0x4538 /* device+0x6958 - (device+0x2420) */
-typedef void *(*sampler_block_fn)(uint8_t *alloc, void *out, void *key, const uint64_t *handles, UINT n,
-                                  uint64_t fence, uint8_t pin);
-static sampler_block_fn orig_sampler_block;
-volatile LONG sampler_blocks_padded;
-
-static void *hook_sampler_block(uint8_t *alloc, void *out, void *key, const uint64_t *handles, UINT n,
-                                uint64_t fence, uint8_t pin)
-{
-    const uint32_t *cls = (const uint32_t *)(g_base + RVA_SAMPLER_CLASSES);
-    uint64_t padded[16], null_h = *(uint64_t *)(alloc + SAMPLER_NULL_FROM_ALLOC);
-    UINT size = 0, i;
-    for (i = 0; i < 3; i++)
-        if (cls[i * 3] >= n) { size = cls[i * 3]; break; }
-    if (n && handles && null_h && size > n && size <= 16) {
-        LONG k = InterlockedIncrement(&sampler_blocks_padded);
-        for (i = 0; i < size; i++) padded[i] = i < n ? handles[i] : null_h;
-        if (k <= 4) wlog("d3d: sampler table block %u -> %u slots (tail = Azimuth's null sampler)", n, size);
-        return orig_sampler_block(alloc, out, key, padded, size, fence, pin);
-    }
-    return orig_sampler_block(alloc, out, key, handles, n, fence, pin);
-}
-
-/* ------------------------------------------------------------------------ */
 /* Diagnostico: draws pulados (0x14012b780) e busca de pipeline (0x1401338e0)   */
 /* ------------------------------------------------------------------------ */
 #define RVA_DRAW_SKIP   0x12b780   /* draw descartado: 0x14012a6d0 nao achou pipeline */
@@ -3504,10 +3469,6 @@ int d3d_install(void)
                        (void **)&orig_pso_lookup)) return 0;
     if (!hook_function(RVA_RELEASE, RELEASE_HEX, RELEASE_STOLEN, (void *)pd_release_hook,
                        (void **)&orig_release)) return 0;
-    if (!bytes_match(g_base + RVA_SAMPLER_CLASSES, "04000000000000004000000008000000400000008000000010000000c0000000"
-                     "30000000", 36)) { wlog("d3d: sampler table classes do not match"); return 0; }
-    if (!hook_function(RVA_SAMPLER_BLOCK, "40555356574154415541564157488d6c24f94881eca8000000", 25,
-                       (void *)hook_sampler_block, (void **)&orig_sampler_block)) return 0;
     return hook_function(RVA_RESOLVER, "48895c2410488974241848897c2420", RESOLVER_STOLEN,
                          (void *)hook_resolver, (void **)&orig_resolver);
 }

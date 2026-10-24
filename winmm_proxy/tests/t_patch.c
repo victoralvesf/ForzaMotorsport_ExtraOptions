@@ -968,103 +968,6 @@ TEST(xg_desc_layout_converted)
     CHECK_EQ(xg_seen_desc[12], 112);
 }
 
-/* XG do FM5: elementos dos mips > 0 de BC = mip 0 >> mip (960x540 BC7: 120x67 no mip 1) -> arredondados p/ cima */
-static uint8_t *xg_bc_self;
-static void *xg_bc_obj_orig_out;
-static void xg_bc_fake_orig(void *out, const char *name, uint32_t *desc)
-{
-    (void)name; (void)desc;
-    *(void **)out = xg_bc_obj_orig_out;
-}
-static void xg_bc_fill(uint8_t *self, uint32_t mips, const uint32_t (*we)[2])
-{
-    uint32_t i;
-    memset(self, 0, 0x6200);
-    *(void **)self = xg_fake_vtbl;
-    *(uint32_t *)(self + 0x54c8) = mips;
-    for (i = 0; i < mips; i++) {
-        *(uint32_t *)(self + 0x5528 + i * 0x48) = we[i][0];
-        *(uint32_t *)(self + 0x552c + i * 0x48) = we[i][1];
-    }
-}
-
-TEST(xg_fm5_bc_mip_elements_rounded_up)
-{
-    /* o que o xg_x.dll do FM5 devolve p/ 960x540 BC7_UNORM_SRGB com 10 mips (tools\xg_layout_probe.c) */
-    static const uint32_t xg[10][2] = { {240, 135}, {120, 67}, {60, 33}, {30, 16}, {15, 8}, {7, 4}, {3, 2}, {1, 1},
-                                        {1, 1}, {1, 1} };
-    static const uint32_t want[10][2] = { {240, 135}, {120, 68}, {60, 34}, {30, 17}, {15, 9}, {8, 4}, {4, 2}, {2, 1},
-                                          {1, 1}, {1, 1} };
-    uint32_t d2[16] = { 960, 540, 10, 1, 99, 1, 0, 0, 8, 0, 0, 14, 0, 0 }, i;
-    void *out = NULL;
-    if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
-    xg_bc_fill(xg_bc_self, 10, xg);
-    CHECK_EQ(xg_fix_bc_mips(xg_bc_self, d2), 7);
-    for (i = 0; i < 10; i++) {
-        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + i * 0x48), want[i][0]);
-        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + i * 0x48), want[i][1]);
-    }
-    /* 970 de largura: a coluna tambem (mip 1 121 -> 122) */
-    {
-        static const uint32_t xw[3][2] = { {243, 135}, {121, 67}, {60, 33} };
-        uint32_t dw[16] = { 970, 540, 3, 1, 71 };
-        xg_bc_fill(xg_bc_self, 3, xw);
-        CHECK_EQ(xg_fix_bc_mips(xg_bc_self, dw), 4);
-        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 0x48), 122);
-        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);
-        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 2 * 0x48), 61);
-        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 2 * 0x48), 34);
-    }
-    /* nao BC (R8G8B8A8 = 28): nada muda */
-    {
-        static const uint32_t xr[2][2] = { {970, 541}, {485, 270} };
-        uint32_t dr[16] = { 970, 541, 2, 1, 28 };
-        xg_bc_fill(xg_bc_self, 2, xr);
-        CHECK_EQ(xg_fix_bc_mips(xg_bc_self, dr), 0);
-        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 270);
-    }
-    /* mip 0 diferente do esperado: nao mexe */
-    xg_bc_fill(xg_bc_self, 10, xg);
-    *(uint32_t *)(xg_bc_self + 0x552c) = 136;
-    CHECK_EQ(xg_fix_bc_mips(xg_bc_self, d2), 0);
-    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 67);
-    /* pelo hook do XGCreateTexture2DComputer no FM5 */
-    fake_azimuth(1);
-    xg_bc_fill(xg_bc_self, 10, xg);
-    xg_bc_obj_orig_out = xg_bc_self;
-    orig_xg_computer = xg_bc_fake_orig;
-    hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
-    CHECK(out == xg_bc_self);
-    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);
-    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 5 * 0x48), 8);
-    *(void **)xg_bc_self = xg_fake_vtbl;
-}
-
-/* borda dos mips BC: elementos alem de (mip 0) >> mip repetem o ultimo de dentro (destino linear) */
-TEST(xg_clamp_tail_repeats_last_block_row_and_column)
-{
-    static uint8_t self[0x6200];
-    uint32_t dst[4 * 3], i, x, y;
-    memset(self, 0, sizeof self);
-    *(uint32_t *)(self + 0x54c8) = 2;                        /* mips */
-    *(uint32_t *)(self + 0x54f0) = 4;                        /* bytes por elemento (fingido) */
-    *(uint32_t *)(self + 0x5528) = 5; *(uint32_t *)(self + 0x552c) = 5;              /* mip 0: 5x5 */
-    *(uint32_t *)(self + 0x5528 + 0x48) = 3; *(uint32_t *)(self + 0x552c + 0x48) = 3; /* mip 1: 3x3 (5 >> 1 = 2) */
-    for (i = 0; i < 12; i++) dst[i] = 100 + i;               /* pitch de 4 elementos */
-    xg_clamp_tail(self, (uint8_t *)dst, 0, 1, 16, 48);
-    /* linhas 0..1 e colunas 0..1 ficam; coluna 2 = coluna 1; linha 2 = linha 1 */
-    CHECK(dst[0] == 100 && dst[1] == 101 && dst[2] == 101);
-    CHECK(dst[4] == 104 && dst[5] == 105 && dst[6] == 105);
-    CHECK(dst[8] == 104 && dst[9] == 105 && dst[10] == 105);
-    CHECK(dst[3] == 103 && dst[7] == 107 && dst[11] == 111);  /* fora da largura: intocado */
-    /* mip 0 e mip ja coberto (6x6 -> 3x3): nada muda */
-    for (i = 0; i < 12; i++) dst[i] = 100 + i;
-    xg_clamp_tail(self, (uint8_t *)dst, 0, 0, 16, 48);
-    *(uint32_t *)(self + 0x5528) = 6; *(uint32_t *)(self + 0x552c) = 6;
-    xg_clamp_tail(self, (uint8_t *)dst, 0, 1, 16, 48);
-    for (y = 0; y < 3; y++) for (x = 0; x < 4; x++) CHECK_EQ(dst[y * 4 + x], 100 + y * 4 + x);
-}
-
 /* FM6: vtable de 12 slots (3/4 = getters novos) -> 8 slots do FH2; desc sem conversao */
 static uint8_t xg_get54b8[] = { 0x48, 0x8b, 0x81, 0xb8, 0x54, 0x00, 0x00, 0xc3 };
 static uint8_t xg_get54c0[] = { 0x48, 0x8b, 0x81, 0xc0, 0x54, 0x00, 0x00, 0xc3 };
@@ -1095,10 +998,8 @@ TEST(xg_fm6_computer_remapped)
     hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
     CHECK_EQ(xg_seen_desc[12], 112);             /* desc do Azimuth repassado como esta */
     CHECK(*(void **)xg_fm6_fake_obj == (void *)xg_fm6_new);
-    for (i = 0; i < 8; i++) if (i != 6) CHECK(xg_fm6_new[i] == xg_fm6_fake_vtbl[fh2_to_fm6[i]]);
-    /* CopyFromSubresource do FM6 (slot 9) embrulhado: + borda dos mips BC */
-    CHECK(xg_fm6_new[6] == (void *)xg_fm6_copy_from_subresource);
-    CHECK(xg_fm6_copy_from == (xg_copy_from_fn)(uintptr_t)0x2009);
+    for (i = 0; i < 8; i++) CHECK(xg_fm6_new[i] == xg_fm6_fake_vtbl[fh2_to_fm6[i]]);
+    CHECK(xg_fm6_new[6] == (void *)(uintptr_t)0x2009);   /* CopyFromSubresource */
     /* 2o computer: mesma vtable nova */
     *(void **)xg_fm6_fake_obj = xg_fm6_fake_vtbl;
     hook_xg_computer(&out, "XGCreateTexture3DComputer", d2);
@@ -1176,8 +1077,7 @@ TEST(install_on_real_azimuth)
     /* hooks de d3d/winrt/shape: todos instalados (log "hook %#x instalado") */
     CHECK(log_has("hook 0x12b780 installed") && log_has("hook 0x1338e0 installed") && log_has("hook 0x3a290 installed"));
     CHECK(log_has("hook 0xda9e0 installed") && log_has("hook 0x9a680 installed") && log_has("hook 0x208790 installed"));
-    CHECK(log_has("hook 0x203b60 installed"));
-    CHECK(log_has("hook 0x10ec50 installed"));                  /* bloco da tabela de samplers completado */                  /* despacho de tabela (GameChat do FM6) */
+    CHECK(log_has("hook 0x203b60 installed"));                  /* despacho de tabela (GameChat do FM6) */
     /* LocalSpaceStatics slot 8 (GetForMachineAsync): stub fatal 0x189bd0 -> proxy (winrt_fm5.c) */
     CHECK(*(uint8_t **)(az + 0x2b6628) != az + 0x189bd0 && log_has("patch 0x2b6628: LocalSpaceStatics"));
     /* D3D12CreateDevice (debug12_fm5.c): o call [rip] em 0x567df passa a ler um ponteiro nosso, nao a IAT 0x26f868
