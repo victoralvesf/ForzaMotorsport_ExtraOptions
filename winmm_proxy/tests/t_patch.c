@@ -1167,6 +1167,35 @@ TEST(xg_fm5_bc_tail_zeroed)
     free(mem);
 }
 
+/* XGCreateTexture2DComputer do xg_x.dll do FM5 enganchado: todo computer (tambem os da thread do learn_later) sai
+   com as contagens arredondadas */
+static long xg_fake_create(const uint32_t *desc, void **computer)
+{
+    (void)desc;
+    *computer = xg_bc_self;
+    return 0;
+}
+
+TEST(xg_fm5_create_export_rounds_up)
+{
+    static const uint32_t xg[3][2] = { {240, 135}, {120, 67}, {60, 33} };
+    uint32_t desc[11] = { 960, 540, 3, 1, 99, 1, 0, 0, 8, 0, 0 };
+    void *c = NULL;
+    if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
+    xg_bc_fill(xg_bc_self, 3, xg);
+    orig_xg_create[0] = xg_fake_create;
+    CHECK_EQ(xg_create2d_fixed(desc, &c), 0);
+    CHECK(c == xg_bc_self);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 2 * 0x48), 34);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 2 * 0x48), 60);
+    /* nao BC: intacto */
+    xg_bc_fill(xg_bc_self, 3, xg);
+    desc[4] = 28;
+    CHECK_EQ(xg_create2d_fixed(desc, &c), 0);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 67);
+}
+
 /* ------------------------------------------------------------------------ */
 /* azimuth.exe real: install() (travas, allow list, hooks)                    */
 /* ------------------------------------------------------------------------ */

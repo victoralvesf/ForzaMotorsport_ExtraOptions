@@ -1483,6 +1483,66 @@ static void xg_wrap_computer_fm6(void **obj)
     if (vt == xg_fm6_vtbl) *obj = xg_fm6_new;
 }
 
+/* O Azimuth tambem cria computers fora do 0x14009fba0: o TextureComputer::learn_later (0x1400a1370) monta o mapa de
+   enderecos numa thread de trabalho com um computer novo, chamando o XG direto com o desc guardado -> contagens do
+   XG do FM5 (linha 67 fora do mapa: a linha do flare continuava). Por isso o proprio XGCreateTexture2D/3DComputer
+   do xg_x.dll do FM5 e enganchado (prologo de 16 bytes conferido) e corrige as contagens de todo computer. Os
+   enderecos vem do mapa nome -> funcao do carregador de XG do Azimuth (std::map em [0x14037cff8]+0x28, criado no
+   1o 0x14009fba0): no' [0] esq, [1] pai, [2] dir, +0x19 nulo, chave std::string em +0x20, funcao em +0x40. */
+#define RVA_XG_LOADER 0x37cff8
+typedef long (*xg_create_fn)(const uint32_t *desc, void **computer);
+static xg_create_fn orig_xg_create[2];
+
+static long xg_create_fixed(int k, const uint32_t *desc, void **computer)
+{
+    long hr = orig_xg_create[k](desc, computer);
+    if (hr >= 0 && computer && *computer && xg_fix_bc_mips(*computer, desc)) {
+        static LONG logged;
+        if (InterlockedIncrement(&logged) <= 16)
+            wlog("XG: BC %ux%u fmt %u: mip element counts rounded up in the FM5 XG", desc[0], desc[1], desc[4]);
+    }
+    return hr;
+}
+static long xg_create2d_fixed(const uint32_t *desc, void **computer) { return xg_create_fixed(0, desc, computer); }
+static long xg_create3d_fixed(const uint32_t *desc, void **computer) { return xg_create_fixed(1, desc, computer); }
+
+static void *xg_loader_find(const char *name)
+{
+    uint8_t *loader = *(uint8_t **)(g_base + RVA_XG_LOADER), *head, *stack[64], *nd;
+    int sp = 0;
+    size_t len = strlen(name);
+    if (!loader || !(head = *(uint8_t **)(loader + 0x28))) return NULL;
+    stack[sp++] = *(uint8_t **)(head + 8);
+    while (sp) {
+        nd = stack[--sp];
+        if (!nd || nd == head || nd[0x19]) continue;
+        {
+            uint64_t sz = *(uint64_t *)(nd + 0x30), cap = *(uint64_t *)(nd + 0x38);
+            const char *key = cap > 15 ? *(const char **)(nd + 0x20) : (const char *)(nd + 0x20);
+            if (sz == len && !memcmp(key, name, len)) return *(void **)(nd + 0x40);
+        }
+        if (sp < 62) { stack[sp++] = *(uint8_t **)nd; stack[sp++] = *(uint8_t **)(nd + 0x10); }
+    }
+    return NULL;
+}
+
+static void xg_hook_fm5_create(void)
+{
+    static int done;
+    static const char *const names[2] = { "XGCreateTexture2DComputer", "XGCreateTexture3DComputer" };
+    void *const hooks[2] = { (void *)xg_create2d_fixed, (void *)xg_create3d_fixed };
+    int k;
+    if (done) return;
+    done = 1;
+    for (k = 0; k < 2; k++) {
+        uint8_t *fn = xg_loader_find(names[k]);
+        if (!fn || !hook_at(fn, "48896c2410574883ec20488bfa488be9", 16, hooks[k], (void **)&orig_xg_create[k]))
+            wlog("XG: FM5 %s at %p not hooked (mip counts stay per Azimuth computer)", names[k], (void *)fn);
+        else
+            wlog("XG: FM5 %s at %p hooked (BC mip element counts rounded up)", names[k], (void *)fn);
+    }
+}
+
 static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
 {
     if (is_fm6()) {
@@ -1499,6 +1559,7 @@ static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
             desc[n + 3] = 0;
         }
         orig_xg_computer(out, name, desc);
+        xg_hook_fm5_create();   /* carregador do XG ja existe apos o 1o original */
         if (*(void ***)out) {   /* out[0] = computer */
             if (n && xg_fix_bc_mips(*(uint8_t **)out, desc)) {
                 /* o 0x14009fba0 ja copiou o XG_RESOURCE_LAYOUT do computer p/ out+0x10 (e dele que sai o mapa de
