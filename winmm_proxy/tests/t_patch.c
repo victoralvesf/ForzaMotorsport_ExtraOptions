@@ -778,6 +778,32 @@ TEST(fm6_graphics_protect_translated)
     dump_log_on_fail();
 }
 
+/* quedas de usuario 2026-10-23: a faixa fixa 0x800000000 do alocador do jogo fica segura desde o DllMain (o
+   nvcuda64.dll reservava por cima) e e solta so quando o jogo pede um endereco dentro dela */
+TEST(fixed_va_held_until_game_reserves)
+{
+    MEMORY_BASIC_INFORMATION mi;
+    log_capture();
+    fixed_va_hold();
+    if (!g_fixed_va) { test_skip("0x800000000 ocupado no processo de teste"); return; }
+    CHECK(log_has("fixed VA: 0x800000000..0xa01000000 held"));
+    CHECK(VirtualQuery((void *)0x800000000ull, &mi, sizeof mi) && mi.State == MEM_RESERVE);
+    orig_az_valloc = fake_az_valloc;
+    g_valloc_fm6 = 0;
+    /* termina exatamente na base: fora da faixa, a reserva continua */
+    CHECK(fm6_az_valloc((void *)0x7ff000000ull, 0x1000000, 0x30002000, 4) == (void *)0x7ff000000ull);
+    CHECK(fm6_az_valloc(NULL, 0x1000, 0x3000, 4) == (void *)0x1230000);
+    CHECK(g_fixed_va != NULL);
+    CHECK(fm6_az_valloc((void *)0xa00800000ull, 0x400000, 0x30002000, 0x40404) == (void *)0xa00800000ull);
+    CHECK_EQ(seen_valloc_protect, 0x40404);         /* fora do FM6 a protecao nao e traduzida */
+    CHECK(g_fixed_va == NULL);
+    CHECK(log_has("fixed VA: released (the game reserves there): 1"));
+    CHECK(VirtualQuery((void *)0x800000000ull, &mi, sizeof mi) && mi.State == MEM_FREE);
+    fixed_va_release("again");                      /* ja solta: nada */
+    CHECK(!log_has("again"));
+    dump_log_on_fail();
+}
+
 /* ------------------------------------------------------------------------ */
 /* Registro do FM5 (PASSO 4)                                                  */
 /* ------------------------------------------------------------------------ */

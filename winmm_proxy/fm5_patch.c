@@ -1189,10 +1189,38 @@ static uint32_t fm6_graphics_protect(uint32_t type, uint32_t protect)
     return (type & XBOX_MEM_GRAPHICS) && protect == XBOX_PROTECT_GPU_WC ? PAGE_READWRITE : protect;
 }
 
+/* Quedas de usuario 2026-10-23 (17_fm6.txt): com o NvPresent64 do driver NVIDIA o nvcuda64.dll entra no processo
+   junto do device D3D12 e reserva 0x200000000..0xf00000000 (VA unificado do CUDA). O alocador do FM6 (e o do FM5)
+   reserva faixas em endereco fixo a partir de 0x800000000 (game+0x2c1c18): a reserva falha, a faixa fica com
+   tamanho 0 e o pool dela (game+0x2c0c60) com 0 entradas escreve sem fim -> CRASHED em game+0x2c0cf0 logo apos o
+   "settings:". O proxy segura a faixa desde o DllMain (antes das DLLs do driver) e a solta no 1o VirtualAlloc do
+   jogo que cai nela (ou no apply_patches de outro jogo). */
+#define FIXED_VA_BASE 0x800000000ull
+#define FIXED_VA_SIZE 0x201000000ull   /* FM6: 5 faixas, 0x800000000..0xa00c00000 */
+static void *volatile g_fixed_va;
+
+static void fixed_va_hold(void)
+{
+    g_fixed_va = VirtualAlloc((void *)(uintptr_t)FIXED_VA_BASE, FIXED_VA_SIZE, MEM_RESERVE, PAGE_NOACCESS);
+    if (g_fixed_va) wlog("fixed VA: %#llx..%#llx held for the game's allocator", FIXED_VA_BASE, FIXED_VA_BASE + FIXED_VA_SIZE);
+    else wlog("fixed VA: %#llx already taken (error %lu)", FIXED_VA_BASE, GetLastError());
+}
+
+static void fixed_va_release(const char *why)
+{
+    void *p = InterlockedExchangePointer((void *volatile *)&g_fixed_va, NULL);
+    if (p) wlog("fixed VA: released (%s): %d", why, VirtualFree(p, 0, MEM_RELEASE));
+}
+
+static int g_valloc_fm6;   /* traducao da protecao 0x40404 so no FM6 */
+
 static void *fm6_az_valloc(void *addr, size_t size, uint32_t type, uint32_t protect)
 {
-    uint32_t p = fm6_graphics_protect(type, protect);
-    void *r = orig_az_valloc(addr, size, type, p);
+    uint32_t p = g_valloc_fm6 ? fm6_graphics_protect(type, protect) : protect;
+    void *r;
+    if (g_fixed_va && addr && (uintptr_t)addr < FIXED_VA_BASE + FIXED_VA_SIZE && (uintptr_t)addr + size > FIXED_VA_BASE)
+        fixed_va_release("the game reserves there");
+    r = orig_az_valloc(addr, size, type, p);
     if (p != protect) {
         static volatile LONG n;
         LONG k = InterlockedIncrement(&n);
@@ -1203,15 +1231,20 @@ static void *fm6_az_valloc(void *addr, size_t size, uint32_t type, uint32_t prot
     return r;
 }
 
-static int fm6_graphics_protect_install(void)
+static int az_valloc_install(int fm6)
 {
+    g_valloc_fm6 = fm6;
     if (!hook_function(RVA_AZ_VIRTUAL_ALLOC, "40555356574154415541564157488d6c24e1", 18, (void *)fm6_az_valloc,
                        (void **)&orig_az_valloc)) {
-        wlog("FM6: Azimuth VirtualAlloc (%#x) does not match; protection 0x40404 not translated", RVA_AZ_VIRTUAL_ALLOC);
+        wlog("Azimuth VirtualAlloc (%#x) does not match; %s", RVA_AZ_VIRTUAL_ALLOC,
+             fm6 ? "protection 0x40404 not translated" : "no hook");
+        fixed_va_release("no VirtualAlloc hook");
         return 0;
     }
     return 1;
 }
+
+static int fm6_graphics_protect_install(void) { return az_valloc_install(1); }
 
 /* opcoes do azimuth_fm6.ini */
 static void fm6_patches(uint8_t *game)
@@ -1286,6 +1319,7 @@ static void hook_apply_patches(void *image, const void *options)
     if (is_fm5()) {
         uint8_t *game = *(uint8_t **)image;
         wlog("apply_patches: FM5 at %p, FH2 sites skipped", game);
+        az_valloc_install(0);
         fm5_patches(game, options);
         return;
     }
@@ -1312,6 +1346,7 @@ static void hook_apply_patches(void *image, const void *options)
         game_tls_pending = 1;
         return;
     }
+    fixed_va_release("not FM5/FM6");
     orig_apply_patches(image, options);
 }
 
@@ -1556,7 +1591,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             wlog("process is not azimuth.exe, forwarding only");
             return TRUE;
         }
-        if (!install()) {
+        if (install()) fixed_va_hold();
+        else {
             wlog("NOTHING WAS CHANGED");
             MessageBoxW(NULL, L"azimuth.exe is not the expected version; the mod's patches were not applied.\n"
                               L"See azimuth_motorsport.log.", L"winmm FM5", MB_ICONWARNING);
