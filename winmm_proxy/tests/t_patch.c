@@ -1104,55 +1104,6 @@ TEST(xg_fm5_bc_mip_elements_rounded_up)
     fake_azimuth(1);
 }
 
-/* borda dos mips BC: elementos alem de (mip 0) >> mip repetem o ultimo de dentro (destino linear) */
-TEST(xg_clamp_tail_repeats_last_block_row_and_column)
-{
-    static uint8_t self[0x6200];
-    uint32_t dst[4 * 3], i, x, y;
-    memset(self, 0, sizeof self);
-    *(uint32_t *)(self + 0x54c8) = 2;                        /* mips */
-    *(uint32_t *)(self + 0x54f0) = 4;                        /* bytes por elemento (fingido) */
-    *(uint32_t *)(self + 0x5528) = 5; *(uint32_t *)(self + 0x552c) = 5;              /* mip 0: 5x5 */
-    *(uint32_t *)(self + 0x5528 + 0x48) = 3; *(uint32_t *)(self + 0x552c + 0x48) = 3; /* mip 1: 3x3 (5 >> 1 = 2) */
-    for (i = 0; i < 12; i++) dst[i] = 100 + i;               /* pitch de 4 elementos */
-    CHECK_EQ(xg_clamp_tail(self, (uint8_t *)dst, 0, 1, 16, 48), 2);
-    /* linhas 0..1 e colunas 0..1 ficam; coluna 2 = coluna 1; linha 2 = linha 1 */
-    CHECK(dst[0] == 100 && dst[1] == 101 && dst[2] == 101);
-    CHECK(dst[4] == 104 && dst[5] == 105 && dst[6] == 105);
-    CHECK(dst[8] == 104 && dst[9] == 105 && dst[10] == 105);
-    CHECK(dst[3] == 103 && dst[7] == 107 && dst[11] == 111);  /* fora da largura: intocado */
-    /* mip 0 e mip ja coberto (6x6 -> 3x3): nada muda */
-    for (i = 0; i < 12; i++) dst[i] = 100 + i;
-    CHECK_EQ(xg_clamp_tail(self, (uint8_t *)dst, 0, 0, 16, 48), 0);
-    *(uint32_t *)(self + 0x5528) = 6; *(uint32_t *)(self + 0x552c) = 6;
-    CHECK_EQ(xg_clamp_tail(self, (uint8_t *)dst, 0, 1, 16, 48), 0);
-    for (y = 0; y < 3; y++) for (x = 0; x < 4; x++) CHECK_EQ(dst[y * 4 + x], 100 + y * 4 + x);
-}
-
-/* CopyFromSubresource do FM5 num mip 1 com a linha de blocos a mais: a ultima linha repete a de cima */
-TEST(xg_copy_from_subresource_clamps_bc_mip_tail)
-{
-    static uint8_t self[0x6200];
-    uint32_t src[64], dst[16], i;
-    memset(self, 0, sizeof self);
-    xg_fm5_vtbl = (void *const *)xg_fake_vtbl;
-    xg_fake_vtbl[4] = (void *)xg_fake_texel;                 /* transposto, 4x4 */
-    *(uint32_t *)(self + 0x54c8) = 2;
-    *(uint32_t *)(self + 0x54f0) = 4;
-    *(uint32_t *)(self + 0x5528) = 4; *(uint32_t *)(self + 0x552c) = 7;              /* mip 0: 4x7 */
-    *(uint32_t *)(self + 0x5528 + 0x48) = 2; *(uint32_t *)(self + 0x552c + 0x48) = 4; /* mip 1: 2x4 (7 >> 1 = 3) */
-    for (i = 0; i < 64; i++) src[i] = 1000 + i;
-    memset(dst, 0xff, sizeof dst);
-    CHECK_EQ(xg_copy_from_subresource(self, (uint8_t *)dst, 0, 1, (const uint8_t *)src, 8, 32), 0);
-    for (i = 0; i < 3; i++) {                               /* linhas 0..2: (x,y) -> src[x * 4 + y] */
-        CHECK_EQ(dst[i * 2], 1000 + i);
-        CHECK_EQ(dst[i * 2 + 1], 1004 + i);
-    }
-    CHECK_EQ(dst[6], 1002);                                  /* linha 3 = linha 2 */
-    CHECK_EQ(dst[7], 1006);
-    CHECK_EQ(dst[8], 0xffffffff);                            /* nao escreve alem */
-}
-
 /* ------------------------------------------------------------------------ */
 /* azimuth.exe real: install() (travas, allow list, hooks)                    */
 /* ------------------------------------------------------------------------ */
