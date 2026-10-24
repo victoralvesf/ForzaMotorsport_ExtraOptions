@@ -1,8 +1,8 @@
 /*
- * Testes de gpuguard_fm6.c: deteccao do veneno 0xdeadbeef em enderecos de GPU, bitmap de slots gravados por heap
+ * Testes de common/gpuguard.c: deteccao do veneno 0xdeadbeef em enderecos de GPU, bitmap de slots gravados por heap
  * de descritores, tamanho das tabelas da root signature e root signature atual por command list.
  */
-#include "../gpuguard_fm6.c"
+#include "../common/gpuguard.c"
 #include "test.h"
 
 TEST(gpuguard_va_poisoned)
@@ -652,7 +652,7 @@ TEST(gpuguard_null_uavs_without_trace)
 
 /* tabelas por lista: tirar uma lista nao quebra a cadeia das que colidiram com ela; tabela nao enche com listas
    criadas e destruidas (PASSO 33: o fps caia ate travar) */
-/* fronteira de gravadoras na lista unificada (cmdrec_fm6.c): estado por lista de lista recem aberta */
+/* fronteira de gravadoras na lista unificada (common/cmdrec.c): estado por lista de lista recem aberta */
 TEST(gpuguard_list_restart)
 {
     static int cl, rs, crs, pso, pso2;
@@ -830,20 +830,20 @@ TEST(gpuguard_odd_args)
 TEST(gpuguard_ours)
 {
     uint8_t *fake_az = VirtualAlloc(NULL, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);   /* fora do tests.exe */
-    uint8_t *saved = g_base, *saved_game = g_fm6_game;
+    uint8_t *saved = g_base, *saved_game = g_trace_game;
     const void *k32 = (const void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "Sleep");
-    g_base = NULL; g_fm6_game = NULL;
+    g_base = NULL; g_trace_game = NULL;
     CHECK(gg_ours((const void *)gg_ours));                    /* o proprio proxy (aqui: tests.exe) */
     CHECK(!gg_ours(k32));                                     /* outro modulo (overlay, d3d11on12) */
     CHECK(!gg_ours(fake_az + 0x10));
     g_base = fake_az;                                         /* sem cabecalho PE: 16 MB a partir da base */
     CHECK(gg_ours(fake_az + 0x10));
     CHECK(!gg_ours(k32));
-    g_base = NULL; g_fm6_game = fake_az;
+    g_base = NULL; g_trace_game = fake_az;
     CHECK(gg_ours(fake_az + 0x7fffff0));
     CHECK(!gg_ours(fake_az + 0x8000000));
     CHECK(!gg_ours(NULL));
-    g_base = saved; g_fm6_game = saved_game;
+    g_base = saved; g_trace_game = saved_game;
     VirtualFree(fake_az, 0, MEM_RELEASE);
 }
 

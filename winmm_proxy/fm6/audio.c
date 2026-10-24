@@ -8,15 +8,9 @@
 /* nos outros jogos os wrappers so repassam.                                                     */
 #include <windows.h>
 #include <stdint.h>
+#include "../proxy.h"
+#include "fm6.h"
 
-extern uint8_t *g_base;
-extern void wlog(const char *fmt, ...);
-extern int is_fm6(void);
-extern void write_mem(void *dst, const void *src, size_t len);
-extern int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp_out);
-extern int dbg_int(const wchar_t *key, int def);
-extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
-extern uint8_t *alloc_near(uint8_t *mod, size_t size);
 static void dump_output(const BYTE *buf, UINT32 frames, DWORD flags);
 static void dump_xma_command(const uint32_t *msg);
 
@@ -589,46 +583,6 @@ static void audio_dump_init(void)
     wlog("audio dump: AudioDump=%d s from F9 (FM6: audio_fm6_out.wav + audio_fm6_shape.bin)", dump_secs);
 }
 
-/* ---- inicio das vozes XMA (PASSO 114: clique do som de navegacao do menu do FM6) ----
-   Ao criar a voz (0x14018ed10) o Azimuth descarta da saida do FFmpeg (subquadros a pular do contexto XMA, +7
-   bits 0..2, + 4 x quadros antes do bit de inicio) x 128 amostras, como o hardware faz com a saida do decodificador.
-   Mas o FFmpeg (xma2/wmapro) ja joga fora o 1o quadro (512 amostras) de cada decodificador novo: a saida dele
-   comeca 512 amostras depois da do hardware. Com os 3 subquadros (384) que o FM6 pede em todo som, o ataque some
-   e o som comeca no meio da onda (0 -> 0.46 numa amostra = clique). Aqui: descarte = max(0, conta - 512). */
-#define RVA_XMA_DISCARD 0x18f28c   /* lea ecx,[rax+r12*4]; shl ecx,7; mov [r14+0x30],ecx */
-#define RVA_XMA_DISCARD_BACK 0x18f297
-
-int xma_start_patch(int on)
-{
-    static const uint8_t body[] = {
-        0x42, 0x8d, 0x0c, 0xa0,                 /* lea ecx, [rax+r12*4] */
-        0xc1, 0xe1, 0x07,                       /* shl ecx, 7 */
-        0x81, 0xe9, 0x00, 0x02, 0x00, 0x00,     /* sub ecx, 512 (1o quadro que o FFmpeg ja descartou) */
-        0x7d, 0x02,                             /* jge +2 */
-        0x31, 0xc9,                             /* xor ecx, ecx */
-        0x41, 0x89, 0x4e, 0x30,                 /* mov [r14+0x30], ecx */
-        0xff, 0x25, 0x00, 0x00, 0x00, 0x00,     /* jmp [rip] -> volta */
-    };
-    uint8_t *at = g_base + RVA_XMA_DISCARD, *stub, *back = g_base + RVA_XMA_DISCARD_BACK;
-    uint8_t jmp[11] = { 0xe9, 0, 0, 0, 0, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90 };
-    int32_t rel;
-    if (!on) return 0;
-    if (!bytes_match(at - 8, "410fb6450783e007" "428d0ca0c1e10741894e30" "41816508000000fc", 27)) {
-        wlog("audio: XMA voice start (azimuth+%#x) does not match, start discard unchanged", RVA_XMA_DISCARD);
-        return 0;
-    }
-    if (!(stub = alloc_near(g_base, 64))) { wlog("audio: no memory near azimuth.exe for the XMA voice start"); return 0; }
-    memcpy(stub, body, sizeof body);
-    memcpy(stub + sizeof body, &back, 8);
-    FlushInstructionCache(GetCurrentProcess(), stub, 64);
-    rel = (int32_t)(stub - (at + 5));
-    memcpy(jmp + 1, &rel, 4);
-    write_mem(at, jmp, sizeof jmp);
-    FlushInstructionCache(GetCurrentProcess(), at, sizeof jmp);
-    wlog("audio: XMA voices start 512 samples earlier (FFmpeg already drops the first frame)");
-    return 1;
-}
-
 void audio_fm6_game_hooks(uint8_t *game)
 {
     int ok = hook_at(game + FM6_SOUND_INIT, "4489442418895424105556574154", 14, (void *)fm6_sound_init,
@@ -664,4 +618,30 @@ int audio_fm6_install(void)
     audio_dump_init();
     wlog("audio: FmodAudioClient (vtable %#x) with FM6 diagnostics", RVA_FMOD_CLIENT_VT);
     return 1;
+}
+
+/* ---- SHAPE (common/shape.c) com o FM6 carregado ---- */
+/* diagnostico do audio do FM6 (17_fm6.txt PASSO 53): grafos chegam ao interpretador? (sem traducao) */
+static volatile LONG fm6_graphs;
+
+static void fm6_graph_log(uint8_t *graph)
+{
+    uint64_t *b = *(uint64_t **)(graph + 0x48), *e = *(uint64_t **)(graph + 0x50), *p;
+    LONG n = InterlockedIncrement(&fm6_graphs);
+    if (n > 4 && (n & (n - 1))) return;
+    wlog("shape: FM6 graph #%ld (%u entries)", n, (unsigned)(e - b));
+    if (n <= 2)
+        for (p = b; p != e && p - b < 16; p++)
+            wlog("shape:   [%u] %016llx op %u", (unsigned)(p - b), (unsigned long long)*p, (unsigned)(*p & 0x1f));
+}
+
+uint64_t fm6_shape_graph(uint8_t *proc, uint8_t *graph)
+{
+    uint64_t ret;
+    fm6_graph_log(graph);
+    if (!audio_dump_active()) return shape_graph_orig(proc, graph);
+    audio_dump_graph_pre(graph);
+    ret = shape_graph_orig(proc, graph);
+    audio_dump_graph_post(proc, graph, ret);
+    return ret;
 }

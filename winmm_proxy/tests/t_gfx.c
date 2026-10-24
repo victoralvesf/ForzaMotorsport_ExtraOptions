@@ -1,8 +1,9 @@
 /*
- * Testes de gfx_fm5.c: valores que os getters com hook devolvem em cada nivel do launcher (PASSO 9).
+ * Testes de fm5/gfx.c: valores que os getters com hook devolvem em cada nivel do launcher (PASSO 9).
  * Os sites/getters no exe real sao conferidos em t_patch.c (fm5_patches_*).
  */
-#include "../gfx_fm5.c"
+#include "../fm5/gfx.c"
+#include "../fm6/gfx.c"
 #include "test.h"
 
 static int32_t fake_i4[4];
@@ -78,7 +79,7 @@ TEST(reflection_getters_per_level)
 TEST(level_names_and_defaults)
 {
     uint8_t dummy[16] = { 0 };
-    CHECK_STR(level_name(0), "low"); CHECK_STR(level_name(3), "ultra"); CHECK_STR(level_name(7), "?");
+    CHECK_STR(gfx_level_name(0), "low"); CHECK_STR(gfx_level_name(3), "ultra"); CHECK_STR(gfx_level_name(7), "?");
     /* default (1) e fora da faixa: nada e lido nem escrito */
     log_capture();
     fm5_car_detail(dummy, 1); fm5_shadows(dummy, 1); fm5_reflections(dummy, -1);

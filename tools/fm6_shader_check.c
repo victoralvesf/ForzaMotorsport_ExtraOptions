@@ -1,10 +1,10 @@
 /*
- * fm6_shader_check DIR - passa cada DXBC de DIR (ex. extraidos de um dump) pelo fm6_shader_rewrite do proxy e
+ * fm6_shader_check DIR - passa cada DXBC de DIR (ex. extraidos de um dump) pelo shader_console_rewrite do proxy e
  * confere com o d3dcompiler_47 do Windows (D3DDisassemble rejeita opcodes que o PC nao conhece, como o parser do
  * D3D12; nos opcodes do console ele LANCA excecao C++ e o processo morre, por isso o original so e conferido quando
  * o nome nao comeca com 'x' = extraido com 0x11a): original aceito?, convertido aceito?. -v grava o .asm do 1o
  * convertido. Antes de cada conversao imprime o nome (se morrer, o ultimo nome e o culpado).
- * Build: gcc -O1 -o build\fm6_shader_check.exe ..\tools\fm6_shader_check.c shader_fm6.c (de winmm_proxy)
+ * Build: gcc -O1 -o build\fm6_shader_check.exe ..\tools\fm6_shader_check.c common/shader.c (de winmm_proxy)
  */
 #include <windows.h>
 #include <stdio.h>
@@ -13,7 +13,7 @@
 #include <string.h>
 #include <stdarg.h>
 
-uint8_t *fm6_shader_rewrite(const void *code, size_t size, size_t *out_size);
+uint8_t *shader_console_rewrite(const void *code, size_t size, size_t *out_size);
 void wlog(const char *fmt, ...)
 {
     va_list ap;
@@ -63,7 +63,7 @@ int main(int argc, char **argv)
         fread(d, 1, sz, f); fclose(f);
         n++;
         if (fd.cFileName[0] != 'x') orig_ok += accepted(dis, d, sz, NULL);
-        if ((r = fm6_shader_rewrite(d, sz, &rn))) {
+        if ((r = shader_console_rewrite(d, sz, &rn))) {
             int ok;
             char asmp[MAX_PATH];
             snprintf(asmp, sizeof asmp, "%s\\%s.asm", argv[1], fd.cFileName);

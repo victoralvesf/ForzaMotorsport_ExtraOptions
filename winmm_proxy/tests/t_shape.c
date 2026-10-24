@@ -1,8 +1,9 @@
 /*
- * Testes de shape_fm5.c: traducao dos opcodes dos grafos SHAPE do XDK do FM5 e o grafo devolvido sem consumo
+ * Testes de common/shape.c: traducao dos opcodes dos grafos SHAPE do XDK do FM5 e o grafo devolvido sem consumo
  * (nao pode ser traduzido duas vezes).
  */
-#include "../shape_fm5.c"
+#include "../common/shape.c"
+#include "../fm5/shape.c"
 #include "test.h"
 
 TEST(shape_opcodes_translated)
@@ -57,7 +58,6 @@ TEST(shape_fm6_graphs_logged_not_translated)
     orig_shape_graph = fake_graph;
     fake_azimuth(2);
     log_capture();
-    fm6_graphs = 0;
     consume = 1;
     hook_shape_graph(NULL, graph);
     CHECK(log_has("FM6 graph #1 (2 entries)"));

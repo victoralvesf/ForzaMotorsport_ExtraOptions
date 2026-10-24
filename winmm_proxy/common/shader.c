@@ -4,14 +4,15 @@
  * (azimuth+0x1364c1) e o processo termina (terminate -> 0xc0000409, sem STOPPED nem .dmp do Azimuth).
  * Unica extensao vista (tools\dxbc_scan.py sobre o dump: ~7000 shaders, 1072 usos): opcode 0x11a, dst + 3 fontes
  * = max3 float (v_max3_f32 do GCN; ex. max3(|ddx.x|, |ddx.y|, |ddx.z|) seguido de max com o mesmo dos ddy).
- * fm6_shader_rewrite troca cada max3 por dois max (0x34) e refaz o container (tamanhos, offsets dos chunks, hash).
+ * shader_console_rewrite troca cada max3 por dois max (0x34) e refaz o container (tamanhos, offsets dos chunks, hash).
  */
 #include <windows.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../proxy.h"
+#include "d3d.h"
 
-void wlog(const char *fmt, ...);
 
 #define OP_MAX          0x34
 #define OP_CUSTOMDATA   0x35
@@ -211,7 +212,7 @@ static void log_unknown(unsigned op, unsigned len)
 }
 
 /* devolve um container novo (malloc) com os max3 convertidos, ou NULL se nao ha o que mudar / nao der */
-uint8_t *fm6_shader_rewrite(const void *code, size_t size, size_t *out_size)
+uint8_t *shader_console_rewrite(const void *code, size_t size, size_t *out_size)
 {
     const uint8_t *d = code;
     uint32_t total, nchunks, i, shex = 0, csize, ndw, *src, *dst, *o, *temps = NULL;
@@ -364,7 +365,7 @@ static int a2c_retarget(uint32_t *ins, size_t len, uint32_t t)
 }
 
 /* devolve um container novo (malloc) do PS com a cobertura calculada (sem dithering), ou NULL se nao der */
-uint8_t *fm6_shader_a2c(const void *code, size_t size, unsigned samples, size_t *out_size)
+uint8_t *shader_a2c(const void *code, size_t size, unsigned samples, size_t *out_size)
 {
     const uint8_t *d = code;
     uint32_t total, nchunks, i, shex = 0, osgn = 0, csize, gsize, ndw, ncount = 0, t = 0, o0mask = 0;

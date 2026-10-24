@@ -48,7 +48,7 @@ jobs:
       # o build regera os exports a partir do winmm.dll do System32 do runner
       - name: Conferir arquivos gerados
         run: |
-          git diff --quiet -- winmm_proxy/winmm_exports.def winmm_proxy/winmm_stubs.S winmm_proxy/d3d_thunks.S ||
+          git diff --quiet -- winmm_proxy/winmm_exports.def winmm_proxy/winmm_stubs.S winmm_proxy/fm5/d3d_thunks.S ||
             { echo "::warning::arquivos gerados diferem do git (exports do winmm.dll do runner)"; git diff --stat; }
 
       # o winmm.dll vai sozinho no zip: so pode importar DLLs do sistema (sem runtime do mingw)

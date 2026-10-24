@@ -3,13 +3,13 @@
  *
  * O executor do Azimuth abre uma command list (com um allocator do pool dele) para cada pedaco gravado: o fluxo do
  * contexto imediato reproduzido na 'Azimuth queue' e quebrado a cada lista diferida executada (fechar, inserir a
- * lista do diferido, abrir outra), e no FM6 cada bundle aninhado de um juntador vira uma parte (d3d_fm5.c). Para o
+ * lista do diferido, abrir outra), e no FM6 cada bundle aninhado de um juntador vira uma parte (fm6/d3d.c). Para o
  * mesmo trabalho do FH2 (~2500 draws/quadro) sao ~600 listas/quadro em ~17 ExecuteCommandLists (FH2: ~15), ~2000
  * allocators vivos e a rajada que vem antes do DEVICE_RESET do fim da 1a corrida.
  *
  * Aqui o CreateCommandList do Azimuth (0x1400dee90, retorno azimuth+0xdef70) recebe uma lista GRAVADORA do proxy:
  * um objeto com a vtable da ID3D12GraphicsCommandList2 que so copia cada chamada (e os vetores apontados) para um
- * buffer. No ExecuteCommandLists (lp_ecl, stutter_fm6.c, sob a trava da fila) cada sequencia de gravadoras vira UMA
+ * buffer. No ExecuteCommandLists (lp_ecl, common/stutter.c, sob a trava da fila) cada sequencia de gravadoras vira UMA
  * command list real: Reset com o PSO inicial da 1a, reproducao de todas em ordem com ClearState(PSO inicial da
  * seguinte) entre elas (= estado de lista recem aberta) e Close. As listas reais e os allocators delas sao do proxy
  * (anel por fila, reusados quando o fence do proxy da fila passa do envio). A gravadora nao tem memoria de GPU:
@@ -23,12 +23,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <d3d12.h>
+#include "../proxy.h"
 
-extern uint8_t *g_base;
-extern void wlog(const char *fmt, ...);
-extern int dbg_int(const wchar_t *key, int def);
-extern int is_fm6(void);
-extern int bytes_match(const uint8_t *p, const char *hex, size_t n);
 extern void gg_cl_restart(void *cl, void *pso);
 
 typedef ID3D12GraphicsCommandList2 GCL2;
@@ -717,7 +713,7 @@ static void rc_play(GCL2 *g, const rc_list *l)
     }
 }
 
-/* ---- criacao (lp_create, stutter_fm6.c) ---- */
+/* ---- criacao (lp_create, common/stutter.c) ---- */
 
 /* CreateCommandList DIRECT chamado de dentro do 0x1400dee90 do Azimuth -> gravadora */
 int rc_wants(D3D12_COMMAND_LIST_TYPE type, const void *ret)
@@ -874,7 +870,7 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
     return k;
 }
 
-/* " | gravadoras: ..." da linha "vazao 10 s" (stutter_fm6.c) */
+/* " | gravadoras: ..." da linha "vazao 10 s" (common/stutter.c) */
 int rc_format(char *buf, int cap, double frames)
 {
     double ms;
@@ -887,8 +883,8 @@ int rc_format(char *buf, int cap, double frames)
                     InterlockedExchange(&rc_cmds, 0) / frames, ms / frames, rc_live, rc_slots_total);
 }
 
-/* hook do apply_patches (fm5_patch.c), depois do pool de listas: inner = CreateCommandList por dentro (gpuguard) */
-int rc_wanted(void) { return dbg_int(L"ListMerge", is_fm6()) > 0; }
+/* hook do apply_patches (azimuth.c), depois do pool de listas: inner = CreateCommandList por dentro (gpuguard) */
+int rc_wanted(void) { return dbg_int(L"ListMerge", GAME_DEFAULT(list_merge)) > 0; }
 void rc_setup(void *inner)
 {
     rc_on = 0;

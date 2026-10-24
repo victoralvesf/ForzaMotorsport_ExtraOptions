@@ -1,4 +1,4 @@
-/* SHAPE (audio da APU): grafos do FM5 (XDK nov-2012) x interpretador do Azimuth.          */
+/* SHAPE (audio da APU): grafos do FM5 (XDK nov-2012) x interpretador do Azimuth (common/shape.c). */
 /* 0x14018fbd0(proc, graph): graph+0x48/+0x50 = vetor de u64 copiado da memoria APU        */
 /* (comando ACP tipo 1, 0x14018f710). Opcode = bits 0..4; o Azimuth so implementa 1 (mix   */
 /* buffer), 2 (SRC) e 0x10 (DMA); bits 5..7 = queued/disabled/error.                       */
@@ -9,22 +9,11 @@
 /* com o MESMO grafo quando devolve 0 (anel de DMA cheio) -> nao traduzir duas vezes.       */
 #include <windows.h>
 #include <stdint.h>
+#include "../proxy.h"
+#include "fm5.h"
 
-extern uint8_t *g_base;
-extern void wlog(const char *fmt, ...);
-extern int is_fm5(void);
-extern int is_fm6(void);
-extern int audio_dump_active(void);   /* audio_fm6.c (debug.ini AudioDump) */
-extern void audio_dump_graph_pre(uint8_t *graph);
-extern void audio_dump_graph_post(uint8_t *proc, uint8_t *graph, uint64_t ret);
-extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
-
-#define RVA_SHAPE_GRAPH 0x18fbd0
-#define SHAPE_GRAPH_STOLEN 18   /* mov rax,rsp; mov [rax+18],rbx; push rbp..r15 */
-
-typedef uint64_t (*shape_graph_fn)(uint8_t *proc, uint8_t *graph);
-static shape_graph_fn orig_shape_graph;
 static volatile LONG graphs_logged, unknown_logged;
+
 
 /* grafo ja traduzido e devolvido sem consumo (so a thread "Azimuth audio processor" chama) */
 static __thread uint8_t *pending_graph;
@@ -58,44 +47,14 @@ static void translate_graph(uint64_t *b, uint64_t *e)
     }
 }
 
-/* diagnostico do audio do FM6 (17_fm6.txt PASSO 53): grafos chegam ao interpretador? (sem traducao) */
-static volatile LONG fm6_graphs;
-
-static void fm6_graph_log(uint8_t *graph)
+uint64_t fm5_shape_graph(uint8_t *proc, uint8_t *graph)
 {
-    uint64_t *b = *(uint64_t **)(graph + 0x48), *e = *(uint64_t **)(graph + 0x50), *p;
-    LONG n = InterlockedIncrement(&fm6_graphs);
-    if (n > 4 && (n & (n - 1))) return;
-    wlog("shape: FM6 graph #%ld (%u entries)", n, (unsigned)(e - b));
-    if (n <= 2)
-        for (p = b; p != e && p - b < 16; p++)
-            wlog("shape:   [%u] %016llx op %u", (unsigned)(p - b), (unsigned long long)*p, (unsigned)(*p & 0x1f));
-}
-
-static uint64_t hook_shape_graph(uint8_t *proc, uint8_t *graph)
-{
-    uint64_t ret, *b;
-    if (is_fm6()) {
-        fm6_graph_log(graph);
-        if (!audio_dump_active()) return orig_shape_graph(proc, graph);
-        audio_dump_graph_pre(graph);
-        ret = orig_shape_graph(proc, graph);
-        audio_dump_graph_post(proc, graph, ret);
-        return ret;
-    }
-    if (!is_fm5()) return orig_shape_graph(proc, graph);
-    b = *(uint64_t **)(graph + 0x48);
+    uint64_t ret, *b = *(uint64_t **)(graph + 0x48);
     if (graph != pending_graph || b != pending_data)
         translate_graph(b, *(uint64_t **)(graph + 0x50));
-    ret = orig_shape_graph(proc, graph);
+    ret = shape_graph_orig(proc, graph);
     /* 0 = nao consumido (sera repassado igual); 1 = consumido e liberado pelo chamador */
     pending_graph = (uint8_t)ret ? NULL : graph;
     pending_data = (uint8_t)ret ? NULL : b;
     return ret;
-}
-
-int shape_install(void)
-{
-    return hook_function(RVA_SHAPE_GRAPH, "488bc448895818555657415441554156" "4157", SHAPE_GRAPH_STOLEN,
-                         (void *)hook_shape_graph, (void **)&orig_shape_graph);
 }

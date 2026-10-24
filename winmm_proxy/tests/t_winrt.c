@@ -1,8 +1,10 @@
 /*
- * Testes de winrt_fm5.c: LocalSpaceStatics::GetForMachineAsync (slot 8) sobre um Azimuth falso
+ * Testes de common/winrt.c: LocalSpaceStatics::GetForMachineAsync (slot 8) sobre um Azimuth falso
  * (as funcoes do Azimuth que ele chama viram jmps para versoes de teste).
  */
-#include "../winrt_fm5.c"
+#include "../common/winrt.c"
+#include "../fm5/winrt.c"
+#include "../fm6/winrt.c"
 #include "test.h"
 #include <stdlib.h>
 

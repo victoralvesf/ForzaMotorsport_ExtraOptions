@@ -1,7 +1,7 @@
 /*
- * Testes de livery_fm6.c: diagnostico da plotagem do FM6 (debug.ini LiveryLog; 16_opcoes_graficas.txt PASSO 12).
+ * Testes de fm6/livery.c: diagnostico da plotagem do FM6 (debug.ini LiveryLog; 16_opcoes_graficas.txt PASSO 12).
  */
-#include "../livery_fm6.c"
+#include "../fm6/livery.c"
 #include "test.h"
 
 static int hooked_to(const uint8_t *p, const void *fn)

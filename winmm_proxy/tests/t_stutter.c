@@ -1,9 +1,9 @@
 /*
- * Testes de stutter_fm6.c: regra de pico, media movel, percentil, maiores esperas de um intervalo, tamanho
+ * Testes de common/stutter.c: regra de pico, media movel, percentil, maiores esperas de um intervalo, tamanho
  * aproximado de recurso e instalacao (StutterLog no debug.ini).
  */
 #include "test.h"
-#include "../stutter_fm6.c"
+#include "../common/stutter.c"
 
 TEST(stutter_spike_rule)
 {
@@ -22,18 +22,18 @@ TEST(stutter_stall_threshold)
     CHECK(st_stall_ms(33.3) > 49.9 && st_stall_ms(33.3) < 50.0);
 }
 
-/* threads bloqueadas: so as que comecam no jogo (FM6 tem prioridade sobre o FM5) */
+/* threads bloqueadas: so as que comecam no exe do jogo carregado (g_game, FM5 ou FM6) */
 TEST(stutter_blocked_only_game_threads)
 {
     static uint8_t game[64];
-    uint8_t *old5 = g_game, *old6 = g_fm6_game;
-    g_game = NULL; g_fm6_game = NULL;
+    uint8_t *old = g_game;
+    g_game = NULL;
     CHECK(!st_in_game((uintptr_t)game));
-    g_fm6_game = game;
+    g_game = game;
     CHECK(st_in_game((uintptr_t)game + 0x10));
     CHECK(!st_in_game((uintptr_t)game - 1));
     CHECK(!st_in_game((uintptr_t)game + 0x8000000));
-    g_game = old5; g_fm6_game = old6;
+    g_game = old;
 }
 
 TEST(stutter_moving_average)
@@ -161,12 +161,12 @@ static BOOL WINAPI fake_switch(void) { return 7; }
 TEST(stutter_queue_throttle_install)
 {
     static const uint8_t call[6] = { 0xff, 0x15, 0x72, 0x5b, 0xe8, 0x00 };
-    uint8_t *az = fake_azimuth(0), *old6 = g_fm6_game;
+    uint8_t *az = fake_azimuth(0), *old6 = g_trace_game;
     uint8_t *game = VirtualAlloc(NULL, 0x1020000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     void **slot;
     REQUIRE(game);
     slot = (void **)(game + 0x101af88);
-    g_fm6_game = game;
+    g_trace_game = game;
     *slot = az + 0x1000;                                      /* dentro do azimuth.exe, mas bytes da chamada nao */
     log_capture();
     fq_install();
@@ -204,7 +204,7 @@ TEST(stutter_queue_throttle_install)
         CHECK(!log_has("owner vt"));
         fq.q = 0;
     }
-    g_fm6_game = old6;
+    g_trace_game = old6;
     VirtualFree(game, 0, MEM_RELEASE);
 }
 
@@ -692,7 +692,7 @@ TEST(stutter_list_pool_waits_gpu)
     lp_real_create = NULL;
 }
 
-/* listas unificadas (cmdrec_fm6.c) no ECL: gravadoras seguidas -> uma lista real do proxy (criada por dentro do
+/* listas unificadas (common/cmdrec.c) no ECL: gravadoras seguidas -> uma lista real do proxy (criada por dentro do
  * pool), Reset/ClearState/Close, envio + Signal do fence do proxy; sem gravadora o ECL passa direto */
 static UINT ecl_n;
 static ID3D12CommandList *ecl_l[8];
@@ -816,7 +816,7 @@ TEST(stutter_defer_release_hold)
 
 TEST(stutter_blackbox_reexec_kind)
 {
-    CHECK_EQ(CX_REEXEC, 8);                         /* d3d_fm5.c usa CX_REEXEC_KIND 8 */
+    CHECK_EQ(CX_REEXEC, 8);                         /* fm6/d3d.c usa CX_REEXEC_KIND 8 */
     CHECK(strstr(cx_names[CX_REEXEC], "re-executed") != NULL);
 }
 

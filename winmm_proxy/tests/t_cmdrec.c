@@ -1,9 +1,9 @@
 /*
- * Testes de cmdrec_fm6.c: gravadora de command list (gravar/reproduzir com os vetores copiados), uma lista real por
+ * Testes de common/cmdrec.c: gravadora de command list (gravar/reproduzir com os vetores copiados), uma lista real por
  * sequencia de gravadoras no ExecuteCommandLists (ClearState nas fronteiras, reuso pelo fence) e instalacao.
  */
 #include "test.h"
-#include "../cmdrec_fm6.c"
+#include "../common/cmdrec.c"
 
 static GCL2 *rec_new(ID3D12PipelineState *ps)
 {

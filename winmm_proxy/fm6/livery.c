@@ -8,16 +8,15 @@
  * "LivNonMSAA-%d-%d", "LivNonMSAAHighlight-%d-%d", "LivDepthStencil-%d-%d"; 0xe0080c cria "LivRenderTexture".
  * Os vinis sao desenhados no alvo MSAA, resolvidos (ResolveSubresource) e copiados para a textura da pintura.
  *
- * Janela: durante 0xe05c8c (na thread que chama) os hooks de d3d_fm5.c contam pipelines buscados/nulos, draws
+ * Janela: durante 0xe05c8c (na thread que chama) os hooks de common/d3d.c contam pipelines buscados/nulos, draws
  * descartados, resolves, dispatches e texturas criadas; no fim uma linha "livery: render ... end" com os totais.
  */
 #include <windows.h>
 #include <stdint.h>
 #include <string.h>
+#include "../proxy.h"
+#include "fm6.h"
 
-extern void wlog(const char *fmt, ...);
-extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
-extern int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 
 #define FM6_LIV_RENDER_SECTIONS 0xe05c8c   /* (mgr, lowq) */
 #define FM6_CREATE_RT           0x335ba4   /* render target do motor */

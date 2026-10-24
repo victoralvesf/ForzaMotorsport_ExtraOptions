@@ -1,10 +1,13 @@
 /*
- * Testes de d3d_fm5.c: proxy do contexto (thunks gerados + wrappers), vtable do device, Draw* empacotados,
+ * Testes de common/d3d.c, common/d3d11.c, fm5/d3d.c e fm6/d3d.c: proxy do contexto (thunks gerados + wrappers), vtable do device, Draw* empacotados,
  * IASetIndexBuffer, topologia, SetFast*, scissor/samplers guardados, ResolveSubresource, Quality do MSAA,
  * aliasing da ESRAM e private data (incl. a protecao contra double free do bytecode, cont. 22).
  * O "Azimuth" aqui e uma tabela falsa: cada slot grava (slot, argumentos) e devolve rec_ret.
  */
-#include "../d3d_fm5.c"
+#include "../common/d3d.c"
+#include "../common/d3d11.c"
+#include "../fm5/d3d.c"
+#include "../fm6/d3d.c"
 #include "test.h"
 #include <stdlib.h>
 
@@ -401,6 +404,8 @@ static const GUID guid_bytecode = { 0x0a51ffd4, 0x060b, 0x4bef, { 0xb5, 0x93, 0x
 static const GUID guid_other = { 0x11111111, 0x2222, 0x3333, { 4, 5, 6, 7, 8, 9, 10, 11 } };
 static ULONG release_result;
 static ULONG fake_release(void *obj) { (void)obj; return release_result; }
+/* Release comum do Azimuth (common/d3d.c) com o FM5: a parte do FM5 so roda quando a contagem chega a 0 */
+static void pd_release(void *obj) { if (fake_release(obj) == 0) fm5_object_released(obj, __builtin_return_address(0)); }
 
 static uint8_t *pd_game;
 static uint8_t *pd_setup(void)
@@ -453,10 +458,10 @@ TEST(private_data_interface_refcount)
     CHECK_EQ(pd_SetPrivateDataInterface(obj, &guid_other, (IUnknown *)u2), S_OK);
     CHECK_EQ(u->refs, 2); CHECK_EQ(u2->refs, 2);  /* substituido: Release no antigo */
     release_result = 1;
-    pd_release_hook(obj);                          /* ainda vivo: mantem */
+    pd_release(obj);                          /* ainda vivo: mantem */
     CHECK_EQ(u2->refs, 2);
     release_result = 0;
-    pd_release_hook(obj);                          /* morreu: descarta e solta a interface */
+    pd_release(obj);                          /* morreu: descarta e solta a interface */
     CHECK_EQ(u2->refs, 1);
     size = 8;
     CHECK_EQ((uint32_t)pd_GetPrivateData(obj, &guid_other, &size, &out), (uint32_t)DXGI_ERROR_NOT_FOUND_);
@@ -483,7 +488,7 @@ TEST(private_data_bytecode_double_free_guard)
     CHECK(out == NULL);                            /* 2a vez: double free evitado */
     CHECK(log_has("double free avoided"));
     release_result = 0;
-    pd_release_hook(obj);
+    pd_release(obj);
 }
 
 /* RVAs do FM5 usados acima conferem com o exe real */
@@ -584,7 +589,7 @@ TEST(fm6_get_proc_address_xaudio2_bridge)
 {
     gpa_base = fake_azimuth(0);
     az_GetProcAddress = fake_az_gpa;
-    CHECK(fm6_GetProcAddress(NULL, "CreateXAudio2Object") == (FARPROC)fm5_XAudio2Create);
+    CHECK(fm6_GetProcAddress(NULL, "CreateXAudio2Object") == (FARPROC)xaudio2_create_bridge);
     CHECK(fm6_GetProcAddress(NULL, "X3DAudioInitialize") == (FARPROC)(void *)0x1234);
     az_GetProcAddress = NULL;
 }
@@ -673,11 +678,11 @@ TEST(fm6_create_device_uses_azimuth_device)
                                               "ffffffff" "00000000" "28000000" "00000000" "00000400" "00000000");
         CHECK_EQ(tex[6], 2);
         {   /* GetDesc do Texture2D (FM6 slot 0xd): o jogo (resolve game+0x40b7aa) ve {2, 2}; o Azimuth, o padrao */
-            uint8_t *game = t_rwx(0x10000), *saved = g_fm6_game;
+            uint8_t *game = t_rwx(0x10000), *saved = g_game;
             UINT d[12];
             void (*getdesc)(void *, UINT *) = (void (*)(void *, UINT *))fm6_type_tab[0xc][0xd];
             CHECK(getdesc == fm6_tex2d_GetDesc);
-            g_fm6_game = game;
+            g_game = game;
             getdesc(t, d);
             CHECK_EQ(d[6], 0xffffffff);
             ((void (*)(void *, UINT *))t_call_from(game + 0x8000, (void *)getdesc))(t, d);
@@ -685,7 +690,7 @@ TEST(fm6_create_device_uses_azimuth_device)
             CHECK_EQ(d[6], 2);
             ((void (*)(void *, UINT *))t_call_from(game + 0x8000, (void *)getdesc))((void *)0x1234, d);
             CHECK_EQ(d[6], 0xffffffff);                                      /* textura desconhecida */
-            g_fm6_game = saved;
+            g_game = saved;
         }
         CHECK_EQ(((long (*)(void *, const UINT *, const void *, void **))fm6_dev_vt[5])(fm6_dev, one, NULL, &t), 0);
         CHECK_HEX((uint8_t *)create_tex_desc, "40000000" "40000000" "01000000" "01000000" "1c000000" "01000000"

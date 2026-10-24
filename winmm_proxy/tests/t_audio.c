@@ -1,8 +1,9 @@
 /*
- * Testes de audio_fm6.c: diagnostico do WASAPI do FM6 (vtable do FmodAudioClient conferido antes da troca,
+ * Testes de fm6/audio.c: diagnostico do WASAPI do FM6 (vtable do FmodAudioClient conferido antes da troca,
  * render client do jogo com contagem de quadros/amostras).
  */
-#include "../audio_fm6.c"
+#include "../fm6/audio.c"
+#include "../common/xma.c"
 #include "test.h"
 
 uint8_t *fake_azimuth(int game);

@@ -21,12 +21,22 @@ Current state (2026-10-16): launcher resolution (e.g. 1440p) OK; launcher fps (6
   vtables (context proxy with generated thunks), XG ABI, Draw* with packed arguments,
   DXGIXPresentArray, SHAPE, XAudio2, WinRT stubs, etc.
 - Always **check the original bytes** before patching; if they don't match, change nothing.
+- **Game separation**: a fix for one game goes in `fm5\` or `fm6\` (installed/applied only for that game, e.g. in its
+  `apply_patches`); `common\` and the root affect BOTH games (test both). `tools\check_isolation.py` (run by `build.sh`)
+  fails the build if `fm5\` and `fm6\` reference each other or if the root/`common\` use a game symbol other than its descriptor.
 
 ## Project layout
 - `azimuth.exe` (in the root), `data\` (Azimuth DLLs, `data\logs\azimuth.log` + `.dmp`, `data\azimuth.ini`)
-- `winmm_proxy\` — proxy source: `fm5_patch.c` (patches/record/hooks/ini), `d3d_fm5.c` (D3D11 bridge),
-  `winrt_fm5.c`, `shape_fm5.c`, `debug12_fm5.c`, `gfx_fm5.c`, `shader_fm6.c` (FM6 console DXBC opcodes); `tests\` = proxy tests; `d3d_thunks.S` and `winmm_stubs.S` are **generated**
-  (`tools\gen_d3d_thunks.py`, `tools\gen_winmm_stubs.py`).
+- `winmm_proxy\` — proxy source, split by game (rules in `proxy.h`):
+  - root: `main.c` (DllMain, log, `debug.ini`), `azimuth.c` (azimuth.exe checks/patches, allow list, hooks that dispatch
+    to the loaded game via `game_current()`), `proxy.h` (shared API + `struct game` descriptor);
+  - `common\` = generic code for both games (hooks, TLS, UI resolution/fps, D3D11 helpers, WinRT/SHAPE hooks, D3D12 layer:
+    `debug12.c`, `gpuguard.c`, `stutter.c`, `cmdrec.c`, `shader.c`); per-game behavior comes from the descriptor
+    (`game_defaults`, callbacks), never from `is_fm5()`/`is_fm6()`;
+  - `fm5\` / `fm6\` = one game only (`fm5.c`/`fm6.c` = record, apply_patches, ini, descriptor; `d3d.c`, `xg.c`, `gfx.c`,
+    `shape.c`, `winrt.c`, `audio.c`, `livery.c`), reached only through `fm5_game`/`fm6_game`;
+  - `tests\` = proxy tests; `fm5\d3d_thunks.S` and `winmm_stubs.S` are **generated**
+    (`tools\gen_d3d_thunks.py`, `tools\gen_winmm_stubs.py`).
 - `winmm.dll` (root) = installed proxy (delete it = original Azimuth).
 - `azimuth_fm5.ini` section `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`), `azimuth_fm6.ini` `[FM6]`, `debug.ini` `[Debug]` (`D3D12Debug`, `DrawSkip`, `DrawSkipHashes`;
   dev only, in git but not in the release zip) and `azimuth_motorsport.log` (proxy log).

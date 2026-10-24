@@ -1,13 +1,21 @@
 /*
- * Testes de fm5_patch.c: helpers de patch/hook, registro do FM5, XG e - com os binarios reais mapeados
- * (azimuth.exe na raiz, exe do FM5 em game_binaries) - install() e fm5_patches() completos.
+ * Testes de main.c, azimuth.c, common/{hook,tls,azimuth_mem,ui}.c, fm5/{fm5,xg}.c e fm6/fm6.c: helpers de patch/hook, registro do FM5, XG e - com os binarios reais mapeados
+ * (azimuth.exe na raiz, exe do FM5 em game_binaries) - azimuth_install() e fm5_patches() completos.
  */
-#include "../fm5_patch.c"
+#include "../main.c"
+#include "../azimuth.c"
+#include "../common/hook.c"
+#include "../common/tls.c"
+#include "../common/azimuth_mem.c"
+#include "../common/ui.c"
+#include "../fm5/fm5.c"
+#include "../fm5/xg.c"
+#include "../fm6/fm6.c"
 #include "test.h"
 
 extern int dr_on;
 #include <stdlib.h>
-extern void debug12_create_device(void);   /* debug12_fm5.c (so o endereco) */
+extern void debug12_create_device(void);   /* common/debug12.c (so o endereco) */
 
 /* ---- log / ini / g_base falso (usados pelos outros t_*.c) ---- */
 static char log_path[MAX_PATH];
@@ -173,6 +181,8 @@ TEST(apply_patches_skips_fm6)
     CHECK(slot0_game == game && slot0_n == 329 && game_tls_pending);   /* sites do slot 0 para o 1o import */
     CHECK(log_has("FM6 batch builder at game+0xda9b94 does not match"));   /* zerado: nada muda */
     CHECK(log_has("FM6: SkipIntro: site 0xa06b33 does not match, ignored"));     /* opcoes do azimuth_fm6.ini */
+    CHECK(g_game == game && g_trace_game == game);
+    CHECK(!log_has("0x14c2f0") && !log_has("XG: FM5"));                   /* nada do FM5 (envio do XG) no FM6 */
     ini6_set(NULL);
     slot0_n = 0; game_tls_pending = 0;
     *(void **)(az + RVA_GAME_RECORD) = NULL;
@@ -369,7 +379,7 @@ TEST(debug12_wine_default)
     CHECK_EQ(debug12_install(), 1);
     CHECK(memcmp(az + 0x567df + 2, call + 2, 4) != 0);       /* gancho fica (hooks do stutter) */
     CHECK(log_has("Wine/Proton -> gpuguard off"));
-    CHECK(log_has("D3D12Hooks=3 -> only the stutter_fm6.c hooks"));
+    CHECK(log_has("D3D12Hooks=3 -> only the common/stutter.c hooks"));
     memcpy(az + 0x567df, call, 6);
     log_capture();
     dbgini_set("[Debug]\nD3D12Hooks=1\n");                 /* explicito: gpuguard ligado */
@@ -763,16 +773,16 @@ TEST(fm6_graphics_protect_translated)
     CHECK_EQ(fm6_graphics_protect(0x20003000, 0x40404), 0x40404);   /* sem MEM_GRAPHICS: intocada */
     CHECK_EQ(fm6_graphics_protect(0x30003000, 0x10004), 0x10004);   /* as que o Azimuth ja traduz */
     CHECK_EQ(fm6_graphics_protect(0x30003000, 0x404), 0x404);
-    CHECK(fm6_graphics_protect_install());
+    CHECK(az_valloc_install(fm6_graphics_protect));
     CHECK_HEX(az + 0xaad30, "ff2500000000");
     orig_az_valloc = fake_az_valloc;               /* nao roda o VirtualAlloc real do Azimuth */
-    CHECK(fm6_az_valloc(NULL, 0x52000, 0x30003000, 0x40404) == (void *)0x1230000);
+    CHECK(hook_az_valloc(NULL, 0x52000, 0x30003000, 0x40404) == (void *)0x1230000);
     CHECK_EQ(seen_valloc_protect, 4);
-    CHECK(log_has("FM6: graphics VirtualAlloc #1"));
+    CHECK(log_has("graphics VirtualAlloc #1"));
     CHECK(log_has("protection 0x40404 -> 0x4"));
-    fm6_az_valloc(NULL, 0x1000, 0x3000, 0x40404);
+    hook_az_valloc(NULL, 0x1000, 0x3000, 0x40404);
     CHECK_EQ(seen_valloc_protect, 0x40404);
-    CHECK(!fm6_graphics_protect_install());       /* bytes ja trocados -> nada muda */
+    CHECK(!az_valloc_install(fm6_graphics_protect));       /* bytes ja trocados -> nada muda */
     CHECK(log_has("Azimuth VirtualAlloc (0xaad30) does not match"));
     pe_unmap(az);
     dump_log_on_fail();
@@ -789,12 +799,12 @@ TEST(fixed_va_held_until_game_reserves)
     CHECK(log_has("fixed VA: 0x800000000..0xa01000000 held"));
     CHECK(VirtualQuery((void *)0x800000000ull, &mi, sizeof mi) && mi.State == MEM_RESERVE);
     orig_az_valloc = fake_az_valloc;
-    g_valloc_fm6 = 0;
+    g_valloc_protect = NULL;
     /* termina exatamente na base: fora da faixa, a reserva continua */
-    CHECK(fm6_az_valloc((void *)0x7ff000000ull, 0x1000000, 0x30002000, 4) == (void *)0x7ff000000ull);
-    CHECK(fm6_az_valloc(NULL, 0x1000, 0x3000, 4) == (void *)0x1230000);
+    CHECK(hook_az_valloc((void *)0x7ff000000ull, 0x1000000, 0x30002000, 4) == (void *)0x7ff000000ull);
+    CHECK(hook_az_valloc(NULL, 0x1000, 0x3000, 4) == (void *)0x1230000);
     CHECK(g_fixed_va != NULL);
-    CHECK(fm6_az_valloc((void *)0xa00800000ull, 0x400000, 0x30002000, 0x40404) == (void *)0xa00800000ull);
+    CHECK(hook_az_valloc((void *)0xa00800000ull, 0x400000, 0x30002000, 0x40404) == (void *)0xa00800000ull);
     CHECK_EQ(seen_valloc_protect, 0x40404);         /* fora do FM6 a protecao nao e traduzida */
     CHECK(g_fixed_va == NULL);
     CHECK(log_has("fixed VA: released (the game reserves there): 1"));
@@ -815,7 +825,7 @@ TEST(record_layout)
     uint8_t *az = fake_azimuth(0);
     for (i = 0; i < 4; i++) *(void **)(fh2 + 0x58 + i * 0x10) = (void *)(uintptr_t)(0x1000 + i);
     *(void **)(az + RVA_ALLOW_ARRAY) = fh2;
-    build_record();
+    fm5_build_record(fm5_rec, fh2);
     CHECK(!wcscmp(*(const wchar_t **)(fm5_rec + 0x000), L"7b35d917"));
     CHECK_STR(*(const char **)(fm5_rec + 0x008), "1.0.0.20");
     for (i = 0; i < 4; i++) CHECK_EQ(*(uintptr_t *)(fm5_rec + 0x58 + i * 0x10), 0x1000 + i);   /* caminhos do FH2 */
@@ -848,7 +858,7 @@ TEST(fm6_record_layout)
     uint8_t *az = fake_azimuth(0);
     for (i = 0; i < 4; i++) *(void **)(fh2 + 0x58 + i * 0x10) = (void *)(uintptr_t)(0x1000 + i);
     *(void **)(az + RVA_ALLOW_ARRAY) = fh2;
-    build_fm6_record();
+    fm6_build_record(fm6_rec, fh2);
     CHECK(!wcscmp(*(const wchar_t **)(fm6_rec + 0x000), L"64f9397e"));
     CHECK_STR(*(const char **)(fm6_rec + 0x008), "1.0.0.44");
     for (i = 0; i < 4; i++) CHECK_EQ(*(uintptr_t *)(fm6_rec + 0x58 + i * 0x10), 0x1000 + i);   /* caminhos do FH2 */
@@ -906,7 +916,7 @@ TEST(record_matches_game_files)
     static uint8_t fh2[0x350];
     fake_azimuth(0);
     *(void **)(g_base + RVA_ALLOW_ARRAY) = fh2;
-    build_record();
+    fm5_build_record(fm5_rec, fh2);
     check_record_files(fm5_rec, FM5_DIR);
 }
 
@@ -915,7 +925,7 @@ TEST(fm6_record_matches_game_files)
     static uint8_t fh2[0x350];
     fake_azimuth(0);
     *(void **)(g_base + RVA_ALLOW_ARRAY) = fh2;
-    build_fm6_record();
+    fm6_build_record(fm6_rec, fh2);
     check_record_files(fm6_rec, FM6_DIR);
 }
 
@@ -1230,16 +1240,11 @@ TEST(xg_send_map_height_raised)
     *(uint32_t *)(map + 0x18) = 9; *(uint32_t *)(map + 0xc) = 67; map[0] = 0;
     hook_xg_send(cl, 1);
     CHECK_EQ(*(uint32_t *)(map + 0xc), 67);
-    /* fora do FM5: nao mexe */
-    map[0] = 1;
-    fake_azimuth(2);
-    hook_xg_send(cl, 1);
-    CHECK_EQ(*(uint32_t *)(map + 0xc), 67);
-    fake_azimuth(1);
+    /* fora do FM5 o hook nem existe: so o apply_patches do FM5 o instala (install_on_real_azimuth) */
 }
 
 /* ------------------------------------------------------------------------ */
-/* azimuth.exe real: install() (travas, allow list, hooks)                    */
+/* azimuth.exe real: azimuth_install() (travas, allow list, hooks)                    */
 /* ------------------------------------------------------------------------ */
 static int hooked_to(const uint8_t *p, const void *fn)
 {
@@ -1257,7 +1262,7 @@ TEST(install_on_real_azimuth)
     log_capture();
     fh2_rec = *(uint8_t **)(az + RVA_ALLOW_ARRAY);
     CHECK(fh2_rec > az && fh2_rec < az + 0x3b9000);  /* relocado para dentro da imagem */
-    REQUIRE(install());
+    REQUIRE(azimuth_install());
     CHECK(!log_has("does not match") && !log_has("do not match"));
     CHECK(log_has("FmodAudioClient (vtable 0x2a1da0) with FM6 diagnostics"));   /* slots do Azimuth conferidos */
     /* allow list {fh2, fh2 f&f, fm5, fm6} */
@@ -1283,6 +1288,9 @@ TEST(install_on_real_azimuth)
     CHECK(xg_match_target == az + RVA_XG_NAME_MATCH && xg_next_target == az + RVA_XG_NAME_NEXT);
     CHECK(hooked_to(az + RVA_APPLY_PATCHES, (void *)hook_apply_patches));
     CHECK(hooked_to(az + RVA_XG_COMPUTER, (void *)hook_xg_computer));
+    /* envio das placement textures (correcao dos mips BC do FM5): fora do DllMain, so no apply_patches do FM5 */
+    CHECK(!hooked_to(az + RVA_XG_SEND, (void *)hook_xg_send));
+    fm5_xg_send_install();
     CHECK(hooked_to(az + RVA_XG_SEND, (void *)hook_xg_send));
     /* trampolim do apply_patches: 14 bytes originais + jmp de volta */
     CHECK_HEX((uint8_t *)orig_apply_patches, "48895c2418488974242055574154");
@@ -1291,9 +1299,9 @@ TEST(install_on_real_azimuth)
     CHECK(log_has("hook 0x12b780 installed") && log_has("hook 0x1338e0 installed") && log_has("hook 0x3a290 installed"));
     CHECK(log_has("hook 0xda9e0 installed") && log_has("hook 0x9a680 installed") && log_has("hook 0x208790 installed"));
     CHECK(log_has("hook 0x203b60 installed"));                  /* despacho de tabela (GameChat do FM6) */
-    /* LocalSpaceStatics slot 8 (GetForMachineAsync): stub fatal 0x189bd0 -> proxy (winrt_fm5.c) */
+    /* LocalSpaceStatics slot 8 (GetForMachineAsync): stub fatal 0x189bd0 -> proxy (common/winrt.c) */
     CHECK(*(uint8_t **)(az + 0x2b6628) != az + 0x189bd0 && log_has("patch 0x2b6628: LocalSpaceStatics"));
-    /* D3D12CreateDevice (debug12_fm5.c): o call [rip] em 0x567df passa a ler um ponteiro nosso, nao a IAT 0x26f868
+    /* D3D12CreateDevice (common/debug12.c): o call [rip] em 0x567df passa a ler um ponteiro nosso, nao a IAT 0x26f868
        (o RenderDoc reescreve a IAT); a IAT fica intacta */
     {
         uint8_t *call = az + 0x567df;
@@ -1317,7 +1325,7 @@ TEST(install_writes_nothing_if_any_site_differs)
     copy = malloc(0x3b9000);
     memcpy(copy, az, 0x3b9000);
     log_capture();
-    CHECK(!install());
+    CHECK(!azimuth_install());
     CHECK(log_has("bytes do not match at 0xbe70d"));
     CHECK(!memcmp(copy, az, 0x3b9000));          /* imagem intacta */
     free(copy);
@@ -1348,6 +1356,7 @@ static int fm5_run(Fm5Run *r, uint32_t height, uint32_t width, uint32_t fps, int
     ((int32_t *)(r->opt + 0x14))[2] = car;
     *(const LangEntry **)(r->opt + 0x30) = speech;
     log_capture();
+    g_game = r->game;   /* = hook_apply_patches (azimuth.c) antes do apply_patches do jogo */
     fm5_patches(r->game, r->opt);
     return 1;
 }
@@ -1376,7 +1385,6 @@ TEST(fm5_patches_all_options_ultra)
     links_b = *(int32_t *)(r.az + RVA_LINKS_END_B + 3);
     CHECK(!log_has("does not match") && !log_has("do not match"));
     CHECK(!log_has("ignored"));
-    CHECK(g_game == g);
     /* Live table: fim dos links recuado em um link (PartyConfig) */
     CHECK_EQ(links_a, 0x1651e5 - LINK_SIZE);
     CHECK_EQ(links_b, 0x164263 - LINK_SIZE);

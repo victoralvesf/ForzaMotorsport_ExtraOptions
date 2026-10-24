@@ -2,7 +2,7 @@
  * FM6: trava contra page fault da GPU (17_fm6.txt "DIAGNOSTICO DO PAGE FAULT"). O FM6 para com a GPU lendo um
  * descritor com bytes 0xdeadbeef (V# da AMD -> endereco 0xbeefdeadb000); cada page fault e um TDR, e uma sequencia
  * deles chegou a derrubar o driver de video (BSOD 0x3b, 2026-10-18). A trava fica no device D3D12 do Azimuth
- * (ligada pelo hook do D3D12CreateDevice em debug12_fm5.c; o device nasce antes de o jogo ser conhecido, entao vale
+ * (ligada pelo hook do D3D12CreateDevice em common/debug12.c; o device nasce antes de o jogo ser conhecido, entao vale
  * para todos, mas so muda algo onde a GPU daria page fault) e age antes de a GPU ver o dado:
  *  - heaps CBV/SRV/UAV: bitmap de slots gravados (Create*View / destino de CopyDescriptors*); copiar um slot de
  *    origem nunca gravado loga a pilha e grava um SRV nulo nele antes (o handle de CPU na AMD nao aponta para os
@@ -23,11 +23,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <d3d12.h>
+#include "../proxy.h"
+#include "d3d.h"
 
-extern uint8_t *g_base;
-extern uint8_t *g_fm6_game;
-extern void wlog(const char *fmt, ...);
-extern void st_list_open(void);     /* stutter_fm6.c (vazao, so com StutterLog) */
+extern void st_list_open(void);     /* common/stutter.c (vazao, so com StutterLog) */
 extern void st_draw(void);
 
 #define GG_MAX_HEAPS 512
@@ -426,7 +425,7 @@ uint32_t gg_trace_get(void *cl, gg_site *out, uint32_t max, uint32_t *dropped)
     return n;
 }
 
-/* resumo da lista para o tempo de GPU por lista (stutter_fm6.c, PASSO 83): em *nops o total de operacoes rastreadas
+/* resumo da lista para o tempo de GPU por lista (common/stutter.c, PASSO 83): em *nops o total de operacoes rastreadas
    (draws, dispatches, copias) e em top os `max` pontos com mais ocorrencias, do maior ao menor: {hash do PSO da 1a
    ocorrencia, contagem, op, arg[0], arg[1]}; devolve quantos */
 uint32_t gg_pso_hash(void *pso);
@@ -567,7 +566,7 @@ static void label(char *out, void *p)
     HMODULE self = NULL;
     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
                        (LPCWSTR)(void *)label, &self);
-    if (g_fm6_game && a >= g_fm6_game && a < g_fm6_game + 0x8000000) wsprintfA(out, " game+%#x", (unsigned)(a - g_fm6_game));
+    if (g_trace_game && a >= g_trace_game && a < g_trace_game + 0x8000000) wsprintfA(out, " game+%#x", (unsigned)(a - g_trace_game));
     else if (a >= g_base && a < g_base + 0x1000000) wsprintfA(out, " azimuth+%#x", (unsigned)(a - g_base));
     else if (self && a >= (uint8_t *)self && a < (uint8_t *)self + 0x200000) wsprintfA(out, " winmm+%#x", (unsigned)(a - (uint8_t *)self));
     else out[0] = 0;
@@ -602,7 +601,7 @@ static uint32_t known_frames(void **out, uint32_t max)
     uint32_t n = RtlCaptureStackBackTrace(2, 32, frames, NULL), i, k = 0;
     for (i = 0; i < n && k < max; i++) {
         uint8_t *a = frames[i];
-        if ((g_fm6_game && a >= g_fm6_game && a < g_fm6_game + 0x8000000) || (a >= g_base && a < g_base + 0x1000000))
+        if ((g_trace_game && a >= g_trace_game && a < g_trace_game + 0x8000000) || (a >= g_base && a < g_base + 0x1000000))
             out[k++] = a;
     }
     return k;
@@ -643,11 +642,11 @@ int gg_ours(const void *ret)
     const uint8_t *p = ret;
     if (in_self(ret)) return 1;
     if (g_base && p >= g_base && p < g_base + image_size(g_base, 0x1000000)) return 1;
-    return g_fm6_game && p >= g_fm6_game && p < g_fm6_game + 0x8000000;
+    return g_trace_game && p >= g_trace_game && p < g_trace_game + 0x8000000;
 }
 
 /* gg_ours do 1o chamador fora do proxy: os ganchos de criacao podem estar por baixo de outro gancho nosso (o
-   CreateDescriptorHeap do stutter_fm6.c com StutterLog) e o proxy nao cria heaps de descritores nem root signatures */
+   CreateDescriptorHeap do common/stutter.c com StutterLog) e o proxy nao cria heaps de descritores nem root signatures */
 static int gg_caller_ours(void)
 {
     void *f[8];
@@ -1414,18 +1413,17 @@ static uint32_t check_ia(ID3D12GraphicsCommandList *l, uint32_t op, const uint32
 }
 
 /* alpha-to-coverage sem dithering (azimuth_fm6.ini AlphaToCoverageNoDither, padrao 1; fm6 PASSO 112): PSO com A2C e
-   MSAA -> PS reescrito (shader_fm6.c fm6_shader_a2c: cobertura do alpha em SV_Coverage) e A2C desligado. Sem isso
+   MSAA -> PS reescrito (common/shader.c shader_a2c: cobertura do alpha em SV_Coverage) e A2C desligado. Sem isso
    o driver do PC espalha a cobertura em xadrez (bordas da plotagem, cercas, folhagem). */
-extern uint8_t *fm6_shader_a2c(const void *code, size_t size, unsigned samples, size_t *out_size);
-extern int cfg6_int(const wchar_t *key, int def);
 static int a2c_mode = -1;
 static volatile LONG a2c_done, a2c_failed;
 
 static int a2c_on(void)
 {
     if (a2c_mode < 0) {
-        a2c_mode = cfg6_int(L"AlphaToCoverageNoDither", 1) > 0;
-        wlog("FM6: AlphaToCoverageNoDither=%d (%s)", a2c_mode,
+        const game *g = game_current();
+        a2c_mode = g && g->a2c_no_dither ? g->a2c_no_dither() : 0;
+        wlog("%s: AlphaToCoverageNoDither=%d (%s)", g ? g->tag : "-", a2c_mode,
              a2c_mode ? "alpha-to-coverage written by the pixel shader, without the driver's dithering"
                       : "alpha-to-coverage left to the driver");
     }
@@ -1438,7 +1436,7 @@ static uint8_t *a2c_ps(const D3D12_BLEND_DESC *b, const DXGI_SAMPLE_DESC *s, con
     uint8_t *r;
     LONG k;
     if (!b || !b->AlphaToCoverageEnable || !s || s->Count < 2 || !ps || !ps->pShaderBytecode || !a2c_on()) return NULL;
-    r = fm6_shader_a2c(ps->pShaderBytecode, ps->BytecodeLength, s->Count, n);
+    r = shader_a2c(ps->pShaderBytecode, ps->BytecodeLength, s->Count, n);
     if (!r) {
         k = InterlockedIncrement(&a2c_failed);
         if (k <= 8 || (k & (k - 1)) == 0)
@@ -1763,7 +1761,7 @@ static void *trace_op(ID3D12GraphicsCommandList *l, uint32_t op, int compute, co
     log_new_site(l, op, rs, pso, arg, f, n);
     if (direct)
         for (*direct = 0, i = 0; i < n; i++)
-            if (g_fm6_game && (uint8_t *)f[i] >= g_fm6_game && (uint8_t *)f[i] < g_fm6_game + 0x8000000) *direct = 1;
+            if (g_trace_game && (uint8_t *)f[i] >= g_trace_game && (uint8_t *)f[i] < g_trace_game + 0x8000000) *direct = 1;
     if (op >= GG_OP_DRAW) gg_ring_add(l, op, direct ? *direct : 0, rs, pso, arg);
     return rs;
 }
@@ -2047,7 +2045,7 @@ static HRESULT STDMETHODCALLTYPE hook_reset_uav(ID3D12GraphicsCommandList *l, ID
     return real_reset(l, a, ps);
 }
 
-/* fronteira entre duas gravadoras reproduzidas na mesma command list real (cmdrec_fm6.c): depois do ClearState o
+/* fronteira entre duas gravadoras reproduzidas na mesma command list real (common/cmdrec.c): depois do ClearState o
    estado por lista volta ao de uma lista recem aberta (o rastreio de sites continua o da lista real) */
 void gg_cl_restart(void *cl, void *ps)
 {
@@ -2307,7 +2305,7 @@ static void hook_residency(IUnknown *obj)
     wlog("gpuguard: residency tracked (MakeResident/Evict/SetResidencyPriority/EnqueueMakeResident)");
 }
 
-/* chamado pelo hook do D3D12CreateDevice (debug12_fm5.c) no FM6 */
+/* chamado pelo hook do D3D12CreateDevice (common/debug12.c) no FM6 */
 void gpuguard_install(IUnknown *obj)
 {
     ID3D12Device *dev = NULL;

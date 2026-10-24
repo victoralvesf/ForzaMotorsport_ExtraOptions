@@ -71,7 +71,7 @@ Every change is made in memory, after Azimuth (and later the game) has been mapp
 Most of the work is in this layer. FM5 calls interfaces in the 2012 XDK layout, and Azimuth
 implements them in FH2's layout. The proxy translates in between.
 
-### Direct3D 11.X (`d3d_fm5.c`, generated `d3d_thunks.S`)
+### Direct3D 11.X (`fm5/d3d.c`, `common/d3d11.c`, generated `fm5/d3d_thunks.S`)
 
 - **Device creation.** FM5 asks for a device creation function that Azimuth does not export under
   that name. The import resolver hook supplies one that creates the device through Azimuth.
@@ -100,13 +100,13 @@ FM5 uses its own copy of the console texture-layout library (`xg_x.dll`) with an
 convention. The proxy loads it and adapts the descriptor ABI, so texture address computations
 match what the game expects.
 
-### Audio (`shape_fm5.c` and the XAudio2 setup)
+### Audio (`fm5/shape.c` and the XAudio2 setup in `common/d3d.c`)
 
 The console audio processor runs command graphs. FM5 builds graphs with the same fields as FH2,
 but with a different opcode numbering. The proxy translates each graph in Azimuth's copy, never
 in the game's memory, before Azimuth's interpreter runs it. XAudio2 creation is adapted as well.
 
-### WinRT (`winrt_fm5.c`)
+### WinRT (`common/winrt.c`, `fm5/winrt.c`)
 
 Some runtime classes FM5 activates exist only under older names or interfaces, mainly the
 Kinect speech recognizer. Speech cannot be emulated, so the proxy activates a stub that reports
@@ -117,25 +117,25 @@ Kinect speech recognizer. Speech cannot be emulated, so the proxy activates a st
 FM6 was built with a newer XDK than FM5 but still differs from FH2. On top of the shared bridges,
 the proxy adds:
 
-- **Shaders (`shader_fm6.c`).** FM6's shaders use a console-only instruction (a three-way max)
+- **Shaders (`common/shader.c`).** FM6's shaders use a console-only instruction (a three-way max)
   that the PC Direct3D 12 runtime rejects. The proxy rewrites each one into two standard
   instructions and rebuilds the shader container.
-- **GPU guard (`gpuguard_fm6.c`).** FM6 relies on console behavior for unset descriptor slots
+- **GPU guard (`common/gpuguard.c`).** FM6 relies on console behavior for unset descriptor slots
   (for example geometry shaders writing to an unbound UAV). On PC those slots are undefined and
   cause GPU page faults, so the proxy fills them with null descriptors before the GPU reads them.
-- **Command lists (`cmdrec_fm6.c`).** Azimuth opens one Direct3D 12 command list per recorded
+- **Command lists (`common/cmdrec.c`).** Azimuth opens one Direct3D 12 command list per recorded
   piece, and FM6 produces hundreds per frame, which exhausted kernel memory and reset the device
   at the end of a race. Azimuth now records into CPU-only lists of the proxy, and each submission
   replays them into a single real command list.
-- **Resource handling (`stutter_fm6.c`).** Placement textures are placed in the proxy's own heaps
+- **Resource handling (`common/stutter.c`).** Placement textures are placed in the proxy's own heaps
   (with pages reclaimed when the game reuses their memory), command allocators and lists are
   pooled, tile mappings skip unneeded queue syncs, and the final releases of GPU objects are
   spread over time. These remove frame stutters. With `StutterLog=1` in `debug.ini`, the same
   file also logs frame spikes.
-- **Audio (`audio_fm6.c`).** FM6 plays game audio through WASAPI. The proxy wraps Azimuth's audio
+- **Audio (`fm6/audio.c`).** FM6 plays game audio through WASAPI. The proxy wraps Azimuth's audio
   client for logging only.
 
-### Diagnostics (`debug12_fm5.c`)
+### Diagnostics (`common/debug12.c`)
 
 With `D3D12Debug=1` (or `2`) in `debug.ini` (section `[Debug]`), the proxy enables the Direct3D 12
 debug layer under Azimuth and writes every validation message to `azimuth_motorsport.log` as it happens.
@@ -159,26 +159,38 @@ with the same meaning.
 
 The Azimuth launcher's graphics settings apply only to FM5 (FM6 does not support them for now). Resolution and frame rate are passed
 through. Car detail, shadows and reflections are mapped onto FM5's own render settings
-(`gfx_fm5.c`).
+(`fm5/gfx.c`).
 
 ## Source layout
 
+The proxy is split by game so that a fix for one game cannot change the other one:
+
+- **Root** (`winmm_proxy/*.c`): what runs first. `main.c` is the DLL entry point; `azimuth.c` checks and
+  patches `azimuth.exe` and installs the hooks every game needs. Each hook asks for the loaded game
+  (`game_current()`) and hands the call to that game's descriptor, or runs Azimuth's original code.
+- **`common/`**: generic code both games use (patch/hook helpers, TLS, UI resolution and frame rate,
+  the Direct3D 11.X and Direct3D 12 layers over Azimuth). What differs per game comes from the game
+  descriptor (`struct game` in `proxy.h`), never from "is this FM5/FM6" checks.
+- **`fm5/`, `fm6/`**: code for one game only, reached only through that game's descriptor
+  (`fm5_game`, `fm6_game`) while that game is loaded.
+
+`tools/check_isolation.py` runs in every build: it fails if `fm5/` uses anything from `fm6/` (or the
+other way round), or if the root or `common/` use anything from a game folder other than its descriptor.
+
 | Path | Contents |
 |---|---|
-| `winmm_proxy/fm5_patch.c` | Entry point, `winmm` forwarding setup, ini, FM5 game description, Azimuth patches and hooks, FM5 image patches |
-| `winmm_proxy/d3d_fm5.c` | Direct3D 11.X bridge (device, context proxy, conversions, MSAA/ESRAM, present) |
-| `winmm_proxy/gfx_fm5.c` | Launcher graphics options mapped onto FM5 render settings |
-| `winmm_proxy/shape_fm5.c` | Audio graph opcode translation |
-| `winmm_proxy/winrt_fm5.c` | WinRT activation stubs |
-| `winmm_proxy/debug12_fm5.c` | D3D12 device creation hook and debug layer |
-| `winmm_proxy/shader_fm6.c` | FM6 console shader instruction rewrite |
-| `winmm_proxy/gpuguard_fm6.c` | FM6 null descriptors for unset slots (GPU page fault guard) |
-| `winmm_proxy/cmdrec_fm6.c` | FM6 recorder command lists merged into one real list per submission |
-| `winmm_proxy/stutter_fm6.c` | FM6 resource, allocator and command list pooling; stutter log |
-| `winmm_proxy/audio_fm6.c` | FM6 audio client wrappers (logging) |
-| `winmm_proxy/d3d_thunks.S`, `winmm_stubs.S`, `winmm_exports.def` | Generated by `tools/gen_d3d_thunks.py` and `tools/gen_winmm_stubs.py` |
+| `winmm_proxy/main.c` | Entry point, `winmm` forwarding, log and `debug.ini` |
+| `winmm_proxy/azimuth.c` | Azimuth checks and patches, allow list, per-game dispatch (apply_patches, XG computer) |
+| `winmm_proxy/proxy.h` | Shared declarations and the game descriptor |
+| `winmm_proxy/common/hook.c`, `tls.c`, `azimuth_mem.c`, `ui.c` | Patch/hook helpers, game TLS, APU heap and VirtualAlloc, UI resolution and present mode |
+| `winmm_proxy/common/d3d.c`, `d3d11.c` | Import resolver dispatch, XAudio2 bridge, Direct3D 11.X helpers shared by both bridges |
+| `winmm_proxy/common/winrt.c`, `shape.c`, `xma.c` | WinRT activation hooks and stub factory, audio graph hook, XMA voice start |
+| `winmm_proxy/common/debug12.c`, `gpuguard.c`, `stutter.c`, `cmdrec.c`, `shader.c` | Direct3D 12 layer: device hook and debug layer, GPU page fault guard, resource and command list pooling, merged command lists, shader rewrites |
+| `winmm_proxy/fm5/` | FM5: game description and image patches (`fm5.c`), Direct3D 11.X bridge (`d3d.c`), XG fixes (`xg.c`), graphics options (`gfx.c`), audio graphs (`shape.c`), WinRT classes (`winrt.c`) |
+| `winmm_proxy/fm6/` | FM6: game description and image patches (`fm6.c`), device and context fixes (`d3d.c`), graphics options (`gfx.c`), audio (`audio.c`), WinRT (`winrt.c`), livery diagnostics (`livery.c`) |
+| `winmm_proxy/fm5/d3d_thunks.S`, `winmm_stubs.S`, `winmm_exports.def` | Generated by `tools/gen_d3d_thunks.py` and `tools/gen_winmm_stubs.py` |
 | `winmm_proxy/tests/` | Unit tests for the proxy |
-| `tools/` | Generators, the release README converter and the reverse-engineering helper scripts |
+| `tools/` | Generators, the isolation check, the release README converter and the reverse-engineering helper scripts |
 
 ## Build and tests
 

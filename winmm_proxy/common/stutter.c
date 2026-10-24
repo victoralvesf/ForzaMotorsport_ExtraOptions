@@ -21,14 +21,9 @@
 #include <intrin.h>
 #include <dxgi1_2.h>
 #include <psapi.h>
+#include "../proxy.h"
+#include "d3d.h"
 
-extern uint8_t *g_base;
-extern uint8_t *g_game;
-extern uint8_t *g_fm6_game;
-extern void wlog(const char *fmt, ...);
-extern int dbg_int(const wchar_t *key, int def);
-extern int is_fm6(void);
-extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp_out);
 
 #define ST_AVG_N 64           /* media movel dos quadros */
 #define ST_WAITS 512          /* anel de esperas longas */
@@ -37,7 +32,7 @@ extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void
 #define ST_FRAMES_PER_WAIT 6
 
 int st_on;
-/* IIDs do DXGI aqui (o INITGUID do proxy so cobre o d3d12.h, debug12_fm5.c) */
+/* IIDs do DXGI aqui (o INITGUID do proxy so cobre o d3d12.h, common/debug12.c) */
 static const GUID st_iid_swapchain1 = { 0x790a45f7, 0x0d42, 0x4876, { 0x98, 0x3a, 0x0a, 0x55, 0xcf, 0xe6, 0xf4, 0xaa } };
 static const GUID st_iid_factory2 = { 0x50c83a1c, 0xe072, 0x4c48, { 0x87, 0xb0, 0x36, 0x30, 0xfa, 0x36, 0xa6, 0xd0 } };
 static LARGE_INTEGER st_freq;
@@ -137,7 +132,7 @@ static SRWLOCK vz_lock = SRWLOCK_INIT;
 
 static void st_label(char *out, void *p)
 {
-    uint8_t *a = p, *game = g_fm6_game ? g_fm6_game : g_game;
+    uint8_t *a = p, *game = g_game;
     if (game && a >= game && a < game + 0x8000000) wsprintfA(out, " game+%#x", (unsigned)(a - game));
     else if (a >= g_base && a < g_base + 0x1000000) wsprintfA(out, " azimuth+%#x", (unsigned)(a - g_base));
     else out[0] = 0;
@@ -155,7 +150,7 @@ static void wait_done(int kind, LONG64 t0)
     uint32_t us = (uint32_t)((t1 - t0) * 1000000 / st_freq.QuadPart);
     void *f[24], *keep[ST_FRAMES_PER_WAIT];
     uint32_t n, i, k = 0;
-    uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+    uint8_t *game = g_game;
     if (us < ST_WAIT_MIN_US) return;
     n = RtlCaptureStackBackTrace(2, 24, f, NULL);
     for (i = 0; i < n && k < ST_FRAMES_PER_WAIT; i++) {
@@ -814,7 +809,7 @@ static HRESULT (STDMETHODCALLTYPE *real_queue)(ID3D12Device *, const D3D12_COMMA
 static void (STDMETHODCALLTYPE *real_ecl)(ID3D12CommandQueue *, UINT, ID3D12CommandList *const *);
 static HRESULT (STDMETHODCALLTYPE *real_signal)(ID3D12CommandQueue *, ID3D12Fence *, UINT64);
 extern int lp_on;
-/* listas unificadas (cmdrec_fm6.c) */
+/* listas unificadas (common/cmdrec.c) */
 extern int rc_on;
 extern int rc_any(UINT n, ID3D12CommandList *const *l);
 extern UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *const *l, UINT64 fence, UINT64 done,
@@ -1017,7 +1012,7 @@ static void mg_load_mods(void)
 {
     HMODULE hm[MG_MODS];
     DWORD need = 0, i, n;
-    uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+    uint8_t *game = g_game;
     MODULEINFO mi;
     mg_nmods = 0;
     if (game) {
@@ -1328,9 +1323,9 @@ static int pa_reserve(uint32_t n, uint32_t al, uint32_t *page)
 
 /* ---- PASSO 99 (opcao C): quem segura as placement textures placed ----
  * Na sessao de 1 h do PASSO 98 as vivas ficam em ~43-56k mas crescem de 0.6 para 8.5 GB, e nem as solturas em massa
- * (-31k) baixam os bytes. O wrapper do CreatePlacementTexture2D do FM6 (d3d_fm5.c) anota o endereco no jogo e o
+ * (-31k) baixam os bytes. O wrapper do CreatePlacementTexture2D do FM6 (fm6/d3d.c) anota o endereco no jogo e o
  * chamador (pa_note_begin) e, na volta, o objeto do Azimuth entregue ao jogo (pa_note_end); o Release comum do
- * Azimuth (hook em d3d_fm5.c) avisa quando esse objeto chega a 0 (pa_obj_gone). A cada 60 s e na remocao do device
+ * Azimuth (hook em common/d3d.c) avisa quando esse objeto chega a 0 (pa_obj_gone). A cada 60 s e na remocao do device
  * (pa_live_report): idade, tamanho, objeto do jogo vivo/solto, mesmo endereco ou sobreposta por uma mais nova (o jogo
  * reaproveitou a memoria e segura o objeto velho) e os chamadores/formas com mais MiB antigos. */
 static __thread int pa_t_on;
@@ -2266,7 +2261,7 @@ void st_list_open(void)
 {
     void *f[10];
     uintptr_t key[VZ_KEY], ranges[2][2];
-    uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+    uint8_t *game = g_game;
     uint32_t n, i, nr = 0;
     if (!st_on || InterlockedIncrement(&vz_opens) % VZ_EVERY) return;
     n = RtlCaptureStackBackTrace(2, 10, f, NULL);
@@ -2526,7 +2521,7 @@ IUnknown *lp_take(unsigned type)
     return u;
 }
 
-/* listas de outro modulo (gg_ours, gpuguard_fm6.c: o overlay do RTSS via d3d11on12) nao entram nem saem do pool */
+/* listas de outro modulo (gg_ours, common/gpuguard.c: o overlay do RTSS via d3d11on12) nao entram nem saem do pool */
 static ULONG STDMETHODCALLTYPE lp_release(IUnknown *u)
 {
     if (lp_on && gg_ours(__builtin_return_address(0))) {
@@ -2555,7 +2550,7 @@ static HRESULT STDMETHODCALLTYPE lp_create(ID3D12Device *d, UINT mask, D3D12_COM
     IUnknown *u;
     LONG64 t;
     HRESULT hr;
-    if (rc_wants(type, __builtin_return_address(0))) return rc_create(d, ps, riid, out);   /* gravadora (cmdrec_fm6.c) */
+    if (rc_wants(type, __builtin_return_address(0))) return rc_create(d, ps, riid, out);   /* gravadora (common/cmdrec.c) */
     u = lp_on && out && gg_ours(__builtin_return_address(0)) ? lp_take((unsigned)type) : NULL;
     if (u) {
         ID3D12GraphicsCommandList *l = (ID3D12GraphicsCommandList *)u;
@@ -2742,8 +2737,8 @@ static HRESULT STDMETHODCALLTYPE as_close(ID3D12GraphicsCommandList *l)
     return hr;
 }
 
-/* hook do apply_patches (fm5_patch.c): placement textures placed (PASSO 97) */
-int pa_wanted(void) { return dbg_int(L"PlacementPlaced", is_fm6()) > 0; }
+/* hook do apply_patches (azimuth.c): placement textures placed (PASSO 97) */
+int pa_wanted(void) { return dbg_int(L"PlacementPlaced", GAME_DEFAULT(placement_placed)) > 0; }
 void placed_textures_setup(void)
 {
     pa_on = pa_wanted() && real_placed && real_heap && real_committed;
@@ -2761,7 +2756,7 @@ void placed_textures_setup(void)
     else pa_reclaim_on = 0;
 }
 
-/* hook do apply_patches (fm5_patch.c) */
+/* hook do apply_patches (azimuth.c) */
 int as_wanted(void) { return dbg_int(L"AllocatorShare", 0); }   /* PASSO 92: no FM6 derrubou o carregamento */
 void alloc_share_setup(void)
 {
@@ -2780,15 +2775,15 @@ void alloc_share_setup(void)
     wlog("d3d: AllocatorShare: command list opens on the same thread reuse the allocator (up to %d per allocator)", n);
 }
 
-/* hook do apply_patches (fm5_patch.c), como o DeferRelease */
-int lp_wanted(void) { return dbg_int(L"ListPool", is_fm6()) > 0; }
+/* hook do apply_patches (azimuth.c), como o DeferRelease */
+int lp_wanted(void) { return dbg_int(L"ListPool", GAME_DEFAULT(list_pool)) > 0; }
 void list_pool_setup(void)
 {
     lp_on = lp_real_create && lp_wanted();
     if (lp_on) wlog("d3d: command list pool: the last Release keeps the list, the next CreateCommandList reuses it (Reset)");
 }
 
-/* hook do apply_patches (fm5_patch.c), depois do pool: listas unificadas (cmdrec_fm6.c; debug.ini ListMerge, padrao FM6).
+/* hook do apply_patches (azimuth.c), depois do pool: listas unificadas (common/cmdrec.c; debug.ini ListMerge, padrao FM6).
  * As listas reais delas sao criadas por dentro do pool/gravadoras (gpuguard -> D3D12) */
 void list_merge_setup(void)
 {
@@ -2797,15 +2792,15 @@ void list_merge_setup(void)
 
 /* DeferRelease (PASSO 70): no FM6 sempre (a rajada de destruicao do reaper para o quadro ~150 ms e, junto com o
  * NO_HAZARD dos tiles, derrubou a GPU nos boots sem ele); debug.ini DeferRelease=0/1 sobrescreve */
-int dr_wanted(void) { return dbg_int(L"DeferRelease", is_fm6()) > 0; }
+int dr_wanted(void) { return dbg_int(L"DeferRelease", GAME_DEFAULT(defer_release)) > 0; }
 
-/* hook do apply_patches (fm5_patch.c): o device D3D12 nasce ANTES do registro do jogo (is_fm6 ainda falso no
+/* hook do apply_patches (azimuth.c): o device D3D12 nasce ANTES do registro do jogo (is_fm6 ainda falso no
  * stutter_device), entao a decisao e a thread de drenagem ficam para ca */
 void defer_release_setup(void)
 {
     static int started;
     dr_on = dr_wanted();
-    dr_hold_ms = dbg_int(L"DeferReleaseHoldMs", is_fm6() ? 2000 : 0);
+    dr_hold_ms = dbg_int(L"DeferReleaseHoldMs", GAME_DEFAULT(defer_release_hold_ms));
     if (!dr_on || started) return;
     started = 1;
     if (!st_freq.QuadPart) QueryPerformanceFrequency(&st_freq);
@@ -2814,7 +2809,7 @@ void defer_release_setup(void)
          dr_hold_ms);
 }
 
-/* chamado pelo hook do D3D12CreateDevice (debug12_fm5.c), depois do gpuguard (estes hooks ficam por fora). Os hooks
+/* chamado pelo hook do D3D12CreateDevice (common/debug12.c), depois do gpuguard (estes hooks ficam por fora). Os hooks
  * de criacao de recurso/heap registram o Release das vtables (DeferRelease decide depois, no apply_patches; com
  * DeferRelease=0 no debug.ini e sem StutterLog nada e trocado); o resto so com StutterLog. */
 void stutter_device(IUnknown *obj)
@@ -2981,7 +2976,7 @@ static void st_label_any(char *out, uintptr_t a)
 
 static int st_in_game(uintptr_t a)
 {
-    uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+    uint8_t *game = g_game;
     return game && a >= (uintptr_t)game && a < (uintptr_t)game + 0x8000000;
 }
 
@@ -3266,7 +3261,7 @@ static void fq_poll(LONG64 now)
 static void fq_install(void)
 {
     static const uint8_t call[6] = { 0xff, 0x15, 0x72, 0x5b, 0xe8, 0x00 };   /* call [rip+0xe85b72] -> 0x101af88 */
-    uint8_t *game = g_fm6_game;
+    uint8_t *game = g_trace_game;   /* sites do exe do FM6 (so com trace_game_frames) */
     void **slot;
     DWORD old;
     if (!game) return;
@@ -3539,7 +3534,7 @@ static DWORD WINAPI st_sampler(void *arg)
         vz_poll(now);
         if (ncode_ranges) qp_tick();
         if (!ncode_ranges) {   /* depois do 1o Present o jogo ja esta carregado */
-            uint8_t *game = g_fm6_game ? g_fm6_game : g_game;
+            uint8_t *game = g_game;
             if (game) { code_ranges[ncode_ranges][0] = (uintptr_t)game; code_ranges[ncode_ranges++][1] = (uintptr_t)game + 0x8000000; }
             code_ranges[ncode_ranges][0] = (uintptr_t)g_base; code_ranges[ncode_ranges++][1] = (uintptr_t)g_base + 0x1000000;
             code_ranges[ncode_ranges][0] = (uintptr_t)self_mod; code_ranges[ncode_ranges++][1] = (uintptr_t)self_mod + 0x200000;
@@ -3639,8 +3634,6 @@ int retire_margin_patch(int n)
 #define TN_SITE_RVA 0xe017d
 #define TN_MAP_RVA 0xe0186
 #define TN_UNMAP_RVA 0xe01a9
-extern uint8_t *alloc_near(uint8_t *mod, size_t size);
-extern void write_mem(void *dst, const void *src, size_t len);
 int tile_nohazard_patch(int on)
 {
     static const uint8_t orig[9] = { 0x89, 0x6c, 0x24, 0x50, 0x48, 0x85, 0xc9, 0x74, 0x23 };
@@ -3674,7 +3667,7 @@ int tile_nohazard_patch(int on)
     return 1;
 }
 
-/* DllMain (fm5_patch.c install): fabrica DXGI e esperas pela IAT do azimuth.exe */
+/* DllMain (azimuth.c azimuth_install): fabrica DXGI e esperas pela IAT do azimuth.exe */
 void stutter_install(void)
 {
     int i, n = 0;

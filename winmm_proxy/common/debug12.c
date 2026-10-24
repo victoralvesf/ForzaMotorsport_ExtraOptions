@@ -5,11 +5,11 @@
  * esta: o RenderDoc reescreve as IATs depois de nos e apagava um hook ali) e chama o que estiver na IAT. Ele liga a
  * debug layer antes de criar o device e registra um callback do ID3D12InfoQueue1 que grava cada mensagem de
  * validacao no azimuth_motorsport.log ("d3d12: ...") no momento da chamada que a gerou (antes do STOPPED do Azimuth).
- * D3D12Debug=3 (4 = + experimento do gpuguard_fm6.c: pula a compute interna k12 + [SRV, UAV]; 5 = + placement textures
- * do FM6 committed em vez de reservadas, fm5_patch.c; 6 = + recursos/views nunca destruidos, fm5_patch.c; 7 = + nenhum CopyTextureRegion; 8 = + nenhum draw; 9 = + nenhum Dispatch fora da compute interna, gpuguard_fm6.c): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
+ * D3D12Debug=3 (4 = + experimento do common/gpuguard.c: pula a compute interna k12 + [SRV, UAV]; 5 = + placement textures
+ * do FM6 committed em vez de reservadas, fm6/fm6.c; 6 = + recursos/views nunca destruidos, fm6/fm6.c; 7 = + nenhum CopyTextureRegion; 8 = + nenhum draw; 9 = + nenhum Dispatch fora da compute interna, common/gpuguard.c): sem debug layer, so os breadcrumbs do DRED; uma thread espera o device removido (fence que vai a
  * UINT64_MAX) e grava no log as ultimas listas com a contagem de operacoes e, de cada uma, os pontos de chamada de
- * Dispatch/CopyTextureRegion/draws/ClearRenderTargetView guardados pela trava (gpuguard_fm6.c, gg_trace_*).
- * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (gpuguard_fm6.c): o device nasce
+ * Dispatch/CopyTextureRegion/draws/ClearRenderTargetView guardados pela trava (common/gpuguard.c, gg_trace_*).
+ * O hook fica sempre ligado (mesmo com D3D12Debug=0) para a trava de page fault (common/gpuguard.c): o device nasce
  * antes do apply_patches, quando o jogo ainda nao e conhecido. No Wine/Proton (vkd3d-proton) a trava fica desligada
  * por padrao (D3D12Hooks=3): ela corrige comportamentos do driver da AMD no Windows e, no RADV, os descritores e root
  * views nulos dela davam page fault em VA 0 (issue de usuario Linux, 2026-10-23).
@@ -20,15 +20,11 @@
 #include <string.h>
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
+#include "../proxy.h"
 
 #define RVA_IAT_D3D12_CREATE_DEVICE 0x26f868  /* d3d12.dll ordinal 101 */
 #define RVA_CALL_D3D12_CREATE_DEVICE 0x567df /* ff 15 disp32 -> IAT 0x26f868 (unico uso) */
 
-extern uint8_t *g_base;
-extern uint8_t *alloc_near(uint8_t *mod, size_t size);
-extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
-extern int dbg_int(const wchar_t *key, int def);
-extern void wlog(const char *fmt, ...);
 extern void gpuguard_install(IUnknown *dev);
 extern void stutter_device(IUnknown *dev);
 extern void gg_trace_dump(void *cl);
@@ -38,7 +34,6 @@ extern void gt_dump(void);
 extern int st_on;
 extern int gg_trace_on, gg_draw_skip;
 extern void gg_parse_hashes(const char *str);
-extern int dbg_str(const wchar_t *key, char *out, int len);
 
 typedef HRESULT (WINAPI *create_device_fn)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
 static volatile LONG msg_count;
@@ -183,7 +178,7 @@ HRESULT WINAPI debug12_create_device(IUnknown *adapter, D3D_FEATURE_LEVEL level,
     hr = (*(create_device_fn *)(g_base + RVA_IAT_D3D12_CREATE_DEVICE))(adapter, level, riid, out);
     if (SUCCEEDED(hr) && out && *out) {
         if (g_hooks != 3) gpuguard_install((IUnknown *)*out);
-        if (g_hooks != 2) stutter_device((IUnknown *)*out);   /* StutterLog=1 (stutter_fm6.c); por fora dos hooks do gpuguard */
+        if (g_hooks != 2) stutter_device((IUnknown *)*out);   /* StutterLog=1 (common/stutter.c); por fora dos hooks do gpuguard */
     }
     if (!g_mode) return hr;
     if (g_mode >= 3 && SUCCEEDED(hr) && out && *out) {
@@ -221,7 +216,7 @@ int debug12_install(void)
     DWORD old;
 
     g_mode = dbg_int(L"D3D12Debug", 0);
-    gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm5_patch.c); 8/9/10: gpuguard_fm6.c */
+    gg_trace_on = g_mode >= 3 ? g_mode - 2 : 0;   /* 4: tambem pula a compute interna; 5: placement textures committed (fm6/fm6.c); 8/9/10: common/gpuguard.c */
     gg_draw_skip = dbg_int(L"DrawSkip", 0);      /* com D3D12Debug=8: 0 todos, 1 diretos, 2 replayer, 3-5 tipo, 6 IA, 7 hashes, 8 DS/HS/GS/SO */
     {
         char hashes[1024];
@@ -229,7 +224,7 @@ int debug12_install(void)
     }
     /* diagnostico (overlays como o RivaTuner): D3D12Hooks=0 deixa o D3D12CreateDevice sem gancho -> nenhum hook do
        proxy no D3D12 (gpuguard, pool de listas, DeferRelease, gravadoras, placement); 2 = so o gpuguard, 3 = so os do
-       stutter_fm6.c; so sem D3D12Debug */
+       common/stutter.c; so sem D3D12Debug */
     g_hooks = g_mode ? 1 : dbg_int(L"D3D12Hooks", -1);
     if (g_hooks < 0) {
         g_hooks = debug12_wine() ? 3 : 1;
@@ -256,6 +251,6 @@ int debug12_install(void)
     VirtualProtect(call + 2, 4, old, &old);
     wlog("debug12: hook on D3D12CreateDevice call %#x (D3D12Debug=%d)", RVA_CALL_D3D12_CREATE_DEVICE, g_mode);
     if (g_hooks == 2 || g_hooks == 3)
-        wlog("debug12: D3D12Hooks=%d -> only the %s hooks in D3D12", g_hooks, g_hooks == 2 ? "gpuguard" : "stutter_fm6.c");
+        wlog("debug12: D3D12Hooks=%d -> only the %s hooks in D3D12", g_hooks, g_hooks == 2 ? "gpuguard" : "common/stutter.c");
     return 1;
 }

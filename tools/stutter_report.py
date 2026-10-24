@@ -1,4 +1,4 @@
-"""Resumo das linhas "stutter:" do azimuth_motorsport.log (stutter_fm6.c, debug.ini StutterLog=1).
+"""Resumo das linhas "stutter:" do azimuth_motorsport.log (common/stutter.c, debug.ini StutterLog=1).
 
 uso: python tools/stutter_report.py [azimuth_motorsport.log] [--min MS]
 Por pico: quadro, ms, media, tempo no Present, PSO/recursos/ECL e a espera da thread do Present (P);

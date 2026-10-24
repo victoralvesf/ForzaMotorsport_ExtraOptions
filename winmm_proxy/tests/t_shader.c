@@ -1,8 +1,8 @@
 /*
- * Testes de shader_fm6.c: max3 do console (opcode 0x11a) -> dois max, container refeito e hash do DXBC.
+ * Testes de common/shader.c: max3 do console (opcode 0x11a) -> dois max, container refeito e hash do DXBC.
  * Hashes esperados calculados com tools\dxbc.py (conferido contra ~7000 shaders reais de um dump do FM6).
  */
-#include "../shader_fm6.c"
+#include "../common/shader.c"
 #include "test.h"
 
 /* container DXBC {SHEX, STAT(4 bytes)} com o hash certo */
@@ -63,7 +63,7 @@ TEST(fm6_shader_max3_expanded)
     uint8_t *out;
     CHECK_EQ(n, 220);
     CHECK_HEX(src + 4, "78a196928bce85edcfbb26bcd8205573");
-    out = fm6_shader_rewrite(src, n, &on);
+    out = shader_console_rewrite(src, n, &on);
     REQUIRE(out);
     CHECK_EQ(on, 280);
     CHECK_EQ(en, 280);
@@ -78,14 +78,14 @@ TEST(fm6_shader_without_max3_untouched)
     static const uint32_t in[6] = { 0x50, 6, 0x02000068, 1, 0x0100003e, 0x0100003e };
     static uint8_t src[256];
     size_t n = make_dxbc(src, in, 6), on = 0;
-    CHECK(fm6_shader_rewrite(src, n, &on) == NULL);
-    CHECK(fm6_shader_rewrite("DXBX", 4, &on) == NULL);
+    CHECK(shader_console_rewrite(src, n, &on) == NULL);
+    CHECK(shader_console_rewrite("DXBX", 4, &on) == NULL);
     src[0x18] ^= 1;                                             /* tamanho total errado */
-    CHECK(fm6_shader_rewrite(src, n, &on) == NULL);
+    CHECK(shader_console_rewrite(src, n, &on) == NULL);
 }
 
 /* ------------------------------------------------------------------------ */
-/* alpha-to-coverage sem dithering (fm6_shader_a2c): shaders compilados pelo d3dcompiler_47 do Windows, conferidos */
+/* alpha-to-coverage sem dithering (shader_a2c): shaders compilados pelo d3dcompiler_47 do Windows, conferidos */
 /* no disassembly dele e num PSO MSAA 2x do D3D12 (WARP), que valida o hash e as assinaturas                      */
 /* ------------------------------------------------------------------------ */
 #define COBJMACROS
@@ -219,7 +219,7 @@ static int warp_pso(const uint8_t *vs, size_t nvs, const uint8_t *ps, size_t nps
     return hr >= 0;
 }
 
-TEST(fm6_shader_a2c_coverage_from_alpha)
+TEST(shader_a2c_coverage_from_alpha)
 {
     size_t nvs, nps, nout, nout2 = 0, ncov, nnt;
     uint8_t *vs, *ps, *out, *cov, *nt, *nt2;
@@ -232,10 +232,10 @@ TEST(fm6_shader_a2c_coverage_from_alpha)
     nt = compile(a2c_ps_notemps, "ps_5_0", &nnt);
     CHECK(vs && ps && cov && nt);
     if (!vs || !ps || !cov || !nt) return;
-    CHECK(!fm6_shader_a2c(vs, nvs, 2, &nout));                    /* so pixel shader */
-    CHECK(!fm6_shader_a2c(ps, nps, 1, &nout));                    /* sem MSAA */
-    CHECK(!fm6_shader_a2c(cov, ncov, 2, &nout));                  /* ja escreve a cobertura */
-    out = fm6_shader_a2c(ps, nps, 2, &nout);
+    CHECK(!shader_a2c(vs, nvs, 2, &nout));                    /* so pixel shader */
+    CHECK(!shader_a2c(ps, nps, 1, &nout));                    /* sem MSAA */
+    CHECK(!shader_a2c(cov, ncov, 2, &nout));                  /* ja escreve a cobertura */
+    out = shader_a2c(ps, nps, 2, &nout);
     CHECK(out != NULL);
     if (!out) return;
     CHECK_EQ(nout, nps + 36 + 4 * 2 + 37 * 4 * 2);               /* OSGN +36, dcl oMask, 2 epilogos */
@@ -253,7 +253,7 @@ TEST(fm6_shader_a2c_coverage_from_alpha)
         for (k = 0; k + 4 <= nout / 4; k++) if (!memcmp((uint32_t *)out + k, ep, sizeof ep)) found++;
         CHECK_EQ(found, 2);
     }
-    nt2 = fm6_shader_a2c(nt, nnt, 4, &nout2);
+    nt2 = shader_a2c(nt, nnt, 4, &nout2);
     CHECK(nt2 != NULL);
     if (nt2) {
         t = disasm(nt2, nout2);
@@ -266,7 +266,7 @@ TEST(fm6_shader_a2c_coverage_from_alpha)
         CHECK_EQ(w, 1);                                            /* original com A2C */
         CHECK_EQ(warp_pso(vs, nvs, out, nout, FALSE), 1);          /* reescrito, A2C desligado */
         free(nt2);
-        nt2 = fm6_shader_a2c(nt, nnt, 2, &nout2);
+        nt2 = shader_a2c(nt, nnt, 2, &nout2);
         CHECK(nt2 && warp_pso(vs, nvs, nt2, nout2, FALSE) == 1);
         out[0x30] ^= 1;                                            /* hash errado: o D3D12 recusa */
         CHECK_EQ(warp_pso(vs, nvs, out, nout, FALSE), 0);

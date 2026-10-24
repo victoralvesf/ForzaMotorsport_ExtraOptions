@@ -1,4 +1,4 @@
-"""gen_d3d_thunks.py OUTDIR - gera d3d_thunks.S para o proxy winmm (contexto D3D11 no layout do FM5)
+"""gen_d3d_thunks.py OUTDIR (winmm_proxy/fm5) - gera d3d_thunks.S para o proxy winmm (contexto D3D11 no layout do FM5)
 
 Proxy do contexto (ver PASSO 8 no CONTEXTO): [P] = ctx_proxy_vtbl, P+0x08..0x27 = copia do cabecalho do
 contexto real, P+0x28 = tabela embutida (mesmos thunks da vtable, o FM5 chama [ctx+0x28+8*slot]),
@@ -53,7 +53,7 @@ out = [f'/* gerado por tools/gen_d3d_thunks.py - nao editar */',
        '    .text', '    .p2align 4']
 for i in range(SLOTS):
     out.append(f'ctx_thunk_{i:x}:')
-    out.append(f'    lock incl ctx_counts+{i * 4:#x}(%rip)')   # contagem por slot (trace, d3d_fm5.c)
+    out.append(f'    lock incl ctx_counts+{i * 4:#x}(%rip)')   # contagem por slot (trace, fm5/d3d.c)
     out.append(f'    cmpl $0, ctx_trace_on(%rip)')             # trace detalhado: ctx_trace(slot, proxy, args)
     out.append(f'    je 1f')
     out.append(f'    movl ${i:#x}, %r10d')
@@ -90,7 +90,7 @@ out += ['ctx_trace_common:',
         '    addq $0x90, %rsp',
         '    popq %r11',
         '    jmp *%r11']
-# device: thunks que contam e saltam para dev_impl[i] (tabela no layout do FM5 montada em d3d_fm5.c)
+# device: thunks que contam e saltam para dev_impl[i] (tabela no layout do FM5 montada em fm5/d3d.c)
 for i in range(SLOTS):
     out.append(f'dev_thunk_{i:x}:')
     out.append(f'    lock incl dev_counts+{i * 4:#x}(%rip)')
