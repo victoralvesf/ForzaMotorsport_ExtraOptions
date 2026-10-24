@@ -958,7 +958,7 @@ TEST(xg_desc_layout_converted)
     CHECK_EQ(xg_seen_desc[12], 0);
     /* computer devolvido com a vtable nova (16 slots, 6 = CopyFromSubresource) */
     CHECK(*(void **)xg_fake_obj == (void *)xg_vtbl);
-    CHECK(xg_vtbl[4] == (void *)xg_fake_texel);
+    CHECK(xg_vtbl[4] == (void *)xg_texel_offset_fm5);
     CHECK(xg_vtbl[6] == (void *)xg_copy_from_subresource);
     *(void **)xg_fake_obj = xg_fake_vtbl;
     /* fora do FM5: repassa sem mexer */
@@ -1102,6 +1102,32 @@ TEST(xg_fm5_bc_mip_elements_rounded_up)
     hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
     CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 67);
     fake_azimuth(1);
+}
+
+/* elementos acrescentados pelo arredondamento leem o endereco da ultima linha/coluna de dentro */
+static uint64_t xg_coord_texel(void *self, uint32_t plane, uint32_t mip, uint64_t x, uint32_t y, uint32_t z, uint32_t s)
+{
+    (void)self; (void)plane; (void)z; (void)s;
+    return ((uint64_t)mip << 32) | (x << 16) | y;
+}
+
+TEST(xg_fm5_bc_mip_edge_clamped)
+{
+    static const uint32_t want[3][2] = { {240, 135}, {120, 68}, {61, 34} };
+    if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
+    xg_bc_fill(xg_bc_self, 3, want);
+    xg_fm5_vtbl = (void *const *)xg_fake_vtbl;
+    xg_fake_vtbl[4] = (void *)xg_coord_texel;
+    /* mip 1: 135 >> 1 = 67 linhas do XG do FM5 -> a linha 67 le a 66 */
+    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 1, 5, 67, 0, 0), 0x100050042ull);
+    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 1, 119, 66, 0, 0), 0x100770042ull);
+    /* mip 2: 240 >> 2 = 60 colunas, 135 >> 2 = 33 linhas -> (60, 33) le (59, 32) */
+    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 2, 60, 33, 0, 0), 0x2003b0020ull);
+    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 2, 59, 32, 0, 0), 0x2003b0020ull);
+    /* mip 0 e fora da contagem: repassa */
+    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 0, 239, 134, 0, 0), 0x00ef0086ull);
+    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 1, 120, 68, 0, 0), 0x100780044ull);
+    xg_fake_vtbl[4] = (void *)xg_fake_texel;
 }
 
 /* ------------------------------------------------------------------------ */
