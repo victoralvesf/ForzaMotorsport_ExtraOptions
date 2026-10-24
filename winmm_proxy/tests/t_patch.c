@@ -958,7 +958,7 @@ TEST(xg_desc_layout_converted)
     CHECK_EQ(xg_seen_desc[12], 0);
     /* computer devolvido com a vtable nova (16 slots, 6 = CopyFromSubresource) */
     CHECK(*(void **)xg_fake_obj == (void *)xg_vtbl);
-    CHECK(xg_vtbl[4] == (void *)xg_texel_offset_fm5);
+    CHECK(xg_vtbl[4] == (void *)xg_fake_texel);
     CHECK(xg_vtbl[6] == (void *)xg_copy_from_subresource);
     *(void **)xg_fake_obj = xg_fake_vtbl;
     /* fora do FM5: repassa sem mexer */
@@ -1104,30 +1104,51 @@ TEST(xg_fm5_bc_mip_elements_rounded_up)
     fake_azimuth(1);
 }
 
-/* elementos acrescentados pelo arredondamento leem o endereco da ultima linha/coluna de dentro */
-static uint64_t xg_coord_texel(void *self, uint32_t plane, uint32_t mip, uint64_t x, uint32_t y, uint32_t z, uint32_t s)
+/* CreatePlacementTexture2D do FM5: os blocos acrescentados pelo arredondamento sao zerados na memoria do jogo */
+static int xg_released;
+static unsigned long xg_fake_release(void *self) { (void)self; xg_released++; return 0; }
+/* enderecos de mentira: 0x4000 por mip, linha de 128 elementos de 16 bytes */
+static uint64_t xg_lin_texel(void *self, uint32_t plane, uint32_t mip, uint64_t x, uint32_t y, uint32_t z, uint32_t s)
 {
     (void)self; (void)plane; (void)z; (void)s;
-    return ((uint64_t)mip << 32) | (x << 16) | y;
+    return (uint64_t)mip * 0x40000 + ((uint64_t)y * 128 + x) * 16;
 }
 
-TEST(xg_fm5_bc_mip_edge_clamped)
+TEST(xg_fm5_bc_tail_zeroed)
 {
-    static const uint32_t want[3][2] = { {240, 135}, {120, 68}, {61, 34} };
+    static const uint32_t xg[3][2] = { {240, 135}, {120, 67}, {60, 33} };
+    uint32_t desc[11] = { 960, 540, 3, 1, 99, 1, 0, 0, 8, 0, 0 };
+    uint8_t *mem = malloc(0xc0000);
+    uint32_t i;
+    REQUIRE(mem);
+    fake_azimuth(1);
     if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
-    xg_bc_fill(xg_bc_self, 3, want);
+    xg_bc_fill(xg_bc_self, 3, xg);
+    *(uint64_t *)(xg_bc_self + 0x54b8) = 0xc0000;     /* SizeBytes */
+    *(uint32_t *)(xg_bc_self + 0x54f0) = 16;          /* BC7 */
+    xg_bc_obj_orig_out = xg_bc_self;
+    orig_xg_computer = xg_bc_fake_orig;
     xg_fm5_vtbl = (void *const *)xg_fake_vtbl;
-    xg_fake_vtbl[4] = (void *)xg_coord_texel;
-    /* mip 1: 135 >> 1 = 67 linhas do XG do FM5 -> a linha 67 le a 66 */
-    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 1, 5, 67, 0, 0), 0x100050042ull);
-    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 1, 119, 66, 0, 0), 0x100770042ull);
-    /* mip 2: 240 >> 2 = 60 colunas, 135 >> 2 = 33 linhas -> (60, 33) le (59, 32) */
-    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 2, 60, 33, 0, 0), 0x2003b0020ull);
-    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 2, 59, 32, 0, 0), 0x2003b0020ull);
-    /* mip 0 e fora da contagem: repassa */
-    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 0, 239, 134, 0, 0), 0x00ef0086ull);
-    CHECK_EQ(xg_texel_offset_fm5(xg_bc_self, 0, 1, 120, 68, 0, 0), 0x100780044ull);
+    xg_fake_vtbl[1] = xg_vtbl[1] = (void *)xg_fake_release;
+    xg_fake_vtbl[4] = (void *)xg_lin_texel;
+    xg_released = 0;
+    memset(mem, 0xab, 0xc0000);
+    /* mip 1: linha 67 (120 elementos); mip 2: linha 33 (60) */
+    CHECK_EQ(xg_fm5_zero_bc_tail(desc, 14, 0, mem), 180);
+    CHECK_EQ(xg_released, 1);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);   /* contagens arredondadas pelo hook */
+    for (i = 0; i < 120 * 16; i++) CHECK_EQ(mem[0x40000 + 67 * 128 * 16 + i], 0);
+    CHECK_EQ(mem[0x40000 + 66 * 128 * 16 + 119 * 16 + 15], 0xab);   /* linha de dentro intacta */
+    CHECK_EQ(mem[0x40000 + 67 * 128 * 16 + 120 * 16], 0xab);        /* alem da largura intacto */
+    CHECK_EQ(mem[0x80000 + 33 * 128 * 16], 0);
+    CHECK_EQ(mem[0x80000 + 32 * 128 * 16], 0xab);
+    CHECK_EQ(mem[0], 0xab);                                          /* mip 0 intacto */
+    /* nao BC: nada */
+    desc[4] = 28;
+    CHECK_EQ(xg_fm5_zero_bc_tail(desc, 14, 0, mem), 0);
+    CHECK_EQ(xg_released, 1);
     xg_fake_vtbl[4] = (void *)xg_fake_texel;
+    free(mem);
 }
 
 /* ------------------------------------------------------------------------ */
