@@ -63,6 +63,8 @@ _Static_assert(RC_WriteBufferImmediate * sizeof(void *) == offsetof(ID3D12Graphi
 typedef struct { uint16_t op, pad; uint32_t size; } rc_hdr;   /* size = cabecalho + argumentos, multiplo de 8 */
 
 typedef struct rc_priv { GUID g; UINT size; IUnknown *u; struct rc_priv *next; } rc_priv;   /* + size bytes */
+typedef struct { uint32_t *b, n, cap, used; } rc_dlist;     /* blocos de descritores copiados (rc_dcopy) */
+enum { RC_D_RTV, RC_D_DSV, RC_D_N };
 typedef struct rc_list {
     const ID3D12GraphicsCommandList2Vtbl *vt;
     volatile LONG ref;
@@ -72,6 +74,7 @@ typedef struct rc_list {
     uint32_t len, cap, ncmd;
     int open, oom, pred;            /* pred: SetPredication gravado (desligado na fronteira seguinte) */
     rc_priv *priv;                  /* Set/GetPrivateData */
+    rc_dlist d[RC_D_N];             /* RTV/DSV gravados (copias do proxy) */
     struct rc_list *next;           /* pool */
 } rc_list;
 
@@ -156,6 +159,98 @@ typedef struct { UINT n, has_modes; } rc_a_wbi;             /* + n parametros + 
 #define L(This) ((rc_list *)(This))
 #define AFTER(a) ((uint8_t *)(a) + RC_ALIGN(sizeof *(a)))
 
+/* ---- descritores de CPU gravados ----
+ * OMSetRenderTargets e ClearRenderTargetView/ClearDepthStencilView recebem descritores de CPU que o D3D12 le NA
+ * CHAMADA: depois dela o Azimuth pode soltar a vista e reaproveitar o slot. A gravadora so reproduz no ECL (nas listas
+ * diferidas, quadros depois, e de novo a cada reenvio): o driver lia um slot ja solto (queda de usuario 2026-10-23,
+ * nvwgf2umx.dll lendo 0x28 dentro do OMSetRenderTargets do rc_merge, ~20 min de corrida). Cada RTV/DSV gravado e
+ * copiado para um heap do proxy (blocos de RC_DBLK por gravadora, devolvidos no Reset/Release) e a gravacao guarda o
+ * handle da copia. Sem bloco livre (RC_DHEAPS heaps cheios) grava o handle original, como antes. ---- */
+#define RC_DBLK   64
+#define RC_DHEAP  16384                  /* descritores por heap */
+#define RC_DHEAPS 64
+#define RC_DPER   (RC_DHEAP / RC_DBLK)   /* blocos por heap */
+typedef struct {
+    ID3D12DescriptorHeap *h[RC_DHEAPS];
+    SIZE_T base[RC_DHEAPS];
+    UINT inc, nh;
+    uint32_t *free, nfree;
+} rc_dpool;
+static const D3D12_DESCRIPTOR_HEAP_TYPE rc_dtype[RC_D_N] = { D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_DESCRIPTOR_HEAP_TYPE_DSV };
+static rc_dpool rc_dp[RC_D_N];
+static SRWLOCK rc_dlock = SRWLOCK_INIT;
+static volatile LONG rc_dfail_logged;
+
+static int rc_dblock(ID3D12Device *dev, int t, uint32_t *id)
+{
+    rc_dpool *p = &rc_dp[t];
+    int ok = 0;
+    AcquireSRWLockExclusive(&rc_dlock);
+    if (!p->nfree && p->nh < RC_DHEAPS && dev) {
+        D3D12_DESCRIPTOR_HEAP_DESC hd = { rc_dtype[t], RC_DHEAP, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0 };
+        ID3D12DescriptorHeap *h = NULL;
+        uint32_t *f = realloc(p->free, (size_t)(p->nh + 1) * RC_DPER * sizeof *f);
+        if (f) p->free = f;
+        if (f && SUCCEEDED(dev->lpVtbl->CreateDescriptorHeap(dev, &hd, &IID_ID3D12DescriptorHeap, (void **)&h)) && h) {
+            D3D12_CPU_DESCRIPTOR_HANDLE s;
+            uint32_t k;
+            if (!p->inc) p->inc = dev->lpVtbl->GetDescriptorHandleIncrementSize(dev, rc_dtype[t]);
+            h->lpVtbl->GetCPUDescriptorHandleForHeapStart(h, &s);
+            p->h[p->nh] = h;
+            p->base[p->nh] = s.ptr;
+            for (k = RC_DPER; k--;) p->free[p->nfree++] = p->nh * RC_DPER + k;
+            p->nh++;
+            wlog("d3d: recorder %s heap #%u (%u descriptors)", t == RC_D_RTV ? "RTV" : "DSV", p->nh, RC_DHEAP);
+        }
+    }
+    if (p->nfree) { *id = p->free[--p->nfree]; ok = 1; }
+    ReleaseSRWLockExclusive(&rc_dlock);
+    return ok;
+}
+
+/* devolve os blocos da gravadora (Reset/Release: a reproducao anterior ja foi gravada na lista real) */
+static void rc_dfree(rc_list *l)
+{
+    int t;
+    AcquireSRWLockExclusive(&rc_dlock);
+    for (t = 0; t < RC_D_N; t++) {
+        rc_dlist *d = &l->d[t];
+        while (d->n) rc_dp[t].free[rc_dp[t].nfree++] = d->b[--d->n];
+        d->used = 0;
+    }
+    ReleaseSRWLockExclusive(&rc_dlock);
+}
+
+/* copia n descritores contiguos de src para um bloco da gravadora; devolve o handle da copia (src se nao der) */
+static SIZE_T rc_dcopy(rc_list *l, int t, SIZE_T src, UINT n)
+{
+    rc_dlist *d = &l->d[t];
+    rc_dpool *p = &rc_dp[t];
+    uint32_t id;
+    D3D12_CPU_DESCRIPTOR_HANDLE dst, s = { src };
+    if (!n || n > RC_DBLK || !l->dev) return src;
+    if (!d->n || d->used + n > RC_DBLK) {
+        if (d->n == d->cap) {
+            uint32_t cap = d->cap ? d->cap * 2 : 4, *b = realloc(d->b, cap * sizeof *b);
+            if (!b) return src;
+            d->b = b;
+            d->cap = cap;
+        }
+        if (!rc_dblock(l->dev, t, &id)) {
+            if (!InterlockedExchange(&rc_dfail_logged, 1))
+                wlog("d3d: recorder %s copies exhausted; recording the original handles", t == RC_D_RTV ? "RTV" : "DSV");
+            return src;
+        }
+        d->b[d->n++] = id;
+        d->used = 0;
+    }
+    id = d->b[d->n - 1];
+    dst.ptr = p->base[id / RC_DPER] + ((SIZE_T)(id % RC_DPER) * RC_DBLK + d->used) * p->inc;
+    d->used += n;
+    l->dev->lpVtbl->CopyDescriptorsSimple(l->dev, n, dst, s, rc_dtype[t]);
+    return dst.ptr;
+}
+
 /* ---- IUnknown / ID3D12Object / ID3D12DeviceChild / ID3D12CommandList ---- */
 static HRESULT STDMETHODCALLTYPE rc_QueryInterface(GCL2 *This, REFIID riid, void **out)
 {
@@ -186,6 +281,7 @@ static ULONG STDMETHODCALLTYPE rc_Release(GCL2 *This)
     if (r) return (ULONG)r;
     InterlockedDecrement(&rc_live);
     while (l->priv) { rc_priv *p = l->priv; l->priv = p->next; rc_priv_drop(p); }
+    rc_dfree(l);
     if (l->cap > RC_KEEP_BUF) { free(l->buf); l->buf = NULL; l->cap = 0; }
     l->len = l->ncmd = 0;
     l->oom = l->open = l->pred = 0;
@@ -197,7 +293,7 @@ static ULONG STDMETHODCALLTYPE rc_Release(GCL2 *This)
         l = NULL;
     }
     ReleaseSRWLockExclusive(&rc_lock);
-    if (l) { free(l->buf); free(l); }
+    if (l) { free(l->buf); free(l->d[RC_D_RTV].b); free(l->d[RC_D_DSV].b); free(l); }
     return 0;
 }
 
@@ -264,6 +360,7 @@ static HRESULT STDMETHODCALLTYPE rc_Reset(GCL2 *This, ID3D12CommandAllocator *a,
 {
     rc_list *l = L(This);
     (void)a;
+    rc_dfree(l);
     l->len = l->ncmd = 0;
     l->oom = l->pred = 0;
     l->pso0 = ps;
@@ -370,22 +467,28 @@ static void STDMETHODCALLTYPE rc_OMSetRenderTargets(GCL2 *This, UINT n, const D3
     rc_a_omrt *a = rc_put(L(This), RC_OMSetRenderTargets, RC_ALIGN(sizeof *a) + nrt * sizeof *rts);
     if (!a) return;
     a->n = n; a->single = single ? 1 : 0; a->nrt = nrt;
-    if (rts) { a->has_rt = 1; memcpy(AFTER(a), rts, nrt * sizeof *rts); }
-    if (ds) { a->has_ds = 1; a->ds = *ds; }
+    if (rts) {
+        D3D12_CPU_DESCRIPTOR_HANDLE *h = (void *)AFTER(a);
+        UINT i;
+        a->has_rt = 1;
+        if (single) { if (nrt) h->ptr = rc_dcopy(L(This), RC_D_RTV, rts->ptr, n); }
+        else for (i = 0; i < nrt; i++) h[i].ptr = rc_dcopy(L(This), RC_D_RTV, rts[i].ptr, 1);
+    }
+    if (ds) { a->has_ds = 1; a->ds.ptr = rc_dcopy(L(This), RC_D_DSV, ds->ptr, 1); }
 }
 static void STDMETHODCALLTYPE rc_ClearDepthStencilView(GCL2 *This, D3D12_CPU_DESCRIPTOR_HANDLE h, D3D12_CLEAR_FLAGS f, FLOAT d, UINT8 s,
                                                        UINT n, const D3D12_RECT *r)
 {
     rc_a_cleards *a = rc_put(L(This), RC_ClearDepthStencilView, RC_ALIGN(sizeof *a) + (r ? n * sizeof *r : 0));
     if (!a) return;
-    a->h = h; a->flags = f; a->depth = d; a->stencil = s;
+    a->h.ptr = rc_dcopy(L(This), RC_D_DSV, h.ptr, 1); a->flags = f; a->depth = d; a->stencil = s;
     if (r) { a->n = n; memcpy(AFTER(a), r, n * sizeof *r); }
 }
 static void STDMETHODCALLTYPE rc_ClearRenderTargetView(GCL2 *This, D3D12_CPU_DESCRIPTOR_HANDLE h, const FLOAT c[4], UINT n, const D3D12_RECT *r)
 {
     rc_a_clearrt *a = rc_put(L(This), RC_ClearRenderTargetView, RC_ALIGN(sizeof *a) + (r ? n * sizeof *r : 0));
     if (!a) return;
-    a->h = h;
+    a->h.ptr = rc_dcopy(L(This), RC_D_RTV, h.ptr, 1);
     if (c) memcpy(a->c, c, sizeof a->c);
     if (r) { a->n = n; memcpy(AFTER(a), r, n * sizeof *r); }
 }

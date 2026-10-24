@@ -201,6 +201,95 @@ TEST(cmdrec_replay_arguments)
     a->lpVtbl->Release(a);
 }
 
+/* RTV/DSV gravados vao para copias num heap do proxy (o Azimuth pode reaproveitar o slot antes do ECL); os blocos
+   voltam no Reset/Release */
+static ID3D12DescriptorHeapVtbl dc_hvt;
+static struct { ID3D12DescriptorHeapVtbl *vt; SIZE_T base; } dc_heaps[4];
+static int dc_nheaps, dc_ncopies;
+static struct { UINT n; SIZE_T dst, src; D3D12_DESCRIPTOR_HEAP_TYPE t; } dc_copy[32];
+static D3D12_CPU_DESCRIPTOR_HANDLE *STDMETHODCALLTYPE dc_start(ID3D12DescriptorHeap *h, D3D12_CPU_DESCRIPTOR_HANDLE *r)
+{ r->ptr = ((const SIZE_T *)h)[1]; return r; }
+static HRESULT STDMETHODCALLTYPE dc_create_heap(ID3D12Device *d, const D3D12_DESCRIPTOR_HEAP_DESC *hd, REFIID r, void **o)
+{
+    (void)d; (void)r;
+    if (hd->Flags || hd->NumDescriptors != RC_DHEAP) return E_INVALIDARG;
+    dc_hvt.GetCPUDescriptorHandleForHeapStart = dc_start;
+    dc_heaps[dc_nheaps].vt = &dc_hvt;
+    dc_heaps[dc_nheaps].base = hd->Type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ? 0x100000 : 0x800000;
+    *o = &dc_heaps[dc_nheaps++];
+    return S_OK;
+}
+static UINT STDMETHODCALLTYPE dc_inc(ID3D12Device *d, D3D12_DESCRIPTOR_HEAP_TYPE t) { (void)d; return t == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ? 32 : 8; }
+static void STDMETHODCALLTYPE dc_copy1(ID3D12Device *d, UINT n, D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_CPU_DESCRIPTOR_HANDLE src,
+                                       D3D12_DESCRIPTOR_HEAP_TYPE t)
+{
+    (void)d;
+    dc_copy[dc_ncopies].n = n; dc_copy[dc_ncopies].dst = dst.ptr; dc_copy[dc_ncopies].src = src.ptr; dc_copy[dc_ncopies++].t = t;
+}
+
+TEST(cmdrec_rtv_dsv_copied_at_record)
+{
+    static ID3D12DeviceVtbl dvt;
+    struct { ID3D12DeviceVtbl *vt; } dev = { &dvt };
+    const D3D12_CPU_DESCRIPTOR_HANDLE rt[3] = { { 0x100 }, { 0x200 }, { 0x300 } }, ds = { 0x900 };
+    const FLOAT col[4] = { 0 };
+    rc_list spy;
+    void *out = NULL;
+    GCL2 *a, *b;
+    int i;
+    dvt.CreateDescriptorHeap = dc_create_heap;
+    dvt.GetDescriptorHandleIncrementSize = dc_inc;
+    dvt.CopyDescriptorsSimple = dc_copy1;
+    REQUIRE(SUCCEEDED(rc_create((ID3D12Device *)&dev, NULL, &IID_ID3D12GraphicsCommandList2, &out)));
+    a = out;
+    spy_vt = rc_vt;
+    spy_vt.OMSetRenderTargets = spy_om;
+    memset(&spy, 0, sizeof spy);
+    spy.vt = &spy_vt;
+    log_capture();
+    /* faixa de 3 RTVs: copiada inteira; DSV no outro heap */
+    a->lpVtbl->OMSetRenderTargets(a, 3, rt, TRUE, &ds);
+    CHECK_EQ(dc_nheaps, 2);
+    CHECK_EQ(dc_ncopies, 2);
+    CHECK_EQ(dc_copy[0].n, 3); CHECK_EQ(dc_copy[0].src, 0x100); CHECK_EQ(dc_copy[0].dst, 0x100000);
+    CHECK(dc_copy[0].t == D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+    CHECK_EQ(dc_copy[1].n, 1); CHECK_EQ(dc_copy[1].src, 0x900); CHECK_EQ(dc_copy[1].dst, 0x800000);
+    CHECK(dc_copy[1].t == D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    CHECK(log_has("d3d: recorder RTV heap #1 (16384 descriptors)"));
+    /* vetor de handles: cada um no slot seguinte do mesmo bloco */
+    a->lpVtbl->OMSetRenderTargets(a, 2, rt + 1, FALSE, NULL);
+    CHECK_EQ(dc_copy[2].src, 0x200); CHECK_EQ(dc_copy[2].dst, 0x100000 + 3 * 32);
+    CHECK_EQ(dc_copy[3].src, 0x300); CHECK_EQ(dc_copy[3].dst, 0x100000 + 4 * 32);
+    a->lpVtbl->ClearRenderTargetView(a, rt[0], col, 0, NULL);
+    a->lpVtbl->ClearDepthStencilView(a, ds, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
+    CHECK_EQ(dc_copy[4].dst, 0x100000 + 5 * 32);
+    CHECK_EQ(dc_copy[5].dst, 0x800000 + 8);
+    /* a reproducao usa as copias, nunca os slots do Azimuth */
+    rc_play((GCL2 *)&spy, L(a));
+    CHECK_EQ(spy_omn, 2); CHECK_EQ(spy_single, 0); CHECK_EQ(spy_rt1, 0x100000 + 4 * 32); CHECK(spy_ds_null);
+    CHECK_EQ(L(a)->d[RC_D_RTV].n, 1);
+    CHECK_EQ(rc_dp[RC_D_RTV].nfree, 255);
+    /* Reset devolve o bloco; a outra gravadora pega o mesmo */
+    a->lpVtbl->Reset(a, NULL, NULL);
+    CHECK_EQ(L(a)->d[RC_D_RTV].n, 0);
+    CHECK_EQ(rc_dp[RC_D_RTV].nfree, 256);
+    CHECK(SUCCEEDED(rc_create((ID3D12Device *)&dev, NULL, &IID_ID3D12GraphicsCommandList2, &out)));
+    b = out;
+    b->lpVtbl->ClearRenderTargetView(b, rt[2], col, 0, NULL);
+    CHECK_EQ(dc_copy[6].dst, 0x100000);
+    /* faixa que nao cabe no resto do bloco: bloco novo */
+    for (i = 0; i < 9; i++) b->lpVtbl->OMSetRenderTargets(b, 7, rt, TRUE, NULL);   /* 1 + 63: bloco cheio */
+    CHECK_EQ(L(b)->d[RC_D_RTV].n, 1);
+    CHECK_EQ(dc_copy[15].dst, 0x100000 + 57 * 32);
+    b->lpVtbl->OMSetRenderTargets(b, 7, rt, TRUE, NULL);
+    CHECK_EQ(L(b)->d[RC_D_RTV].n, 2);
+    CHECK_EQ(dc_copy[16].dst, 0x100000 + 64 * 32);
+    b->lpVtbl->Release(b);
+    CHECK_EQ(rc_dp[RC_D_RTV].nfree, 256);
+    CHECK_EQ(dc_nheaps, 2);
+    a->lpVtbl->Release(a);
+}
+
 /* fila/device/allocator falsos para o rc_merge; as listas "reais" sao gravadoras com vtable propria (espiao) */
 static int fk_allocs, fk_alloc_resets, fk_reals, fk_real_resets;
 static HRESULT STDMETHODCALLTYPE fk_alloc_reset(ID3D12CommandAllocator *a) { (void)a; fk_alloc_resets++; return S_OK; }
