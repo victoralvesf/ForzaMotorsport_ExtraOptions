@@ -1113,6 +1113,7 @@ extern int debug12_install(void);
 extern void stutter_install(void);
 extern int cmdalloc_age_patch(int ms);
 extern int tile_nohazard_patch(int on);
+extern int xma_start_patch(int on);
 extern int retire_margin_patch(int n);
 extern void defer_release_setup(void);
 extern void list_pool_setup(void);
@@ -1304,6 +1305,8 @@ static void hook_apply_patches(void *image, const void *options)
     cmdalloc_age_patch(dbg_int(L"AllocatorMaxAgeMs", is_fm6() ? -1 : 0));
     /* mapeamentos de tiles do streaming sem sincronizar a fila: no FM6 sempre (GPU longa, PASSO 69) */
     tile_nohazard_patch(dbg_int(L"TileNoHazard", is_fm6()));
+    /* vozes XMA sem o ataque cortado (FFmpeg ja descarta o 1o quadro): no FM6 sempre (clique do menu, PASSO 114) */
+    xma_start_patch(dbg_int(L"XmaStartFix", is_fm6()));
     /* ultima Release do reaper espalhada: no FM6 sempre (stutters e queda da GPU, PASSO 70) */
     defer_release_setup();
     /* EXPERIMENTO: aposentadoria do Azimuth atrasada N envios (PASSO 81; so com RetireMargin no debug.ini) */

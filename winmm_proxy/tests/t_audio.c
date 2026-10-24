@@ -299,3 +299,53 @@ TEST(audio_dump_xma_input_of_new_voice)
     apu_ptr = NULL;
     dump_secs = 0;
 }
+
+/* roda o stub do descarte como o Azimuth chega nele (eax = subquadros, r12d = quadros antes, r14 = voz);
+   o "volta" do stub (azimuth+0x18f297 na imagem falsa) e um ret */
+static uint32_t run_discard_stub(uint8_t *stub, uint32_t subframes, uint32_t frames)
+{
+    uint32_t voice[16] = { 0 };
+    uint32_t *v = voice;
+    __asm__ volatile("mov %[s], %%eax\n\tmov %[f], %%r12d\n\tmov %[v], %%r14\n\tcall *%[st]"
+                     : : [s] "r"(subframes), [f] "r"(frames), [v] "r"(v), [st] "r"(stub)
+                     : "rax", "rcx", "r12", "r14", "memory", "cc");
+    return voice[0x30 / 4];
+}
+
+TEST(audio_xma_start_patch)
+{
+    static const uint8_t site[27] = { 0x41, 0x0f, 0xb6, 0x45, 0x07, 0x83, 0xe0, 0x07,       /* movzx/and (antes) */
+                                      0x42, 0x8d, 0x0c, 0xa0, 0xc1, 0xe1, 0x07, 0x41, 0x89, 0x4e, 0x30,
+                                      0x41, 0x81, 0x65, 0x08, 0x00, 0x00, 0x00, 0xfc };      /* and (depois) */
+    uint8_t *az = fake_azimuth(2), *stub;
+    log_capture();
+    CHECK(!xma_start_patch(1));                                   /* bytes zerados: nao confere */
+    CHECK(log_has("XMA voice start (azimuth+0x18f28c) does not match"));
+    memcpy(az + 0x18f284, site, sizeof site);
+    CHECK(!xma_start_patch(0));
+    CHECK(!memcmp(az + 0x18f284, site, sizeof site));
+    CHECK(xma_start_patch(1));
+    CHECK(az[0x18f28c] == 0xe9);
+    CHECK_HEX(az + 0x18f291, "909090909090");
+    CHECK_HEX(az + 0x18f297, "41816508");                         /* seguinte intacto */
+    stub = az + 0x18f291 + *(int32_t *)(az + 0x18f28d);
+    CHECK_HEX(stub, "428d0ca0" "c1e107" "81e900020000" "7d02" "31c9" "41894e30" "ff2500000000");
+    CHECK(*(uint8_t **)(stub + 27) == az + 0x18f297);
+    az[0x18f297] = 0xc3;
+    CHECK_EQ(run_discard_stub(stub, 3, 0), 0);                    /* 384 - 512: o som comeca no 1o quadro do FFmpeg */
+    CHECK_EQ(run_discard_stub(stub, 4, 0), 0);
+    CHECK_EQ(run_discard_stub(stub, 7, 0), 384);
+    CHECK_EQ(run_discard_stub(stub, 3, 8), (3 + 32) * 128 - 512); /* inicio no meio do pacote */
+    memset(az + 0x18f284, 0, 64);
+}
+
+TEST(audio_xma_start_patch_on_real_azimuth)
+{
+    uint8_t *az = pe_map(AZIMUTH_EXE, NULL);
+    if (!az) { test_skip(AZIMUTH_EXE " ausente"); return; }
+    g_base = az;
+    log_capture();
+    CHECK(xma_start_patch(1));
+    CHECK(az[0x18f28c] == 0xe9);
+    pe_unmap(az);
+}
