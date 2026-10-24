@@ -1390,6 +1390,61 @@ XG_BAD_SLOT(12) XG_BAD_SLOT(13) XG_BAD_SLOT(14) XG_BAD_SLOT(15)
 typedef uint64_t (*xg_texel_offset_fn)(void *self, uint32_t plane, uint32_t mip, uint64_t x,
                                        uint32_t y, uint32_t z_or_slice, uint32_t sample);
 
+/* XG do FM5: os mips > 0 de formatos BC tem (elementos do mip 0) >> mip blocos por eixo (960x540 BC7: 120x67 no
+   mip 1, certo 120x68; o XG do FH2/FM6 conta certo). O Azimuth monta o mapa de enderecos (0x1400a0090/0x1400a2e00)
+   so com os Width/HeightElements do layout -> a ultima linha/coluna de blocos desses mips nunca era escrita na
+   textura do D3D12 (lixo da GPU: a linha colorida do flare do sol na altura do velocimetro, lensflare_lenstexture =
+   sujeira da lente 960x540 BC7 reduzida -> o trilinear mistura o mip 1). xg_fix_bc_mips corrige as contagens no
+   proprio computer (o GetResourceLayout copia de +0x54b8; os enderecos ja contados nao mudam e os novos sao os
+   mesmos do XG do FM6, tools/xg_layout_probe.c) e xg_clamp_tail faz os elementos novos repetirem o ultimo de dentro
+   (a memoria do jogo ali tambem nao tem o conteudo: so com a contagem a linha ficou cinza). Desc 2D e 3D: Width [0],
+   Height [1], Format [4]. */
+static int xg_is_bc(uint32_t f) { return (f >= 70 && f <= 84) || (f >= 94 && f <= 99); }
+
+static int xg_fix_bc_mips(uint8_t *self, const uint32_t *desc)
+{
+    uint32_t mips, i, fixed = 0;
+    if (!xg_is_bc(desc[4])) return 0;
+    mips = *(uint32_t *)(self + 0x54c8);
+    if (!mips || mips > 15) return 0;
+    if (*(uint32_t *)(self + 0x5528) != (desc[0] + 3) / 4 || *(uint32_t *)(self + 0x552c) != (desc[1] + 3) / 4)
+        return 0;   /* mip 0 fora do esperado: nao mexer */
+    for (i = 1; i < mips; i++) {
+        uint32_t *we = (uint32_t *)(self + 0x5528 + i * 0x48), *he = we + 1;
+        uint32_t w = desc[0] >> i ? desc[0] >> i : 1, h = desc[1] >> i ? desc[1] >> i : 1;
+        if (*we < (w + 3) / 4) { *we = (w + 3) / 4; fixed++; }
+        if (*he < (h + 3) / 4) { *he = (h + 3) / 4; fixed++; }
+    }
+    return (int)fixed;
+}
+
+/* Destino linear do CopyFromSubresource: elementos alem de (elementos do mip 0) >> mip repetem o ultimo de dentro.
+   Devolve quantas linhas + colunas foram repetidas (0 = nada muda: mip 0, mip ja coberto, formato sem bloco). */
+static uint32_t xg_clamp_tail(const uint8_t *self, uint8_t *dst, uint32_t plane, uint32_t subres, uint32_t row_pitch,
+                              uint32_t depth_pitch)
+{
+    const uint8_t *pl = self + plane * 0x460;
+    uint32_t mips = *(const uint32_t *)(self + 0x54c8), mip, w, h, d, ow, oh, bpe, x, y, z;
+    if (!mips || mips > 15) return 0;
+    mip = subres % mips;
+    if (!mip) return 0;
+    bpe = *(const uint32_t *)(pl + 0x54f0);
+    w = *(const uint32_t *)(pl + mip * 0x48 + 0x5528);
+    h = *(const uint32_t *)(pl + mip * 0x48 + 0x552c);
+    d = *(const uint32_t *)(self + 0x61f0) == 4 ? *(const uint32_t *)(pl + mip * 0x48 + 0x5530) : 1;
+    ow = *(const uint32_t *)(pl + 0x5528) >> mip; if (!ow) ow = 1;
+    oh = *(const uint32_t *)(pl + 0x552c) >> mip; if (!oh) oh = 1;
+    if ((ow >= w && oh >= h) || !bpe || bpe > 16 || (size_t)w * bpe > row_pitch) return 0;
+    for (z = 0; z < d; z++) {
+        uint8_t *sl = dst + (size_t)z * depth_pitch;
+        for (y = oh; y < h; y++) memcpy(sl + (size_t)y * row_pitch, sl + (size_t)(oh - 1) * row_pitch, (size_t)w * bpe);
+        for (y = 0; y < h; y++)
+            for (x = ow; x < w; x++)
+                memcpy(sl + (size_t)y * row_pitch + (size_t)x * bpe, sl + (size_t)y * row_pitch + (size_t)(ow - 1) * bpe, bpe);
+    }
+    return (h > oh ? h - oh : 0) + (w > ow ? w - ow : 0);
+}
+
 static long xg_copy_from_subresource(uint8_t *self, uint8_t *dst, uint32_t plane, uint32_t subres,
                                      const uint8_t *src, uint32_t row_pitch, uint32_t depth_pitch)
 {
@@ -1409,6 +1464,14 @@ static long xg_copy_from_subresource(uint8_t *self, uint8_t *dst, uint32_t plane
                 if (off == (uint64_t)-1) return (long)0x80070057;
                 memcpy(dst + (size_t)z * depth_pitch + (size_t)y * row_pitch + (size_t)x * bpe, src + off, bpe);
             }
+    if (xg_clamp_tail(self, dst, plane, subres, row_pitch, depth_pitch)) {
+        static LONG logged;
+        if (InterlockedIncrement(&logged) <= 16)
+            wlog("XG: copy subresource %u (mip %u, %ux%u elements of %u bytes, row pitch %u): last block row/column "
+                 "repeated past %ux%u", subres, mip, w, h, bpe, row_pitch,
+                 *(uint32_t *)(pl + 0x5528) >> mip ? *(uint32_t *)(pl + 0x5528) >> mip : 1,
+                 *(uint32_t *)(pl + 0x552c) >> mip ? *(uint32_t *)(pl + 0x552c) >> mip : 1);
+    }
     return 0;
 }
 
@@ -1470,7 +1533,15 @@ static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
             desc[n + 3] = 0;
         }
         orig_xg_computer(out, name, desc);
-        if (*(void ***)out) xg_wrap_computer(*(void ***)out);  /* out[0] = computer */
+        if (*(void ***)out) {   /* out[0] = computer */
+            if (n && xg_fix_bc_mips(*(uint8_t **)out, desc)) {
+                static LONG logged;
+                if (InterlockedIncrement(&logged) <= 16)
+                    wlog("XG: BC %ux%u mips %u fmt %u tile %u: mip element counts rounded up", desc[0], desc[1],
+                         desc[2], desc[4], desc[n + 1]);
+            }
+            xg_wrap_computer(*(void ***)out);
+        }
         return;
     }
     orig_xg_computer(out, name, desc);

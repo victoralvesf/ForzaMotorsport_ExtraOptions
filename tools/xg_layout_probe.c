@@ -30,7 +30,7 @@ int main(int argc, char **argv)
     mips = atoi(argv[5]);
     desc[0] = atoi(argv[3]); desc[1] = atoi(argv[4]); desc[2] = mips; desc[3] = 1; desc[4] = atoi(argv[6]);
     desc[5] = 1; desc[6] = 0; desc[7] = 0; desc[8] = 8; desc[9] = 0; desc[10] = 0;
-    n = fm5 ? 11 : 13;
+    n = fm5 ? 12 : 13;   /* FM5: 1 dword ESRAM [11], TileMode [12], Pitch [13]; novo: 2 dwords, TileMode [13] */
     desc[n] = atoi(argv[7]); desc[n + 1] = 0;
     hr = create(desc, &comp);
     if (hr < 0 || !comp) { printf("create hr=%#lx\n", hr); return 1; }
