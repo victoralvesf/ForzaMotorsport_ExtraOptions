@@ -38,9 +38,6 @@ debug_user_logs/
 .claude/settings.local.json
 fm6_gs_dump/
 
-# Discord announcement draft (local)
-CHANGELOG.md
-
 # gravacao do audio do FM6 (debug.ini AudioDump)
 audio_fm6_out.wav
 audio_fm6_shape.bin

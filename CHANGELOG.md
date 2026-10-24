@@ -1,0 +1,59 @@
+# Changelog
+
+Azimuth Motorsport lets Forza Motorsport 5 (1.0.0.20) and Forza Motorsport 6 (1.0.0.44) run on Azimuth, which
+officially supports only Forza Horizon 2 and FH2 Fast & Furious. It ships as a proxy `winmm.dll` plus the optional
+`azimuth_fm5.ini` / `azimuth_fm6.ini`. Everything happens in memory: `azimuth.exe` is never modified on disk and
+FH2 keeps working as before.
+
+Requirements: Azimuth 0.9.9 and your own dump of FM5 1.0.0.20 and/or FM6 1.0.0.44.
+
+When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.exe`) and `data\logs\azimuth.log`.
+
+## Unreleased
+
+### Fixes
+- **FM5:** the gear ratio chart in the tuning menu was drawn out of place at resolutions above 1080p. It now
+  follows the resolution chosen in the launcher, like the rest of the UI.
+- **FM5:** a colored line showed up across the sun lens flare, at about the height of the speedometer. The last
+  row of some small, compressed textures was never uploaded to the GPU, and that leftover garbage is what
+  appeared on screen.
+
+## v1.3.0 — FM6 shadows, smooth edges and stability fixes
+
+### New
+- **FM6:** the launcher's Shadows preset is now applied. High and Ultra use shadow maps of up to 4096 and give
+  noticeably sharper, more detailed shadows.
+
+### Fixes
+- **FM6:** a checkerboard pattern appeared on the edges of car liveries, fences, foliage and the crowd. These
+  edges are now smooth. Controlled by `AlphaToCoverageNoDither` in `azimuth_fm6.ini` (on by default).
+- **FM6 / FM5:** random crash right after launch on NVIDIA systems where features of the NVIDIA app load CUDA
+  into the game.
+- **FM6:** driver crash after long sessions (around 20 minutes of racing).
+- **FM6:** audible click at the start of sounds such as the menu navigation sound. Every sound was losing its
+  first few milliseconds.
+- **Linux (Wine/Proton):** GPU page faults on vkd3d-proton with RADV. The workaround for the AMD Windows driver
+  is now off by default when running under Wine.
+
+## Current support
+
+### FM6
+- Boot, menus, videos, audio and races, with sessions of an hour or more without crashes.
+- Launcher resolution, frame rate (up to 180 fps), Car Detail and Shadows presets.
+- `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `AlphaToCoverageNoDither`.
+
+### FM5
+- MSAA and 16x anisotropic filtering.
+- Launcher resolution, with the UI scaled correctly.
+- 60, 120 and 180 fps, with the launcher frame rate kept in the menus as well.
+- Car Detail, Shadows and Reflections presets.
+- `azimuth_fm5.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`.
+
+### Known limitations
+- **FM6:** launcher graphics settings other than resolution, frame rate, Car Detail and Shadows aren't applied yet.
+- **FM6:** very heavy scenes can drop below the chosen frame rate.
+- **FM6:** the RivaTuner (RTSS) overlay can crash the game.
+- **FM5:** the Particles and Motion Blur presets have no effect.
+- No Xbox Live features (Rivals, online play, leaderboards).
+
+Downloads: https://github.com/victoralvesf/azimuth-motorsport/releases
