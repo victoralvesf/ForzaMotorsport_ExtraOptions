@@ -1719,66 +1719,47 @@ TEST(fm6_ui_trace_logs_distinct_rects)
 }
 
 
-/* sampler nulo -> sampler padrao do D3D11, criado uma vez pelo CreateSamplerState do Azimuth (0x1400626f0) */
-static void *ss_seen[16];
-static UINT ss_stage, ss_start, ss_n, ss_calls;
-static void ss_orig(void *ctx, UINT stage, UINT start, UINT n, void *const *pp)
+/* tabela de samplers: bloco do Azimuth completado ate a classe (4/8/16) com o sampler nulo do device */
+static uint64_t sb_seen[16];
+static UINT sb_n, sb_calls;
+static void *sb_orig(uint8_t *alloc, void *out, void *key, const uint64_t *handles, UINT n, uint64_t fence, uint8_t pin)
 {
     UINT i;
-    (void)ctx;
-    ss_stage = stage; ss_start = start; ss_n = n; ss_calls++;
-    for (i = 0; i < n && i < 16; i++) ss_seen[i] = pp ? pp[i] : (void *)(uintptr_t)0xdead;
-}
-static uint32_t ss_desc[13];
-static void *ss_dev;
-static int ss_creates;
-static void *ss_obj_vt[3], *ss_obj[1] = { ss_obj_vt };
-static long ss_create(void *dev, const void *desc, void **out)
-{
-    ss_dev = dev; ss_creates++;
-    memcpy(ss_desc, desc, sizeof ss_desc);
-    *out = ss_obj;
-    return 0;
+    (void)alloc; (void)key; (void)fence; (void)pin;
+    sb_n = n; sb_calls++;
+    for (i = 0; i < n && i < 16; i++) sb_seen[i] = handles[i];
+    return out;
 }
 
-TEST(null_sampler_binds_default_state)
+TEST(sampler_table_block_padded_with_null_sampler)
 {
-    uint8_t *az = fake_azimuth(1);
-    void *a = (void *)(uintptr_t)0x1111, *b = (void *)(uintptr_t)0x2222;
-    void *pp[3] = { a, NULL, b };
-    float f;
+    static const uint32_t classes[9] = { 4, 0, 64, 8, 64, 128, 16, 192, 48 };
+    static uint8_t dev[0x7000];
+    uint8_t *az = fake_azimuth(1), *alloc = dev + 0x2420;
+    uint64_t h[9] = { 0x100, 0x200, 0x300, 0x400, 0x500, 0x600, 0x700, 0x800, 0x900 };
+    int out;
     log_capture();
-    /* CreateSamplerState do Azimuth: jmp absoluto p/ o falso */
-    az[RVA_CREATE_SAMPLER] = 0xff; az[RVA_CREATE_SAMPLER + 1] = 0x25;
-    memset(az + RVA_CREATE_SAMPLER + 2, 0, 4);
-    *(void **)(az + RVA_CREATE_SAMPLER + 6) = (void *)ss_create;
-    orig_set_samplers = ss_orig;
-    g_default_sampler = NULL;
-    g_az_device = (void *)(uintptr_t)0x5000;
-    ss_calls = 0; ss_creates = 0;
-    /* nenhum nulo: repassa como esta */
-    hook_set_samplers((void *)1, 4, 0, 1, pp);
-    CHECK(ss_calls == 1 && ss_seen[0] == a && ss_creates == 0);
-    /* slot do meio nulo: vira o padrao */
-    hook_set_samplers((void *)1, 4, 2, 3, pp);
-    CHECK(ss_calls == 2 && ss_stage == 4 && ss_start == 2 && ss_n == 3);
-    CHECK(ss_seen[0] == a && ss_seen[1] == (void *)ss_obj && ss_seen[2] == b);
-    CHECK(ss_creates == 1 && ss_dev == (void *)(uintptr_t)0x5000);
-    /* desc padrao do D3D11, escrito aqui: MIN_MAG_MIP_LINEAR, CLAMP x3, bias 0, aniso 1, NEVER, borda 1, LOD +-FLT_MAX */
-    CHECK_EQ(ss_desc[0], 0x15);
-    CHECK(ss_desc[1] == 3 && ss_desc[2] == 3 && ss_desc[3] == 3);
-    CHECK_EQ(ss_desc[4], 0);
-    CHECK(ss_desc[5] == 1 && ss_desc[6] == 1);
-    CHECK(ss_desc[7] == 0x3f800000 && ss_desc[10] == 0x3f800000);
-    memcpy(&f, &ss_desc[11], 4); CHECK(f < -3.4e38f);
-    memcpy(&f, &ss_desc[12], 4); CHECK(f > 3.4e38f);
-    /* array nulo (Set*(start, n, NULL)): todos viram o padrao; o sampler e criado uma vez so */
-    hook_set_samplers((void *)1, 0, 0, 2, NULL);
-    CHECK(ss_seen[0] == (void *)ss_obj && ss_seen[1] == (void *)ss_obj && ss_creates == 1);
-    CHECK(log_has("d3d: default sampler") && log_has("null sampler bind #1: stage 4 slots 2+3 (1 null)"));
-    /* fora do FM5/FM6: repassa */
-    fake_azimuth(0);
-    hook_set_samplers((void *)1, 4, 0, 3, pp);
-    CHECK(ss_seen[1] == NULL);
-    orig_set_samplers = NULL; g_default_sampler = NULL; g_az_device = NULL;
+    memcpy(az + RVA_SAMPLER_CLASSES, classes, sizeof classes);
+    *(uint64_t *)(dev + 0x6958) = 0xabc0;            /* sampler nulo do device (handle de CPU) */
+    orig_sampler_block = sb_orig;
+    sb_calls = 0;
+    /* 3 handles -> bloco de 4: o 4o slot e o sampler nulo */
+    CHECK(hook_sampler_block(alloc, &out, NULL, h, 3, 7, 0) == &out);
+    CHECK(sb_calls == 1 && sb_n == 4);
+    CHECK(sb_seen[0] == 0x100 && sb_seen[1] == 0x200 && sb_seen[2] == 0x300 && sb_seen[3] == 0xabc0);
+    /* ja no tamanho da classe: repassa */
+    hook_sampler_block(alloc, &out, NULL, h, 4, 7, 0);
+    CHECK(sb_n == 4 && sb_seen[3] == 0x400);
+    /* 5 -> classe de 8 */
+    hook_sampler_block(alloc, &out, NULL, h, 5, 7, 0);
+    CHECK(sb_n == 8 && sb_seen[4] == 0x500 && sb_seen[5] == 0xabc0 && sb_seen[7] == 0xabc0);
+    /* 9 -> 16 */
+    hook_sampler_block(alloc, &out, NULL, h, 9, 7, 0);
+    CHECK(sb_n == 16 && sb_seen[8] == 0x900 && sb_seen[15] == 0xabc0);
+    CHECK(log_has("d3d: sampler table block 3 -> 4 slots"));
+    /* sem sampler nulo no device: repassa como esta */
+    *(uint64_t *)(dev + 0x6958) = 0;
+    hook_sampler_block(alloc, &out, NULL, h, 3, 7, 0);
+    CHECK(sb_n == 3);
+    orig_sampler_block = NULL;
 }

@@ -1241,7 +1241,6 @@ static DWORD WINAPI trace_thread(void *arg)
 /* ------------------------------------------------------------------------ */
 typedef long (*createx_fn)(const void *desc, void **dev, void **ctx);
 
-static void *g_az_device;
 static long WINAPI fm5_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, UINT flags,
                                          const UINT *levels, UINT nlevels, UINT sdk,
                                          void **out_dev, UINT *out_level, void **out_ctx)
@@ -1260,7 +1259,6 @@ static long WINAPI fm5_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p context=%p", hr, dev, ctx);
     if (hr < 0) return hr;
 
-    g_az_device = dev;
     install_object_layouts();
     install_device_vtable(dev);
     ctx = proxy_of(ctx);
@@ -3051,7 +3049,6 @@ static long WINAPI fm6_D3D11CreateDevice(void *adapter, UINT type, HMODULE sw, U
     hr = ((createx_fn)(g_base + RVA_CREATE_DEVICEX))(desc, &dev, &ctx);
     wlog("d3d: D3D11XCreateDeviceX hr=%#lx device=%p context=%p (FM6, device in the FH2 layout)", hr, dev, ctx);
     if (hr < 0) return hr;
-    g_az_device = dev;
     wlog("d3d: FM6 device: %d trivial console driver slots in place of the fatal stub",
          fm6_device_fixups(*(void ***)dev));
     fm6_object_layouts();
@@ -3423,54 +3420,38 @@ static FARPROC hook_resolver(const uint8_t *entry)
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 
 /* ------------------------------------------------------------------------ */
-/* Sampler nulo = sampler padrao do D3D11                                     */
+/* Tabelas de samplers: o fim do bloco recebe o sampler nulo do Azimuth        */
 /* ------------------------------------------------------------------------ */
-/* No D3D11 um slot de sampler nulo usa o estado padrao (MIN_MAG_MIP_LINEAR, CLAMP, LOD sem limite). O *SetSamplers
- * do Azimuth (0x1401b2b20, comum aos 6 estagios e ao PSSetFastSampler do FM5) grava o ponteiro nulo e a tabela de
- * samplers do D3D12 fica com um descritor nunca escrito: o FM5/FM6 liga s0 = NULL no lensflare_lenstexture
- * (sujeira da lente) -> filtro/enderecamento indefinidos na GPU -> a linha na borda de baixo do flare do sol.
- * Aqui os nulos viram um sampler com o desc padrao, criado uma vez pelo CreateSamplerState do Azimuth. */
-#define RVA_SET_SAMPLERS   0x1b2b20   /* (ctx, estagio, inicio, n, pp) */
-#define RVA_CREATE_SAMPLER 0x626f0    /* CreateSamplerState(device, desc, out) = slot 0x17 do device */
-static void *volatile g_default_sampler;
-static void (*orig_set_samplers)(void *ctx, UINT stage, UINT start, UINT n, void *const *pp);
-volatile LONG null_sampler_binds;
+/* Por draw o Azimuth monta a tabela de samplers do estagio (0x140127740): n = maior sampler que o shader declara + 1,
+ * slots sem sampler -> o sampler nulo do device (+0x6958, criado em 0x140141c0a com o desc padrao do D3D11) e pede um
+ * bloco do heap de 2048 (0x14010ec50(alocador = device+0x2420, out, chave, handles, n, cerca, fixar)): blocos de
+ * 4/8/16 (tabela 0x1402afce0) reaproveitados pela chave, e so os n primeiros slots sao copiados. O shader do
+ * lensflare_lenstexture (sujeira da lente, FM5 e FM6) le o slot 3 (bindPoint do RDEF) de um bloco escrito com 3 ->
+ * descritor nunca escrito na GPU (lixo; LOD solto le os mips pequenos, cuja borda de baixo tem lixo: a linha do
+ * flare do sol). Aqui o bloco e completado ate o tamanho da classe com o sampler nulo (padrao do D3D11). */
+#define RVA_SAMPLER_BLOCK   0x10ec50   /* (alocador, out, chave, handles, n, cerca, fixar) */
+#define RVA_SAMPLER_CLASSES 0x2afce0   /* {tamanho, primeiro, quantidade} x 3 */
+#define SAMPLER_NULL_FROM_ALLOC 0x4538 /* device+0x6958 - (device+0x2420) */
+typedef void *(*sampler_block_fn)(uint8_t *alloc, void *out, void *key, const uint64_t *handles, UINT n,
+                                  uint64_t fence, uint8_t pin);
+static sampler_block_fn orig_sampler_block;
+volatile LONG sampler_blocks_padded;
 
-void *default_sampler(void)
+static void *hook_sampler_block(uint8_t *alloc, void *out, void *key, const uint64_t *handles, UINT n,
+                                uint64_t fence, uint8_t pin)
 {
-    typedef long (*create_sampler_fn)(void *dev, const void *desc, void **out);
-    static const struct { UINT filter, u, v, w; float bias; UINT aniso, cmp; float border[4], minlod, maxlod; } desc = {
-        0x15, 3, 3, 3, 0.0f, 1, 1, { 1.0f, 1.0f, 1.0f, 1.0f }, -3.402823466e+38f, 3.402823466e+38f };
-    void *s = g_default_sampler, *made = NULL;
-    long hr;
-    if (s || !g_az_device) return s;
-    hr = ((create_sampler_fn)(g_base + RVA_CREATE_SAMPLER))(g_az_device, &desc, &made);
-    if (hr < 0 || !made) { wlog("d3d: default sampler: CreateSamplerState hr=%#lx", hr); return NULL; }
-    if ((s = InterlockedCompareExchangePointer((void *volatile *)&g_default_sampler, made, NULL)) != NULL)
-        ((ULONG (*)(void *))(*(void ***)made)[2])(made);   /* outra thread criou antes: fica com aquele */
-    else {
-        s = made;
-        wlog("d3d: default sampler %p (null sampler slots get the D3D11 default state)", s);
+    const uint32_t *cls = (const uint32_t *)(g_base + RVA_SAMPLER_CLASSES);
+    uint64_t padded[16], null_h = *(uint64_t *)(alloc + SAMPLER_NULL_FROM_ALLOC);
+    UINT size = 0, i;
+    for (i = 0; i < 3; i++)
+        if (cls[i * 3] >= n) { size = cls[i * 3]; break; }
+    if (n && handles && null_h && size > n && size <= 16) {
+        LONG k = InterlockedIncrement(&sampler_blocks_padded);
+        for (i = 0; i < size; i++) padded[i] = i < n ? handles[i] : null_h;
+        if (k <= 4) wlog("d3d: sampler table block %u -> %u slots (tail = Azimuth's null sampler)", n, size);
+        return orig_sampler_block(alloc, out, key, padded, size, fence, pin);
     }
-    return s;
-}
-
-static void hook_set_samplers(void *ctx, UINT stage, UINT start, UINT n, void *const *pp)
-{
-    void *fixed[16], *def;
-    UINT i, nulls = 0;
-    if (n && n <= 16 && (is_fm5() || is_fm6())) {
-        for (i = 0; i < n; i++) nulls += !pp || !pp[i];
-        if (nulls && (def = default_sampler()) != NULL) {
-            LONG k = InterlockedIncrement(&null_sampler_binds);
-            for (i = 0; i < n; i++) fixed[i] = pp && pp[i] ? pp[i] : def;
-            if (k <= 8) wlog("d3d: null sampler bind #%ld: stage %u slots %u+%u (%u null) -> default", k, stage, start, n,
-                             nulls);
-            orig_set_samplers(ctx, stage, start, n, fixed);
-            return;
-        }
-    }
-    orig_set_samplers(ctx, stage, start, n, pp);
+    return orig_sampler_block(alloc, out, key, handles, n, fence, pin);
 }
 
 /* ------------------------------------------------------------------------ */
@@ -3523,8 +3504,10 @@ int d3d_install(void)
                        (void **)&orig_pso_lookup)) return 0;
     if (!hook_function(RVA_RELEASE, RELEASE_HEX, RELEASE_STOLEN, (void *)pd_release_hook,
                        (void **)&orig_release)) return 0;
-    if (!hook_function(RVA_SET_SAMPLERS, "48895c241048896c24184889742420", 15, (void *)hook_set_samplers,
-                       (void **)&orig_set_samplers)) return 0;
+    if (!bytes_match(g_base + RVA_SAMPLER_CLASSES, "04000000000000004000000008000000400000008000000010000000c0000000"
+                     "30000000", 36)) { wlog("d3d: sampler table classes do not match"); return 0; }
+    if (!hook_function(RVA_SAMPLER_BLOCK, "40555356574154415541564157488d6c24f94881eca8000000", 25,
+                       (void *)hook_sampler_block, (void **)&orig_sampler_block)) return 0;
     return hook_function(RVA_RESOLVER, "48895c2410488974241848897c2420", RESOLVER_STOLEN,
                          (void *)hook_resolver, (void **)&orig_resolver);
 }

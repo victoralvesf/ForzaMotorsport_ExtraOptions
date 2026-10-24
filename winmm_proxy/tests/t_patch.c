@@ -1150,7 +1150,7 @@ TEST(install_on_real_azimuth)
     CHECK(log_has("hook 0x12b780 installed") && log_has("hook 0x1338e0 installed") && log_has("hook 0x3a290 installed"));
     CHECK(log_has("hook 0xda9e0 installed") && log_has("hook 0x9a680 installed") && log_has("hook 0x208790 installed"));
     CHECK(log_has("hook 0x203b60 installed"));
-    CHECK(log_has("hook 0x1b2b20 installed"));                  /* *SetSamplers: nulo -> sampler padrao */                  /* despacho de tabela (GameChat do FM6) */
+    CHECK(log_has("hook 0x10ec50 installed"));                  /* bloco da tabela de samplers completado */                  /* despacho de tabela (GameChat do FM6) */
     /* LocalSpaceStatics slot 8 (GetForMachineAsync): stub fatal 0x189bd0 -> proxy (winrt_fm5.c) */
     CHECK(*(uint8_t **)(az + 0x2b6628) != az + 0x189bd0 && log_has("patch 0x2b6628: LocalSpaceStatics"));
     /* D3D12CreateDevice (debug12_fm5.c): o call [rip] em 0x567df passa a ler um ponteiro nosso, nao a IAT 0x26f868
