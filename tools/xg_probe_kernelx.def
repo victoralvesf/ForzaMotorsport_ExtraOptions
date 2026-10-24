@@ -1,0 +1,17 @@
+; kernelx.dll de teste para tools\xg_layout_probe.c: o xg_x.dll dos jogos so importa funcoes do kernel32
+LIBRARY kernelx
+EXPORTS
+GetCurrentProcess=kernel32.GetCurrentProcess
+SetUnhandledExceptionFilter=kernel32.SetUnhandledExceptionFilter
+UnhandledExceptionFilter=kernel32.UnhandledExceptionFilter
+GetTickCount=kernel32.GetTickCount
+GetSystemTimeAsFileTime=kernel32.GetSystemTimeAsFileTime
+GetCurrentThreadId=kernel32.GetCurrentThreadId
+GetCurrentProcessId=kernel32.GetCurrentProcessId
+QueryPerformanceCounter=kernel32.QueryPerformanceCounter
+Sleep=kernel32.Sleep
+OutputDebugStringA=kernel32.OutputDebugStringA
+TerminateProcess=kernel32.TerminateProcess
+IsDebuggerPresent=kernel32.IsDebuggerPresent
+XMemAlloc
+XMemFree

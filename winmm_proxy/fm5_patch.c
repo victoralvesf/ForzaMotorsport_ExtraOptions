@@ -1412,6 +1412,31 @@ static long xg_copy_from_subresource(uint8_t *self, uint8_t *dst, uint32_t plane
     return 0;
 }
 
+/* O XG do FM5 conta os elementos dos mips > 0 de formatos BC como (elementos do mip 0) >> mip: 960x540 BC7 da
+   120x67 no mip 1 em vez de 120x68 (270 texels = 68 blocos). O Azimuth destila so os elementos do layout ->
+   a ultima linha/coluna de blocos desses mips nunca era copiada (lixo; a linha colorida do flare do sol,
+   lensflare_lenstexture). O XG do FH2/FM6 conta certo. Corrige Width/HeightElements no proprio computer (o
+   GetResourceLayout copia de +0x54b8): os enderecos dos elementos ja contados nao mudam e os novos ficam dentro
+   do mip (tools\xg_layout_probe.c). Desc 2D e 3D: Width [0], Height [1], Format [4]. */
+static int xg_is_bc(uint32_t f) { return (f >= 70 && f <= 84) || (f >= 94 && f <= 99); }
+
+static int xg_fix_bc_mips(uint8_t *self, const uint32_t *desc)
+{
+    uint32_t mips, i, fixed = 0;
+    if (!xg_is_bc(desc[4])) return 0;
+    mips = *(uint32_t *)(self + 0x54c8);
+    if (!mips || mips > 15) return 0;
+    if (*(uint32_t *)(self + 0x5528) != (desc[0] + 3) / 4 || *(uint32_t *)(self + 0x552c) != (desc[1] + 3) / 4)
+        return 0;   /* mip 0 fora do esperado: nao mexer */
+    for (i = 1; i < mips; i++) {
+        uint32_t *we = (uint32_t *)(self + 0x5528 + i * 0x48), *he = we + 1;
+        uint32_t w = desc[0] >> i ? desc[0] >> i : 1, h = desc[1] >> i ? desc[1] >> i : 1;
+        if (*we < (w + 3) / 4) { *we = (w + 3) / 4; fixed++; }
+        if (*he < (h + 3) / 4) { *he = (h + 3) / 4; fixed++; }
+    }
+    return (int)fixed;
+}
+
 static void xg_wrap_computer(void **obj)
 {
     if (!xg_fm5_vtbl) {
@@ -1470,7 +1495,14 @@ static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
             desc[n + 3] = 0;
         }
         orig_xg_computer(out, name, desc);
-        if (*(void ***)out) xg_wrap_computer(*(void ***)out);  /* out[0] = computer */
+        if (*(void ***)out) {   /* out[0] = computer */
+            if (n && xg_fix_bc_mips(*(uint8_t **)out, desc)) {
+                static LONG logged;
+                if (InterlockedIncrement(&logged) <= 4)
+                    wlog("XG: BC %ux%u fmt %u: mip element counts rounded up", desc[0], desc[1], desc[4]);
+            }
+            xg_wrap_computer(*(void ***)out);
+        }
         return;
     }
     orig_xg_computer(out, name, desc);

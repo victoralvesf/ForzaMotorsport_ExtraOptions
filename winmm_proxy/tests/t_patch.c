@@ -968,6 +968,78 @@ TEST(xg_desc_layout_converted)
     CHECK_EQ(xg_seen_desc[12], 112);
 }
 
+/* XG do FM5: elementos dos mips > 0 de BC = mip 0 >> mip (960x540 BC7: 120x67 no mip 1) -> arredondados p/ cima */
+static uint8_t *xg_bc_self;
+static void *xg_bc_obj_orig_out;
+static void xg_bc_fake_orig(void *out, const char *name, uint32_t *desc)
+{
+    (void)name; (void)desc;
+    *(void **)out = xg_bc_obj_orig_out;
+}
+static void xg_bc_fill(uint8_t *self, uint32_t mips, const uint32_t (*we)[2])
+{
+    uint32_t i;
+    memset(self, 0, 0x6200);
+    *(void **)self = xg_fake_vtbl;
+    *(uint32_t *)(self + 0x54c8) = mips;
+    for (i = 0; i < mips; i++) {
+        *(uint32_t *)(self + 0x5528 + i * 0x48) = we[i][0];
+        *(uint32_t *)(self + 0x552c + i * 0x48) = we[i][1];
+    }
+}
+
+TEST(xg_fm5_bc_mip_elements_rounded_up)
+{
+    /* o que o xg_x.dll do FM5 devolve p/ 960x540 BC7_UNORM_SRGB com 10 mips (tools\xg_layout_probe.c) */
+    static const uint32_t xg[10][2] = { {240, 135}, {120, 67}, {60, 33}, {30, 16}, {15, 8}, {7, 4}, {3, 2}, {1, 1},
+                                        {1, 1}, {1, 1} };
+    static const uint32_t want[10][2] = { {240, 135}, {120, 68}, {60, 34}, {30, 17}, {15, 9}, {8, 4}, {4, 2}, {2, 1},
+                                          {1, 1}, {1, 1} };
+    uint32_t d2[16] = { 960, 540, 10, 1, 99, 1, 0, 0, 8, 0, 0, 14, 0, 0 }, i;
+    void *out = NULL;
+    if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
+    xg_bc_fill(xg_bc_self, 10, xg);
+    CHECK_EQ(xg_fix_bc_mips(xg_bc_self, d2), 7);
+    for (i = 0; i < 10; i++) {
+        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + i * 0x48), want[i][0]);
+        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + i * 0x48), want[i][1]);
+    }
+    /* 970 de largura: a coluna tambem (mip 1 121 -> 122) */
+    {
+        static const uint32_t xw[3][2] = { {243, 135}, {121, 67}, {60, 33} };
+        uint32_t dw[16] = { 970, 540, 3, 1, 71 };
+        xg_bc_fill(xg_bc_self, 3, xw);
+        CHECK_EQ(xg_fix_bc_mips(xg_bc_self, dw), 4);
+        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 0x48), 122);
+        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);
+        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 2 * 0x48), 61);
+        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 2 * 0x48), 34);
+    }
+    /* nao BC (R8G8B8A8 = 28): nada muda */
+    {
+        static const uint32_t xr[2][2] = { {970, 541}, {485, 270} };
+        uint32_t dr[16] = { 970, 541, 2, 1, 28 };
+        xg_bc_fill(xg_bc_self, 2, xr);
+        CHECK_EQ(xg_fix_bc_mips(xg_bc_self, dr), 0);
+        CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 270);
+    }
+    /* mip 0 diferente do esperado: nao mexe */
+    xg_bc_fill(xg_bc_self, 10, xg);
+    *(uint32_t *)(xg_bc_self + 0x552c) = 136;
+    CHECK_EQ(xg_fix_bc_mips(xg_bc_self, d2), 0);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 67);
+    /* pelo hook do XGCreateTexture2DComputer no FM5 */
+    fake_azimuth(1);
+    xg_bc_fill(xg_bc_self, 10, xg);
+    xg_bc_obj_orig_out = xg_bc_self;
+    orig_xg_computer = xg_bc_fake_orig;
+    hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
+    CHECK(out == xg_bc_self);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 5 * 0x48), 8);
+    *(void **)xg_bc_self = xg_fake_vtbl;
+}
+
 /* FM6: vtable de 12 slots (3/4 = getters novos) -> 8 slots do FH2; desc sem conversao */
 static uint8_t xg_get54b8[] = { 0x48, 0x8b, 0x81, 0xb8, 0x54, 0x00, 0x00, 0xc3 };
 static uint8_t xg_get54c0[] = { 0x48, 0x8b, 0x81, 0xc0, 0x54, 0x00, 0x00, 0xc3 };
