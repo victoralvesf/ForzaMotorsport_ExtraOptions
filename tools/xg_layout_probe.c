@@ -45,6 +45,12 @@ int main(int argc, char **argv)
         uint8_t *mp = layout + 0x18 + 0x28 + i * 0x48;
         printf("mip %d: %u texels -> %u x %u elements\n", i, (unsigned)(atoi(argv[4]) >> i),
                *(uint32_t *)(mp + 0x30), *(uint32_t *)(mp + 0x34));
+        if (getenv("XG_DUMP")) {   /* struct do mip inteiro (0x48 bytes) em dwords */
+            int k;
+            printf("  ");
+            for (k = 0; k < 0x48; k += 4) printf(" %x:%#x", k, *(uint32_t *)(mp + k));
+            printf("\n");
+        }
     }
     {   /* GetTexelElementOffsetBytes (slot 4 no XG do FM5, 6 no do FM6) na ultima linha de blocos de cada mip */
         typedef uint64_t (*texel_fn)(void *, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t);
@@ -85,6 +91,21 @@ int main(int argc, char **argv)
                 }
                 for (k = 0; k < nw * nh; k++) for (j = k + 1; j < nw * nh; j++) dup += a[k] == a[j];
                 printf("  [%#llx, %#llx) fora %u repetidos %u\n", (unsigned long long)lo, (unsigned long long)hi, out, dup);
+                if (nw >= 8 && nh >= 8) {   /* mapa comprimido do Azimuth (0x1400a0090): padrao 8x8 do 1o tile + base */
+                    uint32_t tx, ty, bad = 0, first = 0;
+                    int64_t pat[64];
+                    for (k = 0; k < 64; k++) pat[k] = (int64_t)(a[(k >> 3) * nw + (k & 7)] - a[0]);
+                    for (ty = 0; ty < (nh + 7) / 8; ty++) for (tx = 0; tx < (nw + 7) / 8; tx++) {
+                        uint64_t base = a[ty * 8 * nw + tx * 8];
+                        for (k = 0; k < 64; k++) {
+                            x = tx * 8 + (k & 7); y = ty * 8 + (k >> 3);
+                            if (x < nw && y < nh && a[y * nw + x] != base + pat[k]) {
+                                if (!bad++) first = y * 0x10000 + x;
+                            }
+                        }
+                    }
+                    printf("  padrao 8x8: %u elementos fora (1o x=%u y=%u)\n", bad, first & 0xffff, first >> 16);
+                }
                 free(a);
             }
             free(before);

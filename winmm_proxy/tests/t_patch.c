@@ -1029,10 +1029,12 @@ TEST(xg_copy_from_subresource_detiles)
 /* XG do FM5: elementos dos mips > 0 de BC = mip 0 >> mip (960x540 BC7: 120x67 no mip 1) -> arredondados p/ cima */
 static uint8_t *xg_bc_self;
 static void *xg_bc_obj_orig_out;
+/* como o 0x14009fba0: computer em out[0] e copia do XG_RESOURCE_LAYOUT (computer+0x54b8, 0xd40 bytes) em out+0x10 */
 static void xg_bc_fake_orig(void *out, const char *name, uint32_t *desc)
 {
     (void)name; (void)desc;
     *(void **)out = xg_bc_obj_orig_out;
+    memcpy((uint8_t *)out + 0x10, (uint8_t *)xg_bc_obj_orig_out + 0x54b8, 0xd40);
 }
 static void xg_bc_fill(uint8_t *self, uint32_t mips, const uint32_t (*we)[2])
 {
@@ -1054,7 +1056,7 @@ TEST(xg_fm5_bc_mip_elements_rounded_up)
     static const uint32_t want[10][2] = { {240, 135}, {120, 68}, {60, 34}, {30, 17}, {15, 9}, {8, 4}, {4, 2}, {2, 1},
                                           {1, 1}, {1, 1} };
     uint32_t d2[16] = { 960, 540, 10, 1, 99, 1, 0, 0, 8, 0, 0, 0, 0, 14, 0 }, i;
-    void *out = NULL;
+    uint64_t out[(0x10 + 0xd40) / 8];
     if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
     xg_bc_fill(xg_bc_self, 10, xg);
     CHECK_EQ(xg_fix_bc_mips(xg_bc_self, d2), 7);
@@ -1091,72 +1093,23 @@ TEST(xg_fm5_bc_mip_elements_rounded_up)
     xg_bc_fill(xg_bc_self, 10, xg);
     xg_bc_obj_orig_out = xg_bc_self;
     orig_xg_computer = xg_bc_fake_orig;
-    hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
-    CHECK(out == xg_bc_self);
+    hook_xg_computer(out, "XGCreateTexture2DComputer", d2);
+    CHECK((void *)(uintptr_t)out[0] == xg_bc_self);
     CHECK_EQ(d2[12], 14);                        /* TileMode convertido p/ o layout do FM5 */
     CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);
     CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x5528 + 5 * 0x48), 8);
+    /* a copia do layout em out+0x10 (de onde sai o mapa de enderecos) tambem: mip N Width/Height em +0x70/+0x74 */
+    CHECK_EQ(*(uint32_t *)((uint8_t *)out + 0x10 + 0x74 + 0x48), 68);
+    CHECK_EQ(*(uint32_t *)((uint8_t *)out + 0x10 + 0x70 + 5 * 0x48), 8);
+    CHECK_EQ(*(uint32_t *)((uint8_t *)out + 0x10 + 0x74 + 3 * 0x48), 17);
+    CHECK_EQ(*(uint32_t *)((uint8_t *)out + 0x10 + 0x74), 135);   /* mip 0 igual */
     /* FM6: o XG conta certo, o hook nao mexe nas contagens */
     fake_azimuth(2);
     xg_bc_fill(xg_bc_self, 10, xg);
-    hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
+    hook_xg_computer(out, "XGCreateTexture2DComputer", d2);
     CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 67);
+    CHECK_EQ(*(uint32_t *)((uint8_t *)out + 0x10 + 0x74 + 0x48), 67);
     fake_azimuth(1);
-}
-
-/* CreatePlacementTexture2D do FM5: os blocos acrescentados pelo arredondamento sao zerados na memoria do jogo */
-static int xg_released;
-static unsigned long xg_fake_release(void *self) { (void)self; xg_released++; return 0; }
-/* enderecos de mentira: 0x4000 por mip, linha de 128 elementos de 16 bytes */
-static uint64_t xg_lin_texel(void *self, uint32_t plane, uint32_t mip, uint64_t x, uint32_t y, uint32_t z, uint32_t s)
-{
-    (void)self; (void)plane; (void)z; (void)s;
-    return (uint64_t)mip * 0x40000 + ((uint64_t)y * 128 + x) * 16;
-}
-
-/* como o 0x14009fba0: computer em out[0] e o XG_RESOURCE_LAYOUT (0xd40 bytes) em out+0x10 */
-static void xg_layout_fake_orig(void *out, const char *name, uint32_t *desc)
-{
-    (void)name; (void)desc;
-    *(void **)out = xg_bc_obj_orig_out;
-    memset((uint8_t *)out + 0x10, 0xcd, 0xd40);
-}
-
-TEST(xg_fm5_bc_tail_zeroed)
-{
-    static const uint32_t xg[3][2] = { {240, 135}, {120, 67}, {60, 33} };
-    uint32_t desc[11] = { 960, 540, 3, 1, 99, 1, 0, 0, 8, 0, 0 };
-    uint8_t *mem = malloc(0xc0000);
-    uint32_t i;
-    REQUIRE(mem);
-    fake_azimuth(1);
-    if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
-    xg_bc_fill(xg_bc_self, 3, xg);
-    *(uint64_t *)(xg_bc_self + 0x54b8) = 0xc0000;     /* SizeBytes */
-    *(uint32_t *)(xg_bc_self + 0x54f0) = 16;          /* BC7 */
-    xg_bc_obj_orig_out = xg_bc_self;
-    orig_xg_computer = xg_layout_fake_orig;
-    xg_fm5_vtbl = (void *const *)xg_fake_vtbl;
-    xg_fake_vtbl[1] = xg_vtbl[1] = (void *)xg_fake_release;
-    xg_fake_vtbl[4] = (void *)xg_lin_texel;
-    xg_released = 0;
-    memset(mem, 0xab, 0xc0000);
-    /* mip 1: linha 67 (120 elementos); mip 2: linha 33 (60) */
-    CHECK_EQ(xg_fm5_zero_bc_tail(desc, 14, 0, mem), 180);
-    CHECK_EQ(xg_released, 1);
-    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);   /* contagens arredondadas pelo hook */
-    for (i = 0; i < 120 * 16; i++) CHECK_EQ(mem[0x40000 + 67 * 128 * 16 + i], 0);
-    CHECK_EQ(mem[0x40000 + 66 * 128 * 16 + 119 * 16 + 15], 0xab);   /* linha de dentro intacta */
-    CHECK_EQ(mem[0x40000 + 67 * 128 * 16 + 120 * 16], 0xab);        /* alem da largura intacto */
-    CHECK_EQ(mem[0x80000 + 33 * 128 * 16], 0);
-    CHECK_EQ(mem[0x80000 + 32 * 128 * 16], 0xab);
-    CHECK_EQ(mem[0], 0xab);                                          /* mip 0 intacto */
-    /* nao BC: nada */
-    desc[4] = 28;
-    CHECK_EQ(xg_fm5_zero_bc_tail(desc, 14, 0, mem), 0);
-    CHECK_EQ(xg_released, 1);
-    xg_fake_vtbl[4] = (void *)xg_fake_texel;
-    free(mem);
 }
 
 /* ------------------------------------------------------------------------ */

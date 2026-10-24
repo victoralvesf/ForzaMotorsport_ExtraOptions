@@ -27,8 +27,6 @@ extern void liv_note_dispatch(UINT x, UINT y, UINT z);
 extern void liv_note_texture(const UINT *d, long hr);
 extern int liv_in_window(void);
 extern int liv_log;
-extern void xg_fm5_tail_watch(uint32_t frame);
-extern uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch, uint8_t *addr);
 extern void liv_note_placement(const UINT *d, UINT tile, UINT pitch, const void *addr, uintptr_t caller);
 /* stutter_fm6.c (PASSO 99): rastreio das placement textures placed */
 int pa_tracking(void);
@@ -612,12 +610,6 @@ static long dev_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
          "pitch=%u addr=%p (alloc %p type %#lx prot %#lx) -> hr=%#lx tex=%p", desc[0], desc[1], desc[2], desc[3], desc[4],
          desc[5], desc[7], desc[8], desc[9], desc[10], tile, pitch, addr, mi.AllocationBase, mi.Type, mi.Protect, hr,
          out ? *out : NULL);
-    if (hr >= 0 && is_fm5()) {
-        uint32_t n = xg_fm5_zero_bc_tail(desc, tile, pitch, addr);
-        static LONG logged;
-        if (n && InterlockedIncrement(&logged) <= 16)
-            wlog("d3d:   %u BC mip elements past the FM5 XG count zeroed (as on the console)", n);
-    }
     return hr;
 }
 
@@ -3150,7 +3142,6 @@ static void fm5_DXGIXPresentArray(UINT sync, UINT threshold, UINT flags, UINT co
     LONG n = InterlockedIncrement(&present_count);
     size_t k;
     rdoc_maybe_capture(n);
-    if (!(n % 60)) xg_fm5_tail_watch((uint32_t)n);
     {   /* fps medido (1 s), logado quando muda: confere o modo de present (PASSO 10) */
         static ULONGLONG t0;
         static LONG n0, last_fps;
