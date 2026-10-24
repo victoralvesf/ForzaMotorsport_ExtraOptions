@@ -14,6 +14,9 @@ extern void wlog(const char *fmt, ...);
 extern int is_fm6(void);
 extern void write_mem(void *dst, const void *src, size_t len);
 extern int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp_out);
+extern int dbg_int(const wchar_t *key, int def);
+static void dump_output(const BYTE *buf, UINT32 frames, DWORD flags);
+static void dump_xma_command(const uint32_t *msg);
 
 #define RVA_FMOD_CLIENT_VT 0x2a1da0
 
@@ -55,7 +58,8 @@ static int is_game_rc(void *rc)
 }
 
 /* formato do stream (Initialize) */
-static unsigned fmt_block, fmt_bits;
+static unsigned fmt_block, fmt_bits, fmt_channels;
+static DWORD fmt_rate;
 static int fmt_float;
 
 typedef struct {
@@ -137,6 +141,7 @@ static long rc_release_buffer(void *self, UINT32 frames, DWORD flags)
 {
     if (is_fm6() && is_game_rc(self)) {
         stats_release(frames, flags, frames <= last_frames ? last_buffer : NULL);
+        dump_output(frames <= last_frames ? last_buffer : NULL, frames, flags);
         last_buffer = NULL;
     }
     return orig_release_buffer(self, frames, flags);
@@ -171,6 +176,8 @@ static long ac_init(void *self, int share, DWORD flags, int64_t dur, int64_t per
         fmt_block = f->nBlockAlign;
         fmt_bits = f->wBitsPerSample;
         fmt_float = fmt_is_float(f);
+        fmt_rate = f->nSamplesPerSec;
+        fmt_channels = f->nChannels;
     }
     wlog("audio FM6: Initialize(%p mode %d flags %#lx duration %lld period %lld fmt tag %#x %u channels %lu Hz %u bits "
          "block %u%s) hr=%#lx", self, share, flags, (long long)dur, (long long)period, f ? f->wFormatTag : 0,
@@ -268,6 +275,7 @@ static void acp_message(uint8_t *proc, uint32_t *msg)
         uint32_t t = msg[0] < 0x1f ? msg[0] : 0x1f;
         LONG k = InterlockedIncrement(&acp_types[t]);
         if (log_point(k)) wlog("audio FM6: ACP message type %u #%ld", msg[0], k);
+        if (msg[0] >= 5 && msg[0] <= 8) dump_xma_command(msg);
     }
     orig_acp_message(proc, msg);
 }
@@ -303,6 +311,251 @@ static uint64_t acp_pop(void *hal, uint8_t *msg)
     return r;
 }
 
+/* ---- gravacao do audio (debug.ini AudioDump=N segundos; clique do som de navegacao do menu, PASSO 114) ----
+   Comeca quando o usuario aperta F9 (o boot ate o menu leva mais que N segundos).
+   audio_fm6_out.wav: saida do WASAPI do jogo (o que vai para o Windows), N segundos.
+   audio_fm6_shape.bin: por grafo SHAPE consumido, as entradas, os contextos SRC (0x20) e XMA (0x40) de cada SRC
+   antes e depois do interpretador, e os 128 floats de cada mix buffer levado por DMA ao jogo; e os comandos de
+   contexto XMA (ACP tipos 5..8). Registro = u32 tipo, u32 tamanho, dados. Analise: tools\audio_dump.py.
+   Tudo do lado do grafo roda na thread "Azimuth audio processor"; o WAV na thread de audio do jogo. */
+#define RVA_SRC_COUNT 0x333790   /* contextos SRC: u32 quantidade, base em 0x3337a8 (0x20 cada) */
+#define RVA_SRC_BASE  0x3337a8
+#define RVA_XMA_COUNT 0x3337a0   /* contextos XMA: u32 quantidade, base em 0x3337c8 (0x40 cada) */
+#define RVA_XMA_BASE  0x3337c8
+#define DUMP_MAX_SRC  64
+
+enum { DUMP_GRAPH = 1, DUMP_SRC = 2, DUMP_MIX = 3, DUMP_XMA_CMD = 4 };
+
+typedef struct {
+    HANDLE f;
+    uint8_t *buf;
+    DWORD used;
+    uint64_t data_bytes;   /* WAV: bytes de amostras escritos */
+} DumpFile;
+
+static int dump_secs;                       /* AudioDump do debug.ini (0 = desligado) */
+static wchar_t dump_dir[MAX_PATH];
+static DumpFile dump_out, dump_shape;
+static int dump_out_done, dump_shape_done;
+static volatile LONG dump_armed;            /* F9 apertado */
+static uint32_t dump_seq;
+static struct { uint32_t ctx; uint8_t src[0x20], xma[0x40]; } dump_pre[DUMP_MAX_SRC];
+static unsigned dump_pre_n;
+
+#define DUMP_BUF (1u << 20)
+
+static int dump_started(void)
+{
+    if (dump_armed) return 1;
+    if (!(GetAsyncKeyState(VK_F9) & 0x8000)) return 0;
+    if (!InterlockedExchange(&dump_armed, 1)) wlog("audio dump: F9, recording %d s", dump_secs);
+    return 1;
+}
+
+static int dump_open(DumpFile *d, const wchar_t *name)
+{
+    wchar_t path[MAX_PATH];
+    if (d->f) return 1;
+    wcscpy(path, dump_dir);
+    wcscat(path, name);
+    d->f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, 0, NULL);
+    if (d->f == INVALID_HANDLE_VALUE) { d->f = NULL; wlog("audio dump: cannot create %ls", path); return 0; }
+    d->buf = VirtualAlloc(NULL, DUMP_BUF, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    d->used = 0;
+    d->data_bytes = 0;
+    wlog("audio dump: %ls", path);
+    return d->buf != NULL;
+}
+
+static void dump_flush(DumpFile *d)
+{
+    DWORD w;
+    if (d->f && d->used) WriteFile(d->f, d->buf, d->used, &w, NULL);
+    d->used = 0;
+}
+
+static void dump_write(DumpFile *d, const void *p, DWORD n)
+{
+    if (!d->f) return;
+    if (d->used + n > DUMP_BUF) dump_flush(d);
+    if (n > DUMP_BUF) return;
+    memcpy(d->buf + d->used, p, n);
+    d->used += n;
+}
+
+static void dump_record(uint32_t type, const void *a, uint32_t na, const void *b, uint32_t nb)
+{
+    uint32_t h[2] = { type, na + nb };
+    dump_write(&dump_shape, h, sizeof h);
+    dump_write(&dump_shape, a, na);
+    if (nb) dump_write(&dump_shape, b, nb);
+}
+
+/* cabecalho WAV (float 32 = WAVE_FORMAT_IEEE_FLOAT, senao PCM) com o tamanho dos dados ja escritos */
+static void wav_header(uint8_t h[44], uint64_t data_bytes)
+{
+    uint32_t v, block = fmt_block;
+    uint16_t s;
+    memcpy(h, "RIFF", 4); v = (uint32_t)(36 + data_bytes); memcpy(h + 4, &v, 4);
+    memcpy(h + 8, "WAVEfmt ", 8); v = 16; memcpy(h + 16, &v, 4);
+    s = fmt_float ? 3 : 1; memcpy(h + 20, &s, 2);
+    s = (uint16_t)fmt_channels; memcpy(h + 22, &s, 2);
+    memcpy(h + 24, &fmt_rate, 4);
+    v = fmt_rate * block; memcpy(h + 28, &v, 4);
+    s = (uint16_t)block; memcpy(h + 32, &s, 2);
+    s = (uint16_t)fmt_bits; memcpy(h + 34, &s, 2);
+    memcpy(h + 36, "data", 4); v = (uint32_t)data_bytes; memcpy(h + 40, &v, 4);
+}
+
+static void dump_close(DumpFile *d, int wav)
+{
+    if (!d->f) return;
+    dump_flush(d);
+    if (wav) {
+        uint8_t h[44];
+        DWORD w;
+        wav_header(h, d->data_bytes);
+        SetFilePointer(d->f, 0, NULL, FILE_BEGIN);
+        WriteFile(d->f, h, sizeof h, &w, NULL);
+    }
+    CloseHandle(d->f);
+    VirtualFree(d->buf, 0, MEM_RELEASE);
+    d->f = NULL;
+    d->buf = NULL;
+}
+
+/* ReleaseBuffer do render client do jogo: os quadros vao para o WAV (SILENT = zeros) */
+static void dump_output(const BYTE *buf, UINT32 frames, DWORD flags)
+{
+    static const uint8_t zero[4096];
+    uint64_t n = (uint64_t)frames * fmt_block, limit = (uint64_t)dump_secs * fmt_rate * fmt_block;
+    if (!dump_secs || dump_out_done || !fmt_block || !fmt_rate || !fmt_channels || !dump_started()) return;
+    if (!dump_out.f) {
+        uint8_t h[44];
+        if (!dump_open(&dump_out, L"audio_fm6_out.wav")) { dump_out_done = 1; return; }
+        wav_header(h, 0);
+        dump_write(&dump_out, h, sizeof h);
+    }
+    if (dump_out.data_bytes + n > limit) n = limit - dump_out.data_bytes;
+    if ((flags & 2) || !buf) {
+        uint64_t k;
+        for (k = 0; k < n; k += sizeof zero) dump_write(&dump_out, zero, (DWORD)(n - k < sizeof zero ? n - k : sizeof zero));
+    } else dump_write(&dump_out, buf, (DWORD)n);
+    dump_out.data_bytes += n;
+    if (dump_out.data_bytes >= limit) {
+        dump_close(&dump_out, 1);
+        dump_out_done = 1;
+        wlog("audio dump: audio_fm6_out.wav done (%d s)", dump_secs);
+    }
+}
+
+int audio_dump_active(void) { return dump_secs > 0 && !dump_shape_done; }
+
+static uint8_t *src_ctx(uint32_t i)
+{
+    uint8_t *base = *(uint8_t **)(g_base + RVA_SRC_BASE);
+    return base && i < *(uint32_t *)(g_base + RVA_SRC_COUNT) ? base + (size_t)i * 0x20 : NULL;
+}
+
+static uint8_t *xma_ctx(uint32_t i)
+{
+    uint8_t *base = *(uint8_t **)(g_base + RVA_XMA_BASE);
+    return base && i < *(uint32_t *)(g_base + RVA_XMA_COUNT) ? base + (size_t)i * 0x40 : NULL;
+}
+
+/* antes do interpretador: contextos SRC/XMA de cada entrada SRC (op 2; ctx = w>>13 & 0xfff) */
+void audio_dump_graph_pre(uint8_t *graph)
+{
+    uint64_t *p = *(uint64_t **)(graph + 0x48), *e = *(uint64_t **)(graph + 0x50);
+    dump_pre_n = 0;
+    for (; p != e && dump_pre_n < DUMP_MAX_SRC; p++) {
+        uint32_t ctx = (uint32_t)(*p >> 13) & 0xfff;
+        uint8_t *s = src_ctx(ctx), *x = xma_ctx(ctx);
+        if ((*p & 0x1f) != 2) continue;
+        dump_pre[dump_pre_n].ctx = ctx;
+        if (s) memcpy(dump_pre[dump_pre_n].src, s, 0x20); else memset(dump_pre[dump_pre_n].src, 0, 0x20);
+        if (x) memcpy(dump_pre[dump_pre_n].xma, x, 0x40); else memset(dump_pre[dump_pre_n].xma, 0, 0x40);
+        dump_pre_n++;
+    }
+}
+
+/* mix buffer id -> 128 floats (proc+0x1238: u16 indice+1 por id; proc+0x1220: base dos blocos de 0x200) */
+static const float *mix_buffer(uint8_t *proc, uint32_t id)
+{
+    uint16_t k = *(uint16_t *)(proc + 0x1238 + (size_t)id * 2);
+    uint8_t *base = *(uint8_t **)(proc + 0x1220);
+    return k && base ? (const float *)(base + (size_t)(k - 1) * 0x200) : NULL;
+}
+
+/* depois do interpretador, so se o grafo foi consumido (devolvido 0 = sera repassado igual) */
+void audio_dump_graph_post(uint8_t *proc, uint8_t *graph, uint64_t ret)
+{
+    uint64_t *b = *(uint64_t **)(graph + 0x48), *e = *(uint64_t **)(graph + 0x50), *p;
+    uint32_t n = (uint32_t)(e - b), i = 0;
+    struct { uint32_t seq, id; uint64_t stamp; uint32_t n, pad; } g;
+    if (!(uint8_t)ret || dump_shape_done || !dump_started()) return;
+    if (!dump_shape.f) {
+        if (!dump_open(&dump_shape, L"audio_fm6_shape.bin")) { dump_shape_done = 1; return; }
+        dump_write(&dump_shape, "AZSH\1\0\0\0", 8);
+    }
+    g.seq = dump_seq; g.id = *(uint32_t *)(graph + 0x40); g.stamp = *(uint64_t *)(graph + 0x30); g.n = n; g.pad = 0;
+    dump_record(DUMP_GRAPH, &g, sizeof g, b, n * 8);
+    for (p = b; p != e; p++) {
+        unsigned op = (unsigned)(*p & 0x1f);
+        if (op == 2 && i < dump_pre_n) {
+            struct { uint32_t seq, ctx; uint64_t reset; uint8_t src_pre[0x20], xma_pre[0x40], src[0x20], xma[0x40]; } s;
+            uint8_t *sc, *xc;
+            s.seq = dump_seq; s.ctx = dump_pre[i].ctx;
+            s.reset = *(uint64_t *)(proc + 0x1e8 + (size_t)s.ctx * 8);
+            memcpy(s.src_pre, dump_pre[i].src, 0x20); memcpy(s.xma_pre, dump_pre[i].xma, 0x40);
+            sc = src_ctx(s.ctx); xc = xma_ctx(s.ctx);
+            if (sc) memcpy(s.src, sc, 0x20); else memset(s.src, 0, 0x20);
+            if (xc) memcpy(s.xma, xc, 0x40); else memset(s.xma, 0, 0x40);
+            dump_record(DUMP_SRC, &s, sizeof s, NULL, 0);
+            i++;
+        } else if (op == 0x10) {
+            struct { uint32_t seq, mix, dma, pad; } m;
+            const float *f;
+            static const float silence[128];
+            m.seq = dump_seq; m.mix = (uint32_t)(*p >> 14) & 0x1fff; m.dma = (uint32_t)(*p >> 27) & 0xfff; m.pad = 0;
+            f = mix_buffer(proc, m.mix);
+            dump_record(DUMP_MIX, &m, sizeof m, f ? f : silence, 0x200);
+        }
+    }
+    if (++dump_seq >= (uint32_t)dump_secs * 375) {   /* 48000 / 128 grafos por segundo */
+        dump_close(&dump_shape, 0);
+        dump_shape_done = 1;
+        wlog("audio dump: audio_fm6_shape.bin done (%u graphs)", dump_seq);
+    }
+}
+
+/* comandos de contexto XMA (5/7 = um contexto em *payload; 6/8 = mascara de 0x40 bytes), stamp em msg+0x30 */
+static void dump_xma_command(const uint32_t *msg)
+{
+    struct { uint32_t seq, type; uint64_t stamp; uint8_t mask[0x40]; } r;
+    const uint32_t *pl = *(const uint32_t *const *)(msg + 6);
+    if (!dump_shape.f || dump_shape_done || !pl) return;
+    r.seq = dump_seq; r.type = msg[0];
+    memcpy(&r.stamp, msg + 0xc, 8);
+    memset(r.mask, 0, sizeof r.mask);
+    if (msg[0] == 5 || msg[0] == 7) { if (pl[0] < 0x200) r.mask[pl[0] >> 3] = (uint8_t)(1 << (pl[0] & 7)); }
+    else memcpy(r.mask, pl, sizeof r.mask);
+    dump_record(DUMP_XMA_CMD, &r, sizeof r, NULL, 0);
+}
+
+static void audio_dump_init(void)
+{
+    wchar_t *slash;
+    dump_secs = dbg_int(L"AudioDump", 0);
+    if (dump_secs <= 0) { dump_secs = 0; return; }
+    if (!dump_dir[0]) {
+        GetModuleFileNameW(NULL, dump_dir, MAX_PATH);
+        slash = wcsrchr(dump_dir, L'\\');
+        if (slash) slash[1] = 0; else dump_dir[0] = 0;
+    }
+    wlog("audio dump: AudioDump=%d s from F9 (FM6: audio_fm6_out.wav + audio_fm6_shape.bin)", dump_secs);
+}
+
 void audio_fm6_game_hooks(uint8_t *game)
 {
     int ok = hook_at(game + FM6_SOUND_INIT, "4489442418895424105556574154", 14, (void *)fm6_sound_init,
@@ -335,6 +588,7 @@ int audio_fm6_install(void)
                  (void **)&orig_acp_pop))
         wlog("audio: ACP PopMessage (%#x) does not match, FM6 message 0x10 not fixed", RVA_ACP_POP_MESSAGE);
     for (i = 0; i < n; i++) swap_slot(vt, client_slots[i].slot, hooks[i], origs[i]);
+    audio_dump_init();
     wlog("audio: FmodAudioClient (vtable %#x) with FM6 diagnostics", RVA_FMOD_CLIENT_VT);
     return 1;
 }

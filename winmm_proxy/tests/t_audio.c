@@ -163,3 +163,103 @@ TEST(audio_acp_pop_hook_on_real_azimuth)
     CHECK_HEX(orig_acp_pop, "48895c24104889742418574883ec20ff25");
     pe_unmap(az);
 }
+
+/* AudioDump: arquivo lido de volta inteiro (build\audio_fm6_*) */
+static uint8_t *read_dump(const char *name, DWORD *size)
+{
+    static uint8_t buf[8192];
+    char path[MAX_PATH];
+    FILE *f;
+    snprintf(path, sizeof path, "%s\\winmm_proxy\\build\\%s", t_root(), name);
+    f = fopen(path, "rb");
+    if (!f) return NULL;
+    *size = (DWORD)fread(buf, 1, sizeof buf, f);
+    fclose(f);
+    return buf;
+}
+
+static void dump_to_build(int secs)
+{
+    MultiByteToWideChar(CP_ACP, 0, t_root(), -1, dump_dir, MAX_PATH);
+    wcscat(dump_dir, L"\\winmm_proxy\\build\\");
+    dump_secs = secs;
+    dump_out_done = dump_shape_done = 0;
+    dump_seq = 0;
+    dump_armed = 1;                                /* F9 */
+}
+
+TEST(audio_dump_wav_output_truncated_to_seconds)
+{
+    float in[6] = { 0.5f, -0.5f, 0.25f, -0.25f, 1.0f, -1.0f };
+    uint8_t *w;
+    DWORD n = 0;
+    fake_azimuth(2);
+    log_capture();
+    dump_to_build(1);
+    fmt_block = 8; fmt_bits = 32; fmt_float = 1; fmt_channels = 2; fmt_rate = 4;   /* 1 s = 4 quadros */
+    dump_output((const BYTE *)in, 3, 0);
+    dump_output((const BYTE *)in, 3, 2);           /* SILENT: zeros, cortado no limite (1 quadro) */
+    CHECK(dump_out_done && !dump_out.f);
+    dump_output((const BYTE *)in, 3, 0);           /* depois do limite: nada */
+    w = read_dump("audio_fm6_out.wav", &n);
+    REQUIRE(w);
+    CHECK_EQ(n, 44 + 32);
+    CHECK_HEX(w, "52494646" "44000000" "57415645666d7420" "10000000" "0300" "0200" "04000000" "20000000" "0800"
+                 "2000" "64617461" "20000000");
+    CHECK(!memcmp(w + 44, in, 24));
+    CHECK_HEX(w + 68, "0000000000000000");
+    CHECK(log_has("audio_fm6_out.wav done"));
+    /* sem F9: nada gravado */
+    dump_to_build(1);
+    dump_armed = 0;
+    dump_output((const BYTE *)in, 3, 0);
+    CHECK(!dump_out.f && !dump_out_done);
+}
+
+TEST(audio_dump_shape_graph_src_and_mix)
+{
+    static uint8_t proc[0x5300], src[4 * 0x20], xma[4 * 0x40], mixes[2 * 0x200];
+    uint64_t entries[3] = { 1, 2 | 3ull << 13 | 1ull << 25, 0x10 | 1ull << 14 | 5ull << 27 };
+    uint8_t graph[0x58] = { 0 }, *f, *r;
+    uint8_t *az = fake_azimuth(2);
+    DWORD n = 0;
+    float *m = (float *)(mixes + 0x200);
+    int i;
+    log_capture();
+    dump_to_build(1);
+    *(uint32_t *)(az + 0x333790) = 4; *(uint8_t **)(az + 0x3337a8) = src;
+    *(uint32_t *)(az + 0x3337a0) = 4; *(uint8_t **)(az + 0x3337c8) = xma;
+    *(uint8_t **)(proc + 0x1220) = mixes;
+    *(uint16_t *)(proc + 0x1238 + 1 * 2) = 2;                  /* mix id 1 -> bloco 1 */
+    *(uint64_t *)(proc + 0x1e8 + 3 * 8) = 0x77;               /* stamp do reset do contexto 3 */
+    for (i = 0; i < 128; i++) m[i] = (float)i;
+    *(uint64_t **)(graph + 0x48) = entries;
+    *(uint64_t **)(graph + 0x50) = entries + 3;
+    *(uint32_t *)(graph + 0x40) = 0x42;
+    *(uint64_t *)(graph + 0x30) = 0x99;
+    memset(src + 3 * 0x20, 0xa1, 0x20);
+    memset(xma + 3 * 0x40, 0xb1, 0x40);
+    audio_dump_graph_pre(graph);
+    memset(xma + 3 * 0x40, 0xb2, 0x40);                        /* o interpretador anda o contexto */
+    audio_dump_graph_post(proc, graph, 0);                     /* nao consumido: nada */
+    CHECK(!dump_shape.f);
+    audio_dump_graph_post(proc, graph, 1);
+    REQUIRE(dump_shape.f);
+    dump_close(&dump_shape, 0);
+    f = read_dump("audio_fm6_shape.bin", &n);
+    REQUIRE(f);
+    CHECK_EQ(n, 8 + (8 + 24 + 24) + (8 + 208) + (8 + 16 + 512));
+    CHECK_HEX(f, "415a534801000000");
+    r = f + 8;                                                 /* grafo: seq 0, id 0x42, stamp 0x99, 3 entradas */
+    CHECK_HEX(r, "01000000" "30000000" "00000000" "42000000" "9900000000000000" "03000000" "00000000"
+                 "0100000000000000");
+    r += 8 + 48;                                               /* SRC: ctx 3, reset 0x77, antes/depois */
+    CHECK_HEX(r, "02000000" "d0000000" "00000000" "03000000" "7700000000000000" "a1a1a1a1");
+    CHECK_EQ(r[24 + 0x20], 0xb1);
+    CHECK_EQ(r[24 + 0x60], 0xa1);
+    CHECK_EQ(r[24 + 0x80], 0xb2);
+    r += 8 + 208;                                              /* mix 1 -> DMA 5 */
+    CHECK_HEX(r, "03000000" "10020000" "00000000" "01000000" "05000000" "00000000");
+    CHECK(!memcmp(r + 24, m, 0x200));
+    dump_secs = 0;
+}

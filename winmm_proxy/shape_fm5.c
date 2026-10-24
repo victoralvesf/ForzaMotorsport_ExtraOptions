@@ -14,6 +14,9 @@ extern uint8_t *g_base;
 extern void wlog(const char *fmt, ...);
 extern int is_fm5(void);
 extern int is_fm6(void);
+extern int audio_dump_active(void);   /* audio_fm6.c (debug.ini AudioDump) */
+extern void audio_dump_graph_pre(uint8_t *graph);
+extern void audio_dump_graph_post(uint8_t *proc, uint8_t *graph, uint64_t ret);
 extern int hook_function(uint32_t rva, const char *orig_hex, size_t stolen, void *hook, void **tramp);
 
 #define RVA_SHAPE_GRAPH 0x18fbd0
@@ -72,7 +75,14 @@ static void fm6_graph_log(uint8_t *graph)
 static uint64_t hook_shape_graph(uint8_t *proc, uint8_t *graph)
 {
     uint64_t ret, *b;
-    if (is_fm6()) fm6_graph_log(graph);
+    if (is_fm6()) {
+        fm6_graph_log(graph);
+        if (!audio_dump_active()) return orig_shape_graph(proc, graph);
+        audio_dump_graph_pre(graph);
+        ret = orig_shape_graph(proc, graph);
+        audio_dump_graph_post(proc, graph, ret);
+        return ret;
+    }
     if (!is_fm5()) return orig_shape_graph(proc, graph);
     b = *(uint64_t **)(graph + 0x48);
     if (graph != pending_graph || b != pending_data)
