@@ -1112,6 +1112,61 @@ TEST(xg_fm5_bc_mip_elements_rounded_up)
     fake_azimuth(1);
 }
 
+/* CreatePlacementTexture2D do FM5: os blocos acrescentados pelo arredondamento sao zerados na memoria do jogo */
+static int xg_released;
+static unsigned long xg_fake_release(void *self) { (void)self; xg_released++; return 0; }
+/* enderecos de mentira: 0x4000 por mip, linha de 128 elementos de 16 bytes */
+static uint64_t xg_lin_texel(void *self, uint32_t plane, uint32_t mip, uint64_t x, uint32_t y, uint32_t z, uint32_t s)
+{
+    (void)self; (void)plane; (void)z; (void)s;
+    return (uint64_t)mip * 0x40000 + ((uint64_t)y * 128 + x) * 16;
+}
+
+/* como o 0x14009fba0: computer em out[0] e o XG_RESOURCE_LAYOUT (0xd40 bytes) em out+0x10 */
+static void xg_layout_fake_orig(void *out, const char *name, uint32_t *desc)
+{
+    (void)name; (void)desc;
+    *(void **)out = xg_bc_obj_orig_out;
+    memset((uint8_t *)out + 0x10, 0xcd, 0xd40);
+}
+
+TEST(xg_fm5_bc_tail_zeroed)
+{
+    static const uint32_t xg[3][2] = { {240, 135}, {120, 67}, {60, 33} };
+    uint32_t desc[11] = { 960, 540, 3, 1, 99, 1, 0, 0, 8, 0, 0 };
+    uint8_t *mem = malloc(0xc0000);
+    uint32_t i;
+    REQUIRE(mem);
+    fake_azimuth(1);
+    if (!xg_bc_self) xg_bc_self = calloc(1, 0x6200);
+    xg_bc_fill(xg_bc_self, 3, xg);
+    *(uint64_t *)(xg_bc_self + 0x54b8) = 0xc0000;     /* SizeBytes */
+    *(uint32_t *)(xg_bc_self + 0x54f0) = 16;          /* BC7 */
+    xg_bc_obj_orig_out = xg_bc_self;
+    orig_xg_computer = xg_layout_fake_orig;
+    xg_fm5_vtbl = (void *const *)xg_fake_vtbl;
+    xg_fake_vtbl[1] = xg_vtbl[1] = (void *)xg_fake_release;
+    xg_fake_vtbl[4] = (void *)xg_lin_texel;
+    xg_released = 0;
+    memset(mem, 0xab, 0xc0000);
+    /* mip 1: linha 67 (120 elementos); mip 2: linha 33 (60) */
+    CHECK_EQ(xg_fm5_zero_bc_tail(desc, 14, 0, mem), 180);
+    CHECK_EQ(xg_released, 1);
+    CHECK_EQ(*(uint32_t *)(xg_bc_self + 0x552c + 0x48), 68);   /* contagens arredondadas pelo hook */
+    for (i = 0; i < 120 * 16; i++) CHECK_EQ(mem[0x40000 + 67 * 128 * 16 + i], 0);
+    CHECK_EQ(mem[0x40000 + 66 * 128 * 16 + 119 * 16 + 15], 0xab);   /* linha de dentro intacta */
+    CHECK_EQ(mem[0x40000 + 67 * 128 * 16 + 120 * 16], 0xab);        /* alem da largura intacto */
+    CHECK_EQ(mem[0x80000 + 33 * 128 * 16], 0);
+    CHECK_EQ(mem[0x80000 + 32 * 128 * 16], 0xab);
+    CHECK_EQ(mem[0], 0xab);                                          /* mip 0 intacto */
+    /* nao BC: nada */
+    desc[4] = 28;
+    CHECK_EQ(xg_fm5_zero_bc_tail(desc, 14, 0, mem), 0);
+    CHECK_EQ(xg_released, 1);
+    xg_fake_vtbl[4] = (void *)xg_fake_texel;
+    free(mem);
+}
+
 /* ------------------------------------------------------------------------ */
 /* azimuth.exe real: install() (travas, allow list, hooks)                    */
 /* ------------------------------------------------------------------------ */

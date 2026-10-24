@@ -1396,9 +1396,9 @@ typedef uint64_t (*xg_texel_offset_fn)(void *self, uint32_t plane, uint32_t mip,
    textura do D3D12 (lixo da GPU: a linha colorida do flare do sol na altura do velocimetro, lensflare_lenstexture =
    sujeira da lente 960x540 BC7 reduzida -> o trilinear mistura o mip 1). xg_fix_bc_mips corrige as contagens no
    proprio computer e na copia do layout que o 0x14009fba0 ja fez em out+0x10 (o mapa sai dela; so no computer a
-   linha nova nunca era enviada e o resultado dependia do que o heap do D3D12 tinha ali). Os enderecos ja contados
-   nao mudam, os novos sao os mesmos do XG do FM6 e cabem no padrao 8x8 do mapa comprimido do Azimuth
-   (tools/xg_layout_probe.c ... fix). Desc 2D e 3D:
+   linha nova nunca era enviada e ficava com o que o heap do D3D12 tinha). Os enderecos ja contados nao mudam, os
+   novos sao os mesmos do XG do FM6 e cabem no padrao 8x8 do mapa comprimido do Azimuth (tools/xg_layout_probe.c
+   ... fix). O asset nao tem esses blocos: xg_fm5_zero_bc_tail os zera na memoria do jogo. Desc 2D e 3D:
    Width [0], Height [1], Format [4]. */
 static int xg_is_bc(uint32_t f) { return (f >= 70 && f <= 84) || (f >= 94 && f <= 99); }
 
@@ -1520,6 +1520,46 @@ static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
         return;
     }
     orig_xg_computer(out, name, desc);
+}
+
+/* Os blocos que xg_fix_bc_mips acrescenta nao tem conteudo no asset (o XG do FM5 nunca os conta; o jogo nunca escreve
+   ali): na memoria do jogo fica o que sobrou de outro uso do pool (0 numa sessao, blocos de outra textura em outra:
+   captura flare7), no console a memoria nova vem zerada. CreatePlacementTexture2D do FM5 chama isto apos criar a textura: zera esses
+   elementos nos enderecos do proprio XG (dentro de SizeBytes, +0x54b8). Devolve quantos elementos zerou. */
+uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch, uint8_t *addr)
+{
+    uint32_t d[16] = {0}, mips, mip, slice, arr, w, h, ow, oh, bpe, x, y, n = 0;
+    /* saida do 0x14009fba0: [0] = computer, +0x10 = XG_RESOURCE_LAYOUT (0xd40) copiado pelo proprio Azimuth */
+    uint64_t out[(0x10 + 0xd40) / 8] = {0};
+    uint8_t *self;
+    uint64_t size;
+    if (!addr || !orig_xg_computer || !xg_is_bc(desc[4])) return 0;
+    memcpy(d, desc, 11 * sizeof *d);
+    d[13] = tile;
+    d[14] = pitch;
+    hook_xg_computer(out, "XGCreateTexture2DComputer", d);
+    if (!(self = (uint8_t *)(uintptr_t)out[0])) return 0;
+    mips = *(uint32_t *)(self + 0x54c8);
+    size = *(uint64_t *)(self + 0x54b8);
+    bpe = *(uint32_t *)(self + 0x54f0);
+    arr = desc[3] ? desc[3] : 1;
+    if (mips && mips <= 15 && bpe && bpe <= 16 && xg_fm5_vtbl)
+        for (slice = 0; slice < arr; slice++)
+            for (mip = 1; mip < mips; mip++) {
+                w = *(uint32_t *)(self + mip * 0x48 + 0x5528);
+                h = *(uint32_t *)(self + mip * 0x48 + 0x552c);
+                ow = *(uint32_t *)(self + 0x5528) >> mip; if (!ow) ow = 1;
+                oh = *(uint32_t *)(self + 0x552c) >> mip; if (!oh) oh = 1;
+                for (y = 0; y < h; y++)
+                    for (x = y < oh ? ow : 0; x < w; x++) {
+                        uint64_t off = ((xg_texel_offset_fn)xg_fm5_vtbl[4])(self, 0, mip, x, y, slice, 0);
+                        if (off == (uint64_t)-1 || off + bpe > size) continue;
+                        memset(addr + off, 0, bpe);
+                        n++;
+                    }
+            }
+    ((unsigned long (*)(void *))(*(void ***)self)[1])(self);   /* Release (slot 1) */
+    return n;
 }
 
 /* ------------------------------------------------------------------------ */
