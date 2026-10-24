@@ -1114,6 +1114,14 @@ static uint64_t xg_lin_texel(void *self, uint32_t plane, uint32_t mip, uint64_t 
     return (uint64_t)mip * 0x40000 + ((uint64_t)y * 128 + x) * 16;
 }
 
+/* como o 0x14009fba0: computer em out[0] e o XG_RESOURCE_LAYOUT (0xd40 bytes) em out+0x10 */
+static void xg_layout_fake_orig(void *out, const char *name, uint32_t *desc)
+{
+    (void)name; (void)desc;
+    *(void **)out = xg_bc_obj_orig_out;
+    memset((uint8_t *)out + 0x10, 0xcd, 0xd40);
+}
+
 TEST(xg_fm5_bc_tail_zeroed)
 {
     static const uint32_t xg[3][2] = { {240, 135}, {120, 67}, {60, 33} };
@@ -1127,7 +1135,7 @@ TEST(xg_fm5_bc_tail_zeroed)
     *(uint64_t *)(xg_bc_self + 0x54b8) = 0xc0000;     /* SizeBytes */
     *(uint32_t *)(xg_bc_self + 0x54f0) = 16;          /* BC7 */
     xg_bc_obj_orig_out = xg_bc_self;
-    orig_xg_computer = xg_bc_fake_orig;
+    orig_xg_computer = xg_layout_fake_orig;
     xg_fm5_vtbl = (void *const *)xg_fake_vtbl;
     xg_fake_vtbl[1] = xg_vtbl[1] = (void *)xg_fake_release;
     xg_fake_vtbl[4] = (void *)xg_lin_texel;

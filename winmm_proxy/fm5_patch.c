@@ -1518,15 +1518,16 @@ static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
 uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch, uint8_t *addr)
 {
     uint32_t d[16] = {0}, mips, mip, slice, arr, w, h, ow, oh, bpe, x, y, n = 0;
-    void *out = NULL;
+    /* saida do 0x14009fba0: [0] = computer, +0x10 = XG_RESOURCE_LAYOUT (0xd40) copiado pelo proprio Azimuth */
+    uint64_t out[(0x10 + 0xd40) / 8] = {0};
     uint8_t *self;
     uint64_t size;
     if (!addr || !orig_xg_computer || !xg_is_bc(desc[4])) return 0;
     memcpy(d, desc, 11 * sizeof *d);
     d[13] = tile;
     d[14] = pitch;
-    hook_xg_computer(&out, "XGCreateTexture2DComputer", d);
-    if (!(self = out)) return 0;
+    hook_xg_computer(out, "XGCreateTexture2DComputer", d);
+    if (!(self = (uint8_t *)(uintptr_t)out[0])) return 0;
     mips = *(uint32_t *)(self + 0x54c8);
     size = *(uint64_t *)(self + 0x54b8);
     bpe = *(uint32_t *)(self + 0x54f0);
