@@ -15,6 +15,7 @@ extern int is_fm6(void);
 extern void write_mem(void *dst, const void *src, size_t len);
 extern int hook_at(uint8_t *at, const char *orig_hex, size_t stolen, void *hook, void **tramp_out);
 extern int dbg_int(const wchar_t *key, int def);
+extern int bytes_match(const uint8_t *p, const char *hex, size_t len);
 static void dump_output(const BYTE *buf, UINT32 frames, DWORD flags);
 static void dump_xma_command(const uint32_t *msg);
 
@@ -316,15 +317,20 @@ static uint64_t acp_pop(void *hal, uint8_t *msg)
    audio_fm6_out.wav: saida do WASAPI do jogo (o que vai para o Windows), N segundos.
    audio_fm6_shape.bin: por grafo SHAPE consumido, as entradas, os contextos SRC (0x20) e XMA (0x40) de cada SRC
    antes e depois do interpretador, e os 128 floats de cada mix buffer levado por DMA ao jogo; e os comandos de
-   contexto XMA (ACP tipos 5..8). Registro = u32 tipo, u32 tamanho, dados. Analise: tools\audio_dump.py.
+   contexto XMA (ACP tipos 5..8); na 1a SRC de cada voz (contexto SRC ainda nao renderizado) os pacotes XMA crus
+   dos 2 buffers de entrada (decodificados fora do jogo por tools\xma_decode.c). Registro = u32 tipo, u32 tamanho,
+   dados. Analise: tools\audio_dump.py.
    Tudo do lado do grafo roda na thread "Azimuth audio processor"; o WAV na thread de audio do jogo. */
 #define RVA_SRC_COUNT 0x333790   /* contextos SRC: u32 quantidade, base em 0x3337a8 (0x20 cada) */
 #define RVA_SRC_BASE  0x3337a8
 #define RVA_XMA_COUNT 0x3337a0   /* contextos XMA: u32 quantidade, base em 0x3337c8 (0x40 cada) */
 #define RVA_XMA_BASE  0x3337c8
 #define DUMP_MAX_SRC  64
+#define RVA_APU_PTR   0xaf3c0    /* (endereco APU u32, tamanho) -> ponteiro do processo ou 0 */
 
-enum { DUMP_GRAPH = 1, DUMP_SRC = 2, DUMP_MIX = 3, DUMP_XMA_CMD = 4 };
+enum { DUMP_GRAPH = 1, DUMP_SRC = 2, DUMP_MIX = 3, DUMP_XMA_CMD = 4, DUMP_XMA_INPUT = 5 };
+
+static void *(*apu_ptr)(uint32_t apu, uint64_t size);
 
 typedef struct {
     HANDLE f;
@@ -463,6 +469,28 @@ static uint8_t *xma_ctx(uint32_t i)
     return base && i < *(uint32_t *)(g_base + RVA_XMA_COUNT) ? base + (size_t)i * 0x40 : NULL;
 }
 
+/* voz nova (SRC sem nada renderizado: +8 e +0xc zerados): os 2 buffers de entrada do contexto XMA
+   (+0/+4 bits 0..11 = pacotes de 0x800, bits 20/21 de +0 = buffer valido, endereco APU em +0x14/+0x18) */
+static void dump_xma_input(uint32_t ctx, const uint8_t *src, const uint8_t *xma)
+{
+    struct { uint32_t type, len, seq, ctx; uint8_t xma[0x40]; uint32_t size[2]; } h;
+    const uint32_t *w = (const uint32_t *)xma;
+    const void *data[2] = { NULL, NULL };
+    int b;
+    if (!apu_ptr || !dump_shape.f || *(const uint32_t *)(src + 8) || (*(const uint32_t *)(src + 0xc) & 0x1ffffff))
+        return;
+    for (b = 0; b < 2; b++) {
+        h.size[b] = (w[0] >> (20 + b) & 1) ? (w[b] & 0xfff) * 0x800 : 0;
+        if (h.size[b]) data[b] = apu_ptr(w[5 + b], h.size[b]);
+        if (!data[b]) h.size[b] = 0;
+    }
+    h.type = DUMP_XMA_INPUT; h.len = sizeof h - 8 + h.size[0] + h.size[1];
+    h.seq = dump_seq; h.ctx = ctx;
+    memcpy(h.xma, xma, 0x40);
+    dump_write(&dump_shape, &h, sizeof h);
+    for (b = 0; b < 2; b++) if (h.size[b]) dump_write(&dump_shape, data[b], h.size[b]);
+}
+
 /* antes do interpretador: contextos SRC/XMA de cada entrada SRC (op 2; ctx = w>>13 & 0xfff) */
 void audio_dump_graph_pre(uint8_t *graph)
 {
@@ -475,6 +503,7 @@ void audio_dump_graph_pre(uint8_t *graph)
         dump_pre[dump_pre_n].ctx = ctx;
         if (s) memcpy(dump_pre[dump_pre_n].src, s, 0x20); else memset(dump_pre[dump_pre_n].src, 0, 0x20);
         if (x) memcpy(dump_pre[dump_pre_n].xma, x, 0x40); else memset(dump_pre[dump_pre_n].xma, 0, 0x40);
+        if (s && x) dump_xma_input(ctx, s, x);
         dump_pre_n++;
     }
 }
@@ -553,6 +582,9 @@ static void audio_dump_init(void)
         slash = wcsrchr(dump_dir, L'\\');
         if (slash) slash[1] = 0; else dump_dir[0] = 0;
     }
+    if (bytes_match(g_base + RVA_APU_PTR, "48895c2408574883ec208bd9488bfa", 15))
+        apu_ptr = (void *(*)(uint32_t, uint64_t))(g_base + RVA_APU_PTR);
+    else wlog("audio dump: APU address lookup (%#x) does not match, XMA input not recorded", RVA_APU_PTR);
     wlog("audio dump: AudioDump=%d s from F9 (FM6: audio_fm6_out.wav + audio_fm6_shape.bin)", dump_secs);
 }
 

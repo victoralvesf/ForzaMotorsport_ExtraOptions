@@ -263,3 +263,39 @@ TEST(audio_dump_shape_graph_src_and_mix)
     CHECK(!memcmp(r + 24, m, 0x200));
     dump_secs = 0;
 }
+
+static uint8_t fake_packets[0x1000];
+static uint32_t fake_apu_addr;
+static void *fake_apu_ptr(uint32_t apu, uint64_t size)
+{
+    fake_apu_addr = apu;
+    return size <= sizeof fake_packets ? fake_packets : NULL;
+}
+
+TEST(audio_dump_xma_input_of_new_voice)
+{
+    uint8_t src[0x20] = { 0 }, xma[0x40] = { 0 }, *f;
+    uint32_t w0 = 0x00100002, w5 = 0x1013000;                 /* buffer 0 valido com 2 pacotes; buffer 1 nao */
+    DWORD n = 0;
+    fake_azimuth(2);
+    log_capture();
+    dump_to_build(1);
+    memcpy(xma, &w0, 4);
+    memcpy(xma + 0x14, &w5, 4);
+    memset(fake_packets, 0x5a, sizeof fake_packets);
+    apu_ptr = fake_apu_ptr;
+    REQUIRE(dump_open(&dump_shape, L"audio_fm6_shape.bin"));
+    *(uint32_t *)(src + 8) = 1;                               /* SRC ja renderizado: voz velha, nada */
+    dump_xma_input(7, src, xma);
+    *(uint32_t *)(src + 8) = 0;
+    dump_xma_input(7, src, xma);
+    dump_close(&dump_shape, 0);
+    f = read_dump("audio_fm6_shape.bin", &n);
+    REQUIRE(f);
+    CHECK_EQ(n, 8 + 0x50 + 0x1000);
+    CHECK_HEX(f, "05000000" "50100000" "00000000" "07000000" "02001000");
+    CHECK_HEX(f + 0x50, "0010000000000000" "5a5a");           /* tamanhos 0x1000 / 0, depois os pacotes */
+    CHECK_EQ(fake_apu_addr, 0x1013000);
+    apu_ptr = NULL;
+    dump_secs = 0;
+}

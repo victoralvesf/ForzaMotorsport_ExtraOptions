@@ -7,7 +7,11 @@ DIR (padrao: raiz do projeto) tem audio_fm6_shape.bin e audio_fm6_out.wav (winmm
 Relata por contexto XMA cada trecho tocado (grafos seguidos com SRC): inicio/fim abrupto, blocos de silencio no
 meio (falta de dados), saltos de amostra; e os cliques na saida final. --wav grava um WAV por contexto (linha do
 tempo inteira, 48 kHz mono, zeros fora dos trechos). --ctx N mostra os contextos SRC/XMA crus de N.
+--xma OUTDIR: pacotes XMA crus de cada voz nova -> OUTDIR/ctxN_seqM.xma, decodificados pelo FFmpeg do Azimuth
+(winmm_proxy/build/xma_decode.exe, tools/xma_decode.c) e comparados com o que o Azimuth entregou ao jogo:
+onde a 1a amostra entregue cai no PCM completo (= amostras descartadas no inicio).
 """
+import subprocess
 import os, struct, sys, wave
 from collections import defaultdict
 
@@ -24,7 +28,7 @@ def read_shape(path):
     d = open(path, 'rb').read()
     assert d[:4] == b'AZSH', 'cabecalho'
     o = 8
-    graphs, srcs, mixes, cmds = [], defaultdict(list), defaultdict(dict), []
+    graphs, srcs, mixes, cmds, inputs = [], defaultdict(list), defaultdict(dict), [], []
     while o + 8 <= len(d):
         t, n = struct.unpack_from('<II', d, o)
         p = d[o + 8:o + 8 + n]
@@ -46,7 +50,79 @@ def read_shape(path):
             mask = p[16:80]
             ctxs = [i for i in range(512) if mask[i >> 3] >> (i & 7) & 1]
             cmds.append((seq, typ, stamp, ctxs))
-    return graphs, srcs, mixes, cmds
+        elif t == 5:
+            seq, ctx = struct.unpack_from('<II', p)
+            xma = p[8:72]
+            s0, s1 = struct.unpack_from('<II', p, 72)
+            inputs.append((seq, ctx, xma, p[80:80 + s0] + p[80 + s0:80 + s0 + s1]))
+    return graphs, srcs, mixes, cmds, inputs
+
+
+def xma_fields(xma):
+    w = struct.unpack_from('<16I', xma)
+    ch = (w[1] >> 29 & 1) + 1
+    rate = (24000, 32000, 44100, 48000)[w[1] >> 27 & 3]
+    skip_sub = w[1] >> 24 & 7
+    bit = w[2] & 0x3fff
+    packet = (w[2] & 0x3ffffff) >> 14
+    return ch, rate, skip_sub, bit, packet
+
+
+def frames_before(data, packet, bit):
+    """quadros do pacote inicial antes do bit de inicio (como o Azimuth conta em 0x14018ed10)"""
+    pk = data[packet * 0x800:(packet + 1) * 0x800]
+    if len(pk) < 4:
+        return 0
+    pos = ((pk[0] << 16 | pk[1] << 8 | pk[2]) & 0x3fff8) >> 3
+    pos += 0x20
+    n = 0
+    while pos < bit and n < pk[0] >> 2:
+        ln = 0
+        for k in range(15):
+            ln = ln << 1 | (pk[(pos + k) >> 3] >> (7 - ((pos + k) & 7)) & 1)
+        if ln < 15:
+            break
+        pos += ln
+        n += 1
+    return n
+
+
+def check_xma(inputs, v, outdir):
+    exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'winmm_proxy', 'build', 'xma_decode.exe')
+    os.makedirs(outdir, exist_ok=True)
+    seen = set()
+    for seq, ctx, xma, data in inputs:
+        ch, rate, skip_sub, bit, packet = xma_fields(xma)
+        key = (len(data), data[:64])
+        fb = frames_before(data, packet, bit)
+        discard = (skip_sub + fb * 4) * 128
+        print('voz nova ctx %d grafo %d: %d canais %d Hz, %d pacotes, inicio pacote %d bit %#x (%d quadros antes), '
+              'subquadros a pular %d -> Azimuth descarta %d' % (ctx, seq, ch, rate, len(data) // 0x800, packet, bit,
+                                                                fb, skip_sub, discard))
+        if key in seen:
+            continue
+        seen.add(key)
+        base = os.path.join(outdir, 'ctx%03d_seq%d' % (ctx, seq))
+        open(base + '.xma', 'wb').write(struct.pack('<II', ch, rate) + data)
+        if not os.path.exists(exe):
+            continue
+        r = subprocess.run([exe, base + '.xma', base + '.f32', os.path.join(os.path.dirname(exe), '..', '..', 'data', 'bin')],
+                           capture_output=True, text=True)
+        print('   ' + r.stdout.strip().replace('\n', '\n   '))
+        raw = open(base + '.f32', 'rb').read()
+        pcm = struct.unpack('<%df' % (len(raw) // 4), raw)[::ch]
+        e = v.get(ctx, {}).get(seq)
+        if not e or not e[1] or not pcm:
+            continue
+        got = e[1]
+        best = None
+        for off in range(0, min(len(pcm) - 16, 8192)):
+            if all(abs(pcm[off + i] - got[i]) < 1e-4 for i in range(16)):
+                best = off
+                break
+        print('   entregue ao jogo (1as amostras): %s' % ' '.join('%.4f' % x for x in got[:6]))
+        print('   PCM do FFmpeg (1as amostras):    %s' % ' '.join('%.4f' % x for x in pcm[:6]))
+        print('   1a amostra entregue = amostra %s da saida do FFmpeg (o Azimuth descartou %d)' % (best, discard))
 
 
 def voices(graphs, srcs, mixes):
@@ -165,12 +241,18 @@ def main():
     show_ctx = None
     if '--wav' in args:
         i = args.index('--wav'); wavdir = args[i + 1]; del args[i:i + 2]
+    xmadir = None
+    if '--xma' in args:
+        i = args.index('--xma'); xmadir = args[i + 1]; del args[i:i + 2]
     if '--ctx' in args:
         i = args.index('--ctx'); show_ctx = int(args[i + 1], 0); del args[i:i + 2]
     d = args[0] if args else os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
-    graphs, srcs, mixes, cmds = read_shape(os.path.join(d, 'audio_fm6_shape.bin'))
+    graphs, srcs, mixes, cmds, inputs = read_shape(os.path.join(d, 'audio_fm6_shape.bin'))
     print('%d grafos (%.1f s), %d comandos XMA' % (len(graphs), len(graphs) * BLOCK / RATE, len(cmds)))
     v = voices(graphs, srcs, mixes)
+    if xmadir:
+        check_xma(inputs, v, xmadir)
+        return
     resets = defaultdict(list)
     for seq, typ, stamp, ctxs in cmds:
         for c in ctxs:
