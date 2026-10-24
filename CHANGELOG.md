@@ -30,7 +30,7 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **FM5:** the Particles and Motion Blur presets have no effect.
 - No Xbox Live features (Rivals, online play, leaderboards).
 
-## Unreleased
+## v1.3.1 — FM5 tuning chart and sun flare fixes
 
 ### Fixes
 - **FM5:** the gear ratio chart in the tuning menu was drawn out of place at resolutions above 1080p. It now
