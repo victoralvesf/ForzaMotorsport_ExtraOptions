@@ -62,6 +62,8 @@ static const uint32_t fm5_splash_intro_cmps[] = { 0x13a33e, 0x13a825, 0x13b9ce }
 #define FM6_RES_UI_SIZE    0x9faf52  /* float([rbx+8]), float([rbx+0xc]) -> [rbp+0x38/0x3c] (34 bytes) */
 #define FM6_UI_VP_CALL     0x127ea5  /* ff 90 38 05 00 00  call [rax+0x538] (viewport) */
 #define FM6_UI_SLOT        0x1287d8  /* padding cc entre 0x1287d8 e 0x1287e0 */
+#define FM6_CHART_VP       0xcff5c5  /* graficos da UI: mov rax,[rcx] ; 2 stores ; call [rax+0x30] */
+#define FM6_CHART_SLOT     0x7520    /* padding cc depois de um ret (18 bytes) */
 /* SkipIntro: opcao "disablesplashintro" = byte [opcoes+0x30d7] (registrada em 0xa3ae3b). Sem imediato para trocar:
    no init 0xa06964 e "cmp [r12+0x30d7],sil ; je" (esi = 0 desde 0xa06a46) -> je vira nop (= opcao ligada);
    no logo parade 0xa08e78 (Health_Disclaimer/forzatech) e "cmp [rax+0x30d7],r15b ; jne" (r15 = 0) -> jmp */
@@ -377,6 +379,8 @@ static void implicit_apu_heap(const char *game_name)
    (OMSetRenderTargets = [rax+0x4e0]). */
 #define FM5_UI_VP_CALL     0xb60db8  /* ff 90 88 01 00 00  call [rax+0x188] (viewport) */
 #define FM5_UI_SLOT        0xb60c98  /* padding cc entre 0xb60c91 e 0xb60ca0 */
+#define FM5_CHART_VP       0x52175b  /* graficos da UI: mov rax,[rcx] ; 2 stores ; call [rax+0x28] (ver ui_chart_vcall) */
+#define FM5_CHART_SLOT     0x32a948  /* padding cc depois de um ret (15 bytes) */
 
 typedef struct {
     const char *tag;
@@ -393,6 +397,9 @@ typedef struct {
     const char *vp_call_orig;
     uint32_t vp_off;
     uint32_t vp_slot;                /* 8 bytes cc de padding (ponteiro p/ fm5_ui_vcall) */
+    uint32_t chart_vp;               /* mov rax,[rcx] ; 2 stores do retangulo ; call [rax+chart_off] (graficos da UI) */
+    uint8_t chart_off;               /* SetViewport do renderizador dos graficos */
+    uint32_t chart_slot;             /* 8 bytes cc de padding (ponteiro p/ ui_chart_vcall) */
 } ResSites;
 
 static const uint8_t fm5_ui_size_code[36] = {
@@ -412,12 +419,14 @@ static const ResSites fm5_res_sites = {
     "FM5", FM5_RES_HEIGHT, "c7836025000038040000",
     FM5_RES_WIDTH, "c5fa590d0b2aba01c5f259153f22ba01c4e1fa2cea", 0xbd,           /* rbp -> mov ebp */
     FM5_RES_UI_SIZE, "418b4708c5f857c0c4e1fa2ac0c5fa11456f418b470cc5f057c9c4e1f22ac8c5fa114d73",
-    fm5_ui_size_code, sizeof fm5_ui_size_code, FM5_UI_VP_CALL, "ff9088010000", 0x188, FM5_UI_SLOT };
+    fm5_ui_size_code, sizeof fm5_ui_size_code, FM5_UI_VP_CALL, "ff9088010000", 0x188, FM5_UI_SLOT,
+    FM5_CHART_VP, 0x28, FM5_CHART_SLOT };
 static const ResSites fm6_res_sites = {
     "FM6", FM6_RES_HEIGHT, "c7837825000038040000",
     FM6_RES_WIDTH, "c5fa590d48cedb00c5f25915b0c8db00c4e1fa2cd2", 0xba,           /* rdx -> mov edx */
     FM6_RES_UI_SIZE, "8b4308c5f857c0c4e1fa2ac0c5fa1145388b430cc5f057c9c4e1f22ac8c5fa114d3c",
-    fm6_ui_size_code, sizeof fm6_ui_size_code, FM6_UI_VP_CALL, "ff9038050000", 0x538, FM6_UI_SLOT };
+    fm6_ui_size_code, sizeof fm6_ui_size_code, FM6_UI_VP_CALL, "ff9038050000", 0x538, FM6_UI_SLOT,
+    FM6_CHART_VP, 0x30, FM6_CHART_SLOT };
 
 static uint8_t *ui_game;
 static const ResSites *ui_sites = &fm5_res_sites;
@@ -460,15 +469,13 @@ static void fm5_ui_viewport(uint8_t *game, const ResSites *rs, uint32_t w, uint3
     wlog("%s: resolution: UI viewport scaled to %ux%u", rs->tag, w, h);
 }
 
-/* Graficos da UI do FM6 (PASSO 107 cont. 1; relacao de marchas da tunagem): 0xcff4e8 calcula a posicao/tamanho do
-   grafico no espaco da UI (1920x1080) e chama o SetViewport do proprio renderizador ([rdi+0x1a0] slot 0x30,
-   rdx = {int x, y, w, h; float minz, maxz}) -> fora da correcao do viewport da UI, ficava no lugar de 1080p.
-   Em 0xcff5c5 (mov rax,[rcx] ; 2 stores do retangulo ; call [rax+0x30]) os stores ficam e o call vira
-   call [rip -> slot no padding 0x7520] = fm6_chart_vcall, que escala o retangulo como fm5_ui_vcall. */
-#define FM6_CHART_VP       0xcff5c5
-#define FM6_CHART_SLOT     0x7520    /* padding cc depois de um ret (18 bytes) */
-
-static uintptr_t fm6_chart_vcall(void *obj, const int32_t *r)
+/* Graficos da UI (FM6 PASSO 107 cont. 1, FM5 PASSO 9 cont. 4; relacao de marchas da tunagem): o desenhista do
+   grafico (FM6 0xcff4e8, FM5 0x521685) calcula a posicao/tamanho no espaco da UI (1920x1080) e chama o SetViewport
+   do proprio renderizador (FM6 [rdi+0x1a0] slot 0x30, FM5 [rdi+0x198] slot 0x28; rdx = {int x, y, w, h; float minz,
+   maxz}) -> fora da correcao do viewport da UI, ficava no lugar de 1080p. No site (mov rax,[rcx] ; 2 stores do
+   retangulo ; call [rax+off]) os stores ficam e o call vira call [rip -> slot no padding] = ui_chart_vcall, que
+   escala o retangulo como fm5_ui_vcall. */
+static uintptr_t ui_chart_vcall(void *obj, const int32_t *r)
 {
     typedef uintptr_t (*vc_fn)(void *, const void *);
     static volatile LONG logged;
@@ -477,27 +484,28 @@ static uintptr_t fm6_chart_vcall(void *obj, const int32_t *r)
     v[0] = (int32_t)(r[0] * ui_sx + 0.5f); v[2] = (int32_t)((r[0] + r[2]) * ui_sx + 0.5f) - v[0];
     v[1] = (int32_t)(r[1] * ui_sy + 0.5f); v[3] = (int32_t)((r[1] + r[3]) * ui_sy + 0.5f) - v[1];
     if (InterlockedIncrement(&logged) <= 2)
-        wlog("FM6: UI graphic %d,%d %dx%d -> %d,%d %dx%d", r[0], r[1], r[2], r[3], v[0], v[1], v[2], v[3]);
-    return ((vc_fn)(*(void ***)obj)[0x30 / 8])(obj, v);
+        wlog("%s: UI graphic %d,%d %dx%d -> %d,%d %dx%d", ui_sites->tag, r[0], r[1], r[2], r[3], v[0], v[1], v[2], v[3]);
+    return ((vc_fn)(*(void ***)obj)[ui_sites->chart_off / 8])(obj, v);
 }
 
-static void fm6_chart_viewport(uint8_t *game)
+static void ui_chart_viewport(uint8_t *game, const ResSites *rs)
 {
     static const uint8_t pad[8] = { 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc };
-    void *fn = (void *)fm6_chart_vcall;
+    void *fn = (void *)ui_chart_vcall;
     uint8_t code[18] = { 0xc5, 0xf8, 0x29, 0x44, 0x24, 0x30,      /* vmovaps [rsp+0x30], xmm0 */
                          0xc5, 0xfb, 0x11, 0x4c, 0x24, 0x40,      /* vmovsd [rsp+0x40], xmm1 */
                          0xff, 0x15 };                            /* call [rip -> slot] */
+    char orig[37];
     int32_t rel;
-    if (!bytes_match(game + FM6_CHART_VP, "488b01c5f829442430c5fb114c2440ff5030", 18) ||
-        memcmp(game + FM6_CHART_SLOT, pad, 8)) {
-        wlog("FM6: resolution: UI graphics viewport site does not match, ignored");
+    snprintf(orig, sizeof orig, "488b01c5f829442430c5fb114c2440ff50%02x", rs->chart_off);
+    if (!bytes_match(game + rs->chart_vp, orig, 18) || memcmp(game + rs->chart_slot, pad, 8)) {
+        wlog("%s: resolution: UI graphics viewport site does not match, ignored", rs->tag);
         return;
     }
-    write_mem(game + FM6_CHART_SLOT, &fn, 8);
-    rel = (int32_t)(FM6_CHART_SLOT - (FM6_CHART_VP + 18));   memcpy(code + 14, &rel, 4);
-    write_mem(game + FM6_CHART_VP, code, sizeof code);
-    wlog("FM6: resolution: UI graphics viewport scaled");
+    write_mem(game + rs->chart_slot, &fn, 8);
+    rel = (int32_t)(rs->chart_slot - (rs->chart_vp + 18));   memcpy(code + 14, &rel, 4);
+    write_mem(game + rs->chart_vp, code, sizeof code);
+    wlog("%s: resolution: UI graphics viewport scaled", rs->tag);
 }
 
 static void game_resolution(uint8_t *game, const ResSites *rs, uint32_t height, uint32_t width)
@@ -532,6 +540,7 @@ static void game_resolution(uint8_t *game, const ResSites *rs, uint32_t height, 
         wlog("%s: resolution: UI fixed at 1920x1080", rs->tag);
         fm5_ui_viewport(game, rs, width ? width : (uint32_t)(((uint64_t)(height ? height : 1080) * 16 + 4) / 9),
                         height ? height : 1080);
+        if (ui_game == game && ui_sites == rs) ui_chart_viewport(game, rs);
     }
 }
 
@@ -546,7 +555,6 @@ static void fm5_resolution(uint8_t *game, uint32_t height, uint32_t width)
 static void fm6_resolution(uint8_t *game, uint32_t height, uint32_t width)
 {
     game_resolution(game, &fm6_res_sites, height, width);
-    if (ui_game == game && ui_sites == &fm6_res_sites) fm6_chart_viewport(game);
 }
 
 /* FPS (PASSO 10): o Present do FM5 (Frame11 slot 0x138 = 0x7146e0) le [frame+0xa0]: 0 -> SyncInterval 1 (60 fps),
