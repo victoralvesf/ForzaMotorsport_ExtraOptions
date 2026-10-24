@@ -48,7 +48,8 @@ try:
     eids = [last[0] if e < 0 else e for e in eids]
     log.write('total %d acoes\n' % n[0])
     for r in [x for x in os.environ.get('RDOC_USAGE', '').split(',') if x.strip()]:
-        rid = [k for k in texs if str(int(k)) == r.strip() or str(k).endswith('::' + r.strip())]
+        rid = [k for k in list(texs) + [b.resourceId for b in ctl.GetBuffers()]
+               if str(k).endswith('::' + r.strip())]
         for k in rid:
             us = ctl.GetUsage(k)
             log.write('usage %s: %s\n' % (tdesc(k), ' '.join('%d:%s' % (u.eventId, str(u.usage).split('.')[-1]) for u in us)))
@@ -135,6 +136,24 @@ try:
                 log.write('  ps shader %s\n' % refl.resourceId)
                 dis = ctl.DisassembleShader(pipe.GetGraphicsPipelineObject(), refl, ctl.GetDisassemblyTargets(True)[0])
                 open(os.path.join(out, 'eid%d_ps.txt' % e), 'w', encoding='utf-8').write(dis)
+            # vertex shader (RDOC_VS=1): disassembly + SRVs/CBs do VS
+            if os.environ.get('RDOC_VS'):
+                vrefl = pipe.GetShaderReflection(rd.ShaderStage.Vertex)
+                if vrefl:
+                    log.write('  vs shader %s\n' % vrefl.resourceId)
+                    dis = ctl.DisassembleShader(pipe.GetGraphicsPipelineObject(), vrefl, ctl.GetDisassemblyTargets(True)[0])
+                    open(os.path.join(out, 'eid%d_vs.txt' % e), 'w', encoding='utf-8').write(dis)
+                for u in pipe.GetReadOnlyResources(rd.ShaderStage.Vertex):
+                    d = u.descriptor
+                    log.write('  vs srv[%s] %s fmt %s\n' % (u.access.index, tdesc(d.resource), d.format.Name()))
+                for u in pipe.GetConstantBlocks(rd.ShaderStage.Vertex):
+                    d = u.descriptor
+                    if d.resource == rd.ResourceId.Null(): continue
+                    data = ctl.GetBufferData(d.resource, d.byteOffset, 512)
+                    import struct
+                    fl = struct.unpack('<%df' % (len(data) // 4), data[:len(data) // 4 * 4])
+                    log.write('  vs cb[%s] %s +%#x: %s\n' % (u.access.index, names.get(d.resource, d.resource), d.byteOffset,
+                              ' '.join('%.4g' % f for f in fl)))
         except Exception:
             log.write(traceback.format_exc())
     ctl.Shutdown()
