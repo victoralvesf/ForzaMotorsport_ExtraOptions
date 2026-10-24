@@ -1717,3 +1717,27 @@ TEST(fm6_ui_trace_logs_distinct_rects)
     CHECK(a && !strstr(a + 1, "d3d: UiTrace: viewport"));
     CHECK(strstr(t, "d3d: UiTrace: scissor n=1 10,20 - 300,400") != NULL);
 }
+
+/* FM6 A2CToBlend: alpha-to-coverage com RT0 sem blending -> blending SRC_ALPHA/INV_SRC_ALPHA so no RT0 */
+TEST(fm6_blend_a2c_to_alpha_blend)
+{
+    UINT d[66], o[66];
+    int i;
+    memset(d, 0, sizeof d);
+    d[0] = 1; d[1] = 0;                          /* A2C, sem blending independente */
+    d[2] = 0; d[3] = 2; d[4] = 1; d[5] = 1; d[6] = 2; d[7] = 1; d[8] = 1; d[9] = 0xf;
+    CHECK(fm6_blend_a2c_rewrite(d, o));
+    CHECK_EQ(o[0], 0);
+    CHECK_EQ(o[1], 1);
+    CHECK(o[2] == 1 && o[3] == 5 && o[4] == 6 && o[5] == 1 && o[6] == 2 && o[7] == 6 && o[8] == 1 && o[9] == 0xf);
+    for (i = 1; i < 8; i++)                      /* RT1..7 = RT0 original (sem blending) */
+        CHECK(o[2 + 8 * i] == 0 && o[3 + 8 * i] == 2 && o[4 + 8 * i] == 1 && o[9 + 8 * i] == 0xf);
+    d[1] = 1; d[10] = 1; d[11] = 7;              /* independente: RT1 fica como o jogo pediu */
+    CHECK(fm6_blend_a2c_rewrite(d, o));
+    CHECK(o[1] == 1 && o[10] == 1 && o[11] == 7);
+    d[2] = 1;                                    /* RT0 ja com blending: nao mexe */
+    CHECK(!fm6_blend_a2c_rewrite(d, o));
+    d[0] = 0; d[2] = 0;                          /* sem A2C: nao mexe */
+    CHECK(!fm6_blend_a2c_rewrite(d, o));
+    CHECK(!fm6_blend_a2c_rewrite(NULL, o));
+}

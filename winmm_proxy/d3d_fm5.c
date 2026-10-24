@@ -1414,6 +1414,54 @@ static __attribute__((noinline)) uintptr_t fm6_game_caller(void)
     return 0;
 }
 
+/* CreateBlendState (slot 0x14) do FM6: a plotagem de fabrica (decal *Livery_a.modelbin) e desenhada com
+   alpha-to-coverage na cena MSAA 2x; no PC o driver espalha a cobertura entre pixels vizinhos (dithering) para ter
+   mais niveis de alpha -> bordas da plotagem em xadrez de 1 pixel (16_opcoes_graficas.txt PASSO 12, fm6 PASSO 111).
+   LiveryLog: loga os descs distintos com A2C. debug.ini A2CToBlend=1 (experimento): A2C com RT0 sem blending vira
+   blending SRC_ALPHA / INV_SRC_ALPHA no RT0 (os outros RTs ficam como estavam). Desc D3D11_BLEND_DESC: [0] A2C,
+   [1] IndependentBlendEnable, RT[i] = 8 dwords a partir de [2] {en, src, dst, op, srcA, dstA, opA, mask}. */
+extern int dbg_int(const wchar_t *key, int def);
+static state_fn orig_fm6_create_blend;
+static int fm6_a2c_blend = -1;
+int fm6_blend_a2c_rewrite(const UINT *d, UINT *o)
+{
+    int i;
+    if (!d || !d[0] || d[2]) return 0;            /* sem A2C, ou RT0 ja com blending */
+    memcpy(o, d, 66 * sizeof(UINT));
+    o[0] = 0;
+    if (!d[1]) {                                  /* sem blending independente: RT1..7 = RT0 original */
+        o[1] = 1;
+        for (i = 1; i < 8; i++) memcpy(o + 2 + 8 * i, d + 2, 8 * sizeof(UINT));
+    }
+    o[2] = 1; o[3] = 5; o[4] = 6; o[5] = 1;      /* SRC_ALPHA, INV_SRC_ALPHA, ADD */
+    o[6] = 2; o[7] = 6; o[8] = 1;                 /* alpha: ONE, INV_SRC_ALPHA, ADD */
+    return 1;
+}
+static long fm6_CreateBlendState(void *dev, const UINT *d, void **out)
+{
+    UINT o[66];
+    long hr;
+    int rw;
+    if (fm6_a2c_blend < 0) fm6_a2c_blend = dbg_int(L"A2CToBlend", 0) > 0;
+    rw = fm6_a2c_blend && fm6_blend_a2c_rewrite(d, o);
+    hr = orig_fm6_create_blend(dev, rw ? o : d, out);
+    if (d && d[0] && liv_log) {
+        static UINT seen[32][10];
+        static volatile LONG lock;
+        static int nseen;
+        int k, novo = 1;
+        while (InterlockedExchange(&lock, 1)) SwitchToThread();
+        for (k = 0; k < nseen; k++) if (!memcmp(seen[k], d, sizeof seen[k])) novo = 0;
+        if (novo && nseen < 32) memcpy(seen[nseen++], d, sizeof seen[0]);
+        InterlockedExchange(&lock, 0);
+        if (novo)
+            wlog("livery: CreateBlendState with alpha-to-coverage indep=%u rt0 {en=%u src=%u dst=%u op=%u srcA=%u dstA=%u "
+                 "opA=%u mask=%#x}%s -> hr %#lx %p, caller game+%#zx", d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[8],
+                 d[9], rw ? " -> alpha blending (A2CToBlend)" : "", hr, out ? *out : NULL, fm6_game_caller());
+    }
+    return hr;
+}
+
 static ptex2d_fn orig_fm6_placement_tex2d;
 static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile, UINT pitch, void *addr, void **out)
 {
@@ -1986,6 +2034,8 @@ static int fm6_device_fixups(void **vt)
         orig_fm6_create_srv = (srv_fn)vt[7];
         vt[7] = (void *)fm6_CreateShaderResourceView;
         orig_fm6_create_rtv = (rtv_fn)vt[9];
+        orig_fm6_create_blend = (state_fn)vt[0x14];
+        vt[0x14] = (void *)fm6_CreateBlendState;
         vt[9] = (void *)fm6_CreateRenderTargetView;
         orig_fm6_placement_tex2d = (ptex2d_fn)vt[0x40];
         vt[0x40] = (void *)fm6_CreatePlacementTexture2D;
