@@ -63,6 +63,11 @@ full detail outside the cockpit; low lowers it for more performance. Shadows als
 high and ultra raise the shadow map resolution (up to 4096) and give more objects detailed shadows;
 low halves the resolution.
 
+FM6 also draws smooth edges on car liveries and decals, fences, foliage and the crowd: on PC the graphics
+driver dithers alpha-to-coverage into a 1-pixel checkerboard pattern on those edges, so the mod makes the
+game's shaders compute the coverage themselves, like the console does (`AlphaToCoverageNoDither` in
+`azimuth_fm6.ini`, on by default).
+
 ## Status and known issues
 
 - **Forza Motorsport 5:** menus, races, garage, DLC and Marketplace work.
