@@ -1390,6 +1390,35 @@ XG_BAD_SLOT(12) XG_BAD_SLOT(13) XG_BAD_SLOT(14) XG_BAD_SLOT(15)
 typedef uint64_t (*xg_texel_offset_fn)(void *self, uint32_t plane, uint32_t mip, uint64_t x,
                                        uint32_t y, uint32_t z_or_slice, uint32_t sample);
 
+/* Borda dos mips BC: o conteudo dos jogos so cobre (elementos do mip 0) >> mip blocos por eixo (a conta do XG do
+   FM5); a ultima linha/coluna de blocos de um mip com altura/largura nao multipla de 4 alem disso e lixo na memoria
+   da textura no PC (no console nao aparece). A sujeira da lente do flare do sol (960x540 BC7, reduzida -> mistura o
+   mip 1) mostrava essa linha na borda de baixo, no FM5 e no FM6. Depois do CopyFromSubresource (destino linear) os
+   elementos alem desse limite repetem o ultimo de dentro (clamp). Em formatos sem bloco o limite e o proprio mip. */
+void xg_clamp_tail(const uint8_t *self, uint8_t *dst, uint32_t plane, uint32_t subres, uint32_t row_pitch,
+                   uint32_t depth_pitch)
+{
+    const uint8_t *pl = self + plane * 0x460;
+    uint32_t mips = *(const uint32_t *)(self + 0x54c8), mip, w, h, d, ow, oh, bpe, x, y, z;
+    if (!mips || mips > 15) return;
+    mip = subres % mips;
+    if (!mip) return;
+    bpe = *(const uint32_t *)(pl + 0x54f0);
+    w = *(const uint32_t *)(pl + mip * 0x48 + 0x5528);
+    h = *(const uint32_t *)(pl + mip * 0x48 + 0x552c);
+    d = *(const uint32_t *)(self + 0x61f0) == 4 ? *(const uint32_t *)(pl + mip * 0x48 + 0x5530) : 1;
+    ow = *(const uint32_t *)(pl + 0x5528) >> mip; if (!ow) ow = 1;
+    oh = *(const uint32_t *)(pl + 0x552c) >> mip; if (!oh) oh = 1;
+    if ((ow >= w && oh >= h) || !bpe || bpe > 16 || (size_t)w * bpe > row_pitch) return;
+    for (z = 0; z < d; z++) {
+        uint8_t *sl = dst + (size_t)z * depth_pitch;
+        for (y = oh; y < h; y++) memcpy(sl + (size_t)y * row_pitch, sl + (size_t)(oh - 1) * row_pitch, (size_t)w * bpe);
+        for (y = 0; y < h; y++)
+            for (x = ow; x < w; x++)
+                memcpy(sl + (size_t)y * row_pitch + (size_t)x * bpe, sl + (size_t)y * row_pitch + (size_t)(ow - 1) * bpe, bpe);
+    }
+}
+
 static long xg_copy_from_subresource(uint8_t *self, uint8_t *dst, uint32_t plane, uint32_t subres,
                                      const uint8_t *src, uint32_t row_pitch, uint32_t depth_pitch)
 {
@@ -1409,6 +1438,7 @@ static long xg_copy_from_subresource(uint8_t *self, uint8_t *dst, uint32_t plane
                 if (off == (uint64_t)-1) return (long)0x80070057;
                 memcpy(dst + (size_t)z * depth_pitch + (size_t)y * row_pitch + (size_t)x * bpe, src + off, bpe);
             }
+    xg_clamp_tail(self, dst, plane, subres, row_pitch, depth_pitch);
     return 0;
 }
 
@@ -1460,6 +1490,17 @@ static void xg_wrap_computer(void **obj)
 static const uint8_t xg_fm6_slot[XG_FH2_SLOTS] = { 0, 1, 2, 5, 6, 8, 9, 10 };
 static void *xg_fm6_new[XG_FH2_SLOTS];
 static void *const *xg_fm6_vtbl;
+typedef long (*xg_copy_from_fn)(void *self, void *dst, uint32_t plane, uint32_t subres, const void *src,
+                                uint32_t row_pitch, uint32_t depth_pitch);
+static xg_copy_from_fn xg_fm6_copy_from;
+
+static long xg_fm6_copy_from_subresource(void *self, void *dst, uint32_t plane, uint32_t subres, const void *src,
+                                         uint32_t row_pitch, uint32_t depth_pitch)
+{
+    long hr = xg_fm6_copy_from(self, dst, plane, subres, src, row_pitch, depth_pitch);
+    if (hr >= 0) xg_clamp_tail(self, dst, plane, subres, row_pitch, depth_pitch);
+    return hr;
+}
 
 static void xg_wrap_computer_fm6(void **obj)
 {
@@ -1473,6 +1514,8 @@ static void xg_wrap_computer_fm6(void **obj)
             return;
         }
         for (i = 0; i < XG_FH2_SLOTS; i++) xg_fm6_new[i] = vt[xg_fm6_slot[i]];
+        xg_fm6_copy_from = (xg_copy_from_fn)xg_fm6_new[6];
+        xg_fm6_new[6] = (void *)xg_fm6_copy_from_subresource;   /* + borda dos mips BC (xg_clamp_tail) */
         xg_fm6_vtbl = vt;
         wlog("XG: FM6 computer vtable %p -> FH2 layout (12 -> 8 slots)", (void *)vt);
     }

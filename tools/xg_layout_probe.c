@@ -37,6 +37,10 @@ int main(int argc, char **argv)
     hr = ((layout_fn)(*(void ***)comp)[2])(comp, layout);
     if (hr < 0) { printf("layout hr=%#lx\n", hr); return 1; }
     printf("size %#llx bpe %u\n", (unsigned long long)*(uint64_t *)(layout + 0x18 + 8), *(uint32_t *)(layout + 0x18 + 0x20));
+    /* campos internos do computer (= layout copiado de +0x54b8): mips +0x54c8, bpe +0x54f0, mip 1 +0x5570/+0x5574 */
+    printf("interno: mips %u bpe %u mip1 %ux%u\n", *(uint32_t *)((uint8_t *)comp + 0x54c8),
+           *(uint32_t *)((uint8_t *)comp + 0x54f0), *(uint32_t *)((uint8_t *)comp + 0x5528 + 0x48),
+           *(uint32_t *)((uint8_t *)comp + 0x552c + 0x48));
     for (i = 0; i < mips; i++) {
         uint8_t *mp = layout + 0x18 + 0x28 + i * 0x48;
         printf("mip %d: %u texels -> %u x %u elements\n", i, (unsigned)(atoi(argv[4]) >> i),

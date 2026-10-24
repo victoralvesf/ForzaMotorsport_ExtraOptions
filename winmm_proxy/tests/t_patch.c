@@ -1040,6 +1040,31 @@ TEST(xg_fm5_bc_mip_elements_rounded_up)
     *(void **)xg_bc_self = xg_fake_vtbl;
 }
 
+/* borda dos mips BC: elementos alem de (mip 0) >> mip repetem o ultimo de dentro (destino linear) */
+TEST(xg_clamp_tail_repeats_last_block_row_and_column)
+{
+    static uint8_t self[0x6200];
+    uint32_t dst[4 * 3], i, x, y;
+    memset(self, 0, sizeof self);
+    *(uint32_t *)(self + 0x54c8) = 2;                        /* mips */
+    *(uint32_t *)(self + 0x54f0) = 4;                        /* bytes por elemento (fingido) */
+    *(uint32_t *)(self + 0x5528) = 5; *(uint32_t *)(self + 0x552c) = 5;              /* mip 0: 5x5 */
+    *(uint32_t *)(self + 0x5528 + 0x48) = 3; *(uint32_t *)(self + 0x552c + 0x48) = 3; /* mip 1: 3x3 (5 >> 1 = 2) */
+    for (i = 0; i < 12; i++) dst[i] = 100 + i;               /* pitch de 4 elementos */
+    xg_clamp_tail(self, (uint8_t *)dst, 0, 1, 16, 48);
+    /* linhas 0..1 e colunas 0..1 ficam; coluna 2 = coluna 1; linha 2 = linha 1 */
+    CHECK(dst[0] == 100 && dst[1] == 101 && dst[2] == 101);
+    CHECK(dst[4] == 104 && dst[5] == 105 && dst[6] == 105);
+    CHECK(dst[8] == 104 && dst[9] == 105 && dst[10] == 105);
+    CHECK(dst[3] == 103 && dst[7] == 107 && dst[11] == 111);  /* fora da largura: intocado */
+    /* mip 0 e mip ja coberto (6x6 -> 3x3): nada muda */
+    for (i = 0; i < 12; i++) dst[i] = 100 + i;
+    xg_clamp_tail(self, (uint8_t *)dst, 0, 0, 16, 48);
+    *(uint32_t *)(self + 0x5528) = 6; *(uint32_t *)(self + 0x552c) = 6;
+    xg_clamp_tail(self, (uint8_t *)dst, 0, 1, 16, 48);
+    for (y = 0; y < 3; y++) for (x = 0; x < 4; x++) CHECK_EQ(dst[y * 4 + x], 100 + y * 4 + x);
+}
+
 /* FM6: vtable de 12 slots (3/4 = getters novos) -> 8 slots do FH2; desc sem conversao */
 static uint8_t xg_get54b8[] = { 0x48, 0x8b, 0x81, 0xb8, 0x54, 0x00, 0x00, 0xc3 };
 static uint8_t xg_get54c0[] = { 0x48, 0x8b, 0x81, 0xc0, 0x54, 0x00, 0x00, 0xc3 };
@@ -1070,8 +1095,10 @@ TEST(xg_fm6_computer_remapped)
     hook_xg_computer(&out, "XGCreateTexture2DComputer", d2);
     CHECK_EQ(xg_seen_desc[12], 112);             /* desc do Azimuth repassado como esta */
     CHECK(*(void **)xg_fm6_fake_obj == (void *)xg_fm6_new);
-    for (i = 0; i < 8; i++) CHECK(xg_fm6_new[i] == xg_fm6_fake_vtbl[fh2_to_fm6[i]]);
-    CHECK(xg_fm6_new[6] == (void *)(uintptr_t)0x2009);   /* CopyFromSubresource */
+    for (i = 0; i < 8; i++) if (i != 6) CHECK(xg_fm6_new[i] == xg_fm6_fake_vtbl[fh2_to_fm6[i]]);
+    /* CopyFromSubresource do FM6 (slot 9) embrulhado: + borda dos mips BC */
+    CHECK(xg_fm6_new[6] == (void *)xg_fm6_copy_from_subresource);
+    CHECK(xg_fm6_copy_from == (xg_copy_from_fn)(uintptr_t)0x2009);
     /* 2o computer: mesma vtable nova */
     *(void **)xg_fm6_fake_obj = xg_fm6_fake_vtbl;
     hook_xg_computer(&out, "XGCreateTexture3DComputer", d2);
