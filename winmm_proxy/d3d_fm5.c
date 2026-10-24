@@ -27,6 +27,7 @@ extern void liv_note_dispatch(UINT x, UINT y, UINT z);
 extern void liv_note_texture(const UINT *d, long hr);
 extern int liv_in_window(void);
 extern int liv_log;
+extern void xg_fm5_tail_watch(uint32_t frame);
 extern uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch, uint8_t *addr);
 extern void liv_note_placement(const UINT *d, UINT tile, UINT pitch, const void *addr, uintptr_t caller);
 /* stutter_fm6.c (PASSO 99): rastreio das placement textures placed */
@@ -3149,6 +3150,7 @@ static void fm5_DXGIXPresentArray(UINT sync, UINT threshold, UINT flags, UINT co
     LONG n = InterlockedIncrement(&present_count);
     size_t k;
     rdoc_maybe_capture(n);
+    if (!(n % 60)) xg_fm5_tail_watch((uint32_t)n);
     {   /* fps medido (1 s), logado quando muda: confere o modo de present (PASSO 10) */
         static ULONGLONG t0;
         static LONG n0, last_fps;

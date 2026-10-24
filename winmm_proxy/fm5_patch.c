@@ -1515,6 +1515,32 @@ static void hook_xg_computer(void *out, const char *name, uint32_t *desc)
    fica o que sobrou de outro uso do pool (captura flare4: lixo nas ultimas linhas dos mips 1-3 da lente; flare3:
    0 = memoria nova, como no console). CreatePlacementTexture2D do FM5 chama isto apos criar a textura: zera esses
    elementos nos enderecos do proprio XG (dentro de SizeBytes, +0x54b8). Devolve quantos elementos zerou. */
+/* DIAGNOSTICO (PASSO FLARE cont. 8): o bloco (1, linha nova) do mip 1 das 4 primeiras texturas zeradas e
+   conferido a cada 60 Present (xg_fm5_tail_watch): loga o conteudo antes de zerar e cada mudanca depois. */
+static struct { uint8_t *p; uint8_t last[16]; uint32_t w, h, changes; } tail_watch[4];
+static volatile LONG tail_watches;
+
+void xg_fm5_tail_watch(uint32_t frame)
+{
+    LONG i, n = tail_watches < 4 ? tail_watches : 4;
+    for (i = 0; i < n; i++) {
+        uint8_t now[16];
+        MEMORY_BASIC_INFORMATION mi;
+        if (!tail_watch[i].p || tail_watch[i].changes >= 8) continue;
+        if (!VirtualQuery(tail_watch[i].p, &mi, sizeof mi) || mi.State != MEM_COMMIT ||
+            !(mi.Protect & (PAGE_READWRITE | PAGE_READONLY | PAGE_WRITECOPY)) || (mi.Protect & PAGE_GUARD))
+            continue;
+        memcpy(now, tail_watch[i].p, 16);
+        if (memcmp(now, tail_watch[i].last, 16)) {
+            memcpy(tail_watch[i].last, now, 16);
+            tail_watch[i].changes++;
+            wlog("XG: tail watch %ld (%ux%u mip 1 at %p) changed at present %u: %02x%02x%02x%02x%02x%02x%02x"
+                 "%02x%02x%02x%02x%02x%02x%02x%02x%02x", i, tail_watch[i].w, tail_watch[i].h, (void *)tail_watch[i].p, frame, now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7],
+                 now[8], now[9], now[10], now[11], now[12], now[13], now[14], now[15]);
+        }
+    }
+}
+
 uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch, uint8_t *addr)
 {
     uint32_t d[16] = {0}, mips, mip, slice, arr, w, h, ow, oh, bpe, x, y, n = 0;
@@ -1543,6 +1569,17 @@ uint32_t xg_fm5_zero_bc_tail(const uint32_t *desc, uint32_t tile, uint32_t pitch
                     for (x = y < oh ? ow : 0; x < w; x++) {
                         uint64_t off = ((xg_texel_offset_fn)xg_fm5_vtbl[4])(self, 0, mip, x, y, slice, 0);
                         if (off == (uint64_t)-1 || off + bpe > size) continue;
+                        if (mip == 1 && x == 1 && y == oh && !slice && tail_watches < 4) {
+                            LONG k = InterlockedIncrement(&tail_watches) - 1;
+                            uint8_t *b = addr + off;
+                            if (k < 4) {
+                                tail_watch[k].p = b; tail_watch[k].w = desc[0]; tail_watch[k].h = desc[1];
+                                wlog("XG: tail watch %ld (%ux%u mip 1 block 1,%u at %p, off %#llx): before zeroing "
+                                     "%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x", k, desc[0],
+                                     desc[1], y, (void *)b, (unsigned long long)off, b[0], b[1], b[2], b[3], b[4], b[5],
+                                     b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
+                            }
+                        }
                         memset(addr + off, 0, bpe);
                         n++;
                     }
