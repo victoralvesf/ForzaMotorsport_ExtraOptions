@@ -9,6 +9,27 @@ Requirements: Azimuth 0.9.9 and your own dump of FM5 1.0.0.20 and/or FM6 1.0.0.4
 
 When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.exe`) and `data\logs\azimuth.log`.
 
+## Current support
+
+### FM6
+- Boot, menus, videos, audio and races, with sessions of an hour or more without crashes.
+- Launcher resolution, frame rate (up to 180 fps), Car Detail and Shadows presets.
+- `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `AlphaToCoverageNoDither`.
+
+### FM5
+- MSAA and 16x anisotropic filtering.
+- Launcher resolution, with the UI scaled correctly.
+- 60, 120 and 180 fps, with the launcher frame rate kept in the menus as well.
+- Car Detail, Shadows and Reflections presets.
+- `azimuth_fm5.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`.
+
+### Known limitations
+- **FM6:** launcher graphics settings other than resolution, frame rate, Car Detail and Shadows aren't applied yet.
+- **FM6:** very heavy scenes can drop below the chosen frame rate.
+- **FM6:** the RivaTuner (RTSS) overlay can crash the game.
+- **FM5:** the Particles and Motion Blur presets have no effect.
+- No Xbox Live features (Rivals, online play, leaderboards).
+
 ## Unreleased
 
 ### Fixes
@@ -35,25 +56,31 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **Linux (Wine/Proton):** GPU page faults on vkd3d-proton with RADV. The workaround for the AMD Windows driver
   is now off by default when running under Wine.
 
-## Current support
+## v1.2.0 — FM6 resolution, frame rate and Car Detail
 
-### FM6
-- Boot, menus, videos, audio and races, with sessions of an hour or more without crashes.
-- Launcher resolution, frame rate (up to 180 fps), Car Detail and Shadows presets.
-- `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `AlphaToCoverageNoDither`.
+### New
+- **FM6:** the launcher resolution (e.g. 1440p) is now applied. Menus, HUD and charts are scaled to fit the new
+  resolution.
+- **FM6:** the launcher frame rate is kept in menus, pre-race, post-race and replays, which used to drop to 30 fps.
+- **FM6:** 120, 144 and 180 fps, up to your monitor's refresh rate. The game speed stays the same at any frame
+  rate.
+- **FM6:** the launcher's Car Detail preset is now applied (car level of detail and the distances where it
+  changes).
 
-### FM5
-- MSAA and 16x anisotropic filtering.
-- Launcher resolution, with the UI scaled correctly.
-- 60, 120 and 180 fps, with the launcher frame rate kept in the menus as well.
-- Car Detail, Shadows and Reflections presets.
-- `azimuth_fm5.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`.
+### Fixes
+- **FM6:** garage and save thumbnails were black.
 
-### Known limitations
-- **FM6:** launcher graphics settings other than resolution, frame rate, Car Detail and Shadows aren't applied yet.
-- **FM6:** very heavy scenes can drop below the chosen frame rate.
-- **FM6:** the RivaTuner (RTSS) overlay can crash the game.
-- **FM5:** the Particles and Motion Blur presets have no effect.
-- No Xbox Live features (Rivals, online play, leaderboards).
+## v1.1.0 — Forza Motorsport 6, initial support
+
+### New
+- **FM6:** boot, menus, videos, audio and races work at about 60 fps.
+- **FM6:** long sessions (an hour or more of racing) without crashes or memory growth.
+- **FM6:** options in `azimuth_fm6.ini`:
+  - `SkipIntro`: skips the opening videos.
+  - `SkipPresentationVideo`: skips the presentation video before the first race and the intros of the Porsche
+    and NASCAR expansions (if you have the DLC files).
+  - `UnlockDLC`: DLC cars and packs already in the game files (Car Pass, Car Packs, VIP) count as purchased and
+    can be bought with in-game credits.
+- The proxy log is now named `azimuth_motorsport.log`.
 
 Downloads: https://github.com/victoralvesf/azimuth-motorsport/releases
