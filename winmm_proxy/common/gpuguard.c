@@ -1061,24 +1061,34 @@ static void null_uavs_fill(ID3D12Device *dev, uintptr_t cpu, uint64_t gpu)
     wlog("gpuguard: %u null UAVs at the end of the visible heap (gpu %#llx)", GG_NULL_UAVS, (unsigned long long)gpu);
 }
 
-void *gg_pso_rs(void *pso);
+void *gg_pso_rs_known(void *pso, int *known);
 
-/* tabelas so de UAV da root signature grafica que a lista nao definiu (bit por parametro). So se o PSO atual foi
-   criado com a root signature que a lista registrou: no boot com a debug layer a lista apontava uma root signature
-   velha e o bind caia fora dos limites ("param 20, root signature com 1 parametro", PASSO 32) -> nada */
+/* tabelas so de UAV da root signature grafica que a lista nao definiu (bit por parametro). Se o PSO atual foi criado
+   com OUTRA root signature, nada: no boot com a debug layer a lista apontava uma root signature velha e o bind caia
+   fora dos limites ("param 20, root signature com 1 parametro", PASSO 32). PSO fora da tabela ou sem root signature
+   registrada: vale a da lista (o draw so e valido com as duas iguais); antes ficava sem UAVs nulos e o GS do FM6
+   dava o page fault 0xbeefdeadb000 (crash de 2026-10-24) */
 uint64_t gg_missing_uav_tables(void *cl)
 {
     void *rs = gg_cl_rs(cl, 0, NULL, 0), *pso = gg_cl_rs(cl, GG_CL_PSO, NULL, 0), *prs;
     uint64_t need = gg_rs_uav(rs);
+    int known;
     if (!need) return 0;
-    prs = gg_pso_rs(pso);
-    if (prs != rs) {
+    prs = gg_pso_rs_known(pso, &known);
+    if (prs && prs != rs) {
         static volatile LONG odd;
         LONG k = InterlockedIncrement(&odd);
         if ((k & (k - 1)) == 0)
             wlog("gpuguard: root signature of list %p != that of PSO %p (pso %p, list %p, tid %lu) -> null UAVs not bound (#%ld)",
                  rs, prs, pso, cl, GetCurrentThreadId(), k);
         return 0;
+    }
+    if (!prs) {
+        static volatile LONG unk;
+        LONG k = InterlockedIncrement(&unk);
+        if ((k & (k - 1)) == 0)
+            wlog("gpuguard: PSO %p %s -> list's root signature %p for the null UAVs (list %p, tid %lu, #%ld)", pso,
+                 known ? "created without a root signature" : "not tracked", rs, cl, GetCurrentThreadId(), k);
     }
     return need & ~gg_cl_gtab(cl, 1, 0);
 }
@@ -1270,10 +1280,15 @@ static uint32_t stream_hash(const D3D12_PIPELINE_STATE_STREAM_DESC *d, uint32_t 
 
 void gg_pso_add(void *pso, const D3D12_INPUT_LAYOUT_DESC *il, uint32_t hash, uint32_t info, void *rs)
 {
+    static LONG used, full;
     unsigned h = hptr(pso, GG_PSO_SLOTS), k;
     AcquireSRWLockExclusive(&pso_lock);
     for (k = 0; k < GG_PSO_SLOTS; k++, h = (h + 1) & (GG_PSO_SLOTS - 1))
         if (!pso_tab[h].pso || pso_tab[h].pso == pso) {
+            if (!pso_tab[h].pso) {
+                used++;
+                if ((used & (used - 1)) == 0 && used >= 1024) wlog("gpuguard: %ld PSOs tracked (of %u)", used, GG_PSO_SLOTS);
+            }
             pso_tab[h].pso = pso;
             pso_tab[h].slots = gg_layout_slots(il);
             pso_tab[h].nelem = il ? il->NumElements : 0;
@@ -1282,6 +1297,10 @@ void gg_pso_add(void *pso, const D3D12_INPUT_LAYOUT_DESC *il, uint32_t hash, uin
             pso_tab[h].rs = rs;
             break;
         }
+    if (k == GG_PSO_SLOTS) {
+        full++;
+        if ((full & (full - 1)) == 0) wlog("gpuguard: PSO table full (%u): PSO %p not tracked (#%ld)", GG_PSO_SLOTS, pso, full);
+    }
     ReleaseSRWLockExclusive(&pso_lock);
 }
 
@@ -1311,17 +1330,24 @@ uint32_t gg_pso_info(void *pso)
     return r;
 }
 
-/* root signature com que o PSO foi criado (NULL = desconhecido ou embutida no shader) */
-void *gg_pso_rs(void *pso)
+/* root signature com que o PSO foi criado (NULL = desconhecido ou embutida no shader); *known = PSO na tabela */
+void *gg_pso_rs_known(void *pso, int *known)
 {
     unsigned h = hptr(pso, GG_PSO_SLOTS), k;
     void *r = NULL;
+    *known = 0;
     if (!pso) return NULL;
     AcquireSRWLockShared(&pso_lock);
     for (k = 0; k < GG_PSO_SLOTS && pso_tab[h].pso; k++, h = (h + 1) & (GG_PSO_SLOTS - 1))
-        if (pso_tab[h].pso == pso) { r = pso_tab[h].rs; break; }
+        if (pso_tab[h].pso == pso) { r = pso_tab[h].rs; *known = 1; break; }
     ReleaseSRWLockShared(&pso_lock);
     return r;
+}
+
+void *gg_pso_rs(void *pso)
+{
+    int known;
+    return gg_pso_rs_known(pso, &known);
 }
 
 /* root signature do subobjeto ROOT_SIGNATURE do stream (NULL se nao tem) */

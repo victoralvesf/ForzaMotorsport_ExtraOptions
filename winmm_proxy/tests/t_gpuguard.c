@@ -635,9 +635,10 @@ TEST(gpuguard_null_uavs_without_trace)
     lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
     CHECK(lite_draws == 3 && lite_tabs == 1);
     CHECK(log_has("gpuguard: root signature of list"));
-    lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&lite_cl);   /* PSO desconhecido: idem */
+    lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&lite_cl);   /* PSO desconhecido: vale a root signature da lista */
     lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
-    CHECK(lite_draws == 4 && lite_tabs == 1);
+    CHECK(lite_draws == 4 && lite_tabs == 2 && lite_tab_i == 2);
+    CHECK(log_has("gpuguard: PSO") && log_has("not tracked -> list's root signature"));
     lite_vt.SetPipelineState(l, (ID3D12PipelineState *)&pso);
     lite_vt.DrawIndexedInstanced(l, 6, 1, 0, 0, 0);
     CHECK(lite_draws == 5 && lite_tabs == 2 && lite_tab_i == 2);
@@ -700,7 +701,7 @@ TEST(gpuguard_list_forget)
 
 TEST(gpuguard_missing_uav_tables)
 {
-    static int rs, rs2, cl, cl2, pso, pso2;
+    static int rs, rs2, cl, cl2, pso, pso2, pso3;
     uint32_t size[3] = { 4, 0, 8 };
     D3D12_DESCRIPTOR_RANGE1 uav = { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 8, 0, 0, 0, 0 };
     D3D12_DESCRIPTOR_RANGE1 mix[2] = { { D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, 0, 0 },
@@ -733,6 +734,10 @@ TEST(gpuguard_missing_uav_tables)
     gg_cl_rs(&cl, GG_CL_PSO, &pso2, 1);
     gg_cl_gtab(&cl, 0, 0);
     CHECK_EQ(gg_missing_uav_tables(&cl), 0);                 /* PSO de outra root signature: registro suspeito */
+    gg_cl_rs(&cl, GG_CL_PSO, &pso3, 1);
+    CHECK_EQ(gg_missing_uav_tables(&cl), 4);                 /* PSO fora da tabela: vale a root signature da lista */
+    gg_pso_add(&pso3, NULL, 0, 0, NULL);
+    CHECK_EQ(gg_missing_uav_tables(&cl), 4);                 /* PSO sem root signature registrada: idem */
     gg_cl_rs(&cl, GG_CL_PSO, &pso, 1);
     CHECK_EQ(gg_missing_uav_tables(&cl), 4);                 /* tabela 2 nunca definida */
     gg_cl_gtab(&cl, 1, 1ull << 0);
