@@ -38,6 +38,14 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
   live textures whenever a new streamed texture was created. That work is now much smaller, roughly halving the
   frame spikes in a race and lowering the CPU time of the game's command recording threads.
 
+### Fixes
+- **FM6:** the digital dashboards in the cockpit view were drawn out of place at resolutions above 1080p. The UI
+  scaling for the launcher resolution also hit the dashboard screens, which the game draws into their own
+  smaller textures; it now applies only to the screen itself.
+- **FM6:** in Brazilian Portuguese, lap times on the digital dashboards showed boxes in place of the minute and
+  second marks (`00□12,977□□`). The game's dashboard fonts have no apostrophe, which the Portuguese time format
+  uses; those times are now shown as in English (`00:12,977`), the format the dashboards were laid out for.
+
 ## v1.4.1 — FM6 tuning setup name fix
 
 ### Fixes
