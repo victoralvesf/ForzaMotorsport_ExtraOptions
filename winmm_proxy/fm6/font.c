@@ -8,18 +8,17 @@
 #include "fm6.h"
 
 /* As 5 fontes dos paineis (DG1..DG5 .vfont) so tem espaco " , - . / 0-9 : D N P R; o tempo em pt-BR e
-   "{1}'{2}''" (stringtables\br UnitStrings) -> cada apostrofo vira o glifo 0xfffd (quadrado). Antes de medir
-   (0x10bf78: fonte, wchar*, n) e de montar a malha (0x2b7ef0: fonte, vector<u32> de codigos, so lido) o texto de
-   uma fonte SEM o apostrofo vai ao jogo como copia (por thread) no formato do ingles, para o qual os paineis foram
-   desenhados: "''" sai e "'" -> ':' (00:12,977). O texto do jogo nao muda. Fonte = dados do VectorFontData:
-   tabela codigo -> glifo em +0x150 (busca 0x10c270: indice da entrada ou -1, valores em [+0x160]). */
+   "{1}'{2}''" (stringtables\br UnitStrings) -> cada apostrofo vira o glifo 0xfffd (quadrado). Na medida do texto
+   (0x10bf78: fonte, wchar*, n) o texto de uma fonte SEM o apostrofo e reescrito no lugar no formato do ingles,
+   para o qual os paineis foram desenhados: "''" sai e "'" -> ':' (00:12,977); o resto ate n vira NUL. O desenho
+   (0x10d5b0, busca do glifo embutida) le o MESMO texto depois e, como a medida, para no NUL ou no fim. Fonte =
+   dados do VectorFontData: tabela codigo -> glifo em +0x150 (busca 0x10c270: indice da entrada ou -1, valores em
+   [+0x160]). */
 #define FM6_FONT_MEASURE  0x10bf78
-#define FM6_FONT_GEOMETRY 0x2b7ef0
 #define FM6_FONT_FIND     0x10c270
-#define FONT_TEXT_MAX     1024
 
 static int (*font_find)(void *map, uint32_t cp);
-void *fm6_font_measure_tramp, *fm6_font_geometry_tramp;
+void *fm6_font_measure_tramp;
 
 static int font_has(uint8_t *font, uint32_t cp)
 {
@@ -32,90 +31,53 @@ static int font_needs_fix(uint8_t *font)
     return font && !font_has(font, '\'') && font_has(font, ':');
 }
 
-static void font_note(uint8_t *font, const char *where)
+static int writable(const void *p, size_t n)
 {
-    static volatile LONG n;
-    if (InterlockedIncrement(&n) <= 4)
-        wlog("FM6: dash font %p: text with apostrophes %s as in English (\"''\" removed, \"'\" -> ':')",
-             (void *)font, where);
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery(p, &mi, sizeof mi) || mi.State != MEM_COMMIT) return 0;
+    if (!(mi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return 0;
+    return (const uint8_t *)p + n <= (const uint8_t *)mi.BaseAddress + mi.RegionSize;
 }
 
-/* elementos de w bytes (2 = wchar, 4 = codigo) */
-static uint32_t text_at(const void *s, size_t i, size_t w)
-{
-    return w == 2 ? ((const uint16_t *)s)[i] : ((const uint32_t *)s)[i];
-}
-
-static void text_set(void *s, size_t i, size_t w, uint32_t v)
-{
-    if (w == 2) ((uint16_t *)s)[i] = (uint16_t)v;
-    else ((uint32_t *)s)[i] = v;
-}
-
-static int has_apostrophe(const void *s, size_t n, size_t w)
-{
-    size_t i;
-    for (i = 0; i < n; i++)
-        if (text_at(s, i, w) == '\'') return 1;
-    return 0;
-}
-
-/* copia s[0..n) em out sem "''" e com "'" -> ':'; devolve o novo tamanho */
-static size_t fix_text(const void *s, size_t n, size_t w, void *out)
+/* s[0..n) (ate o 1o NUL) sem "''" e com "'" -> ':'; o que sobra ate o NUL original vira NUL. Devolve o tamanho */
+static size_t fix_text(uint16_t *s, size_t n)
 {
     size_t i, k = 0;
-    for (i = 0; i < n; i++) {
-        uint32_t c = text_at(s, i, w);
-        if (c == '\'' && i + 1 < n && text_at(s, i + 1, w) == '\'') { i++; continue; }
-        text_set(out, k++, w, c == '\'' ? ':' : c);
+    for (i = 0; i < n && s[i]; i++) {
+        if (s[i] == '\'' && i + 1 < n && s[i + 1] == '\'') { i++; continue; }
+        s[k++] = s[i] == '\'' ? ':' : s[i];
     }
+    if (k < i) memset(s + k, 0, (i - k) * 2);
     return k;
 }
 
-/* saved = registros guardados pelo stub: [0] r9, [1] r8, [2] rdx, [3] rcx (o stub os devolve ao original) */
-void fm6_font_measure_fix(uint8_t *font, const uint16_t *s, uint32_t n, uint64_t *saved)
+void fm6_font_measure_fix(uint8_t *font, uint16_t *s, uint32_t n)
 {
-    static __thread uint16_t buf[FONT_TEXT_MAX];
-    if (!s || !n || n > FONT_TEXT_MAX || !has_apostrophe(s, n, 2) || !font_needs_fix(font)) return;
-    saved[1] = fix_text(s, n, 2, buf);
-    saved[2] = (uint64_t)(uintptr_t)buf;
-    font_note(font, "measured");
+    static volatile LONG logged;
+    size_t i;
+    if (!s || !n || n > 4096) return;
+    for (i = 0; i < n && s[i] && s[i] != '\''; i++) ;
+    if (i == n || !s[i] || !font_needs_fix(font) || !writable(s, n * 2)) return;
+    fix_text(s, n);
+    if (InterlockedIncrement(&logged) <= 4)
+        wlog("FM6: dash font %p: text with apostrophes -> as in English (\"''\" removed, \"'\" -> ':')", (void *)font);
 }
 
-void fm6_font_geometry_fix(uint8_t *font, uint32_t *const *vec, uint64_t r8, uint64_t *saved)
-{
-    static __thread uint32_t buf[FONT_TEXT_MAX];
-    static __thread uint32_t *copy[3];                /* {begin, end, capacidade} como o vector do jogo */
-    const uint32_t *b = vec ? vec[0] : NULL, *e = vec ? vec[1] : NULL;
-    size_t n = b && e > b ? (size_t)(e - b) : 0;
-    (void)r8;
-    if (!n || n > FONT_TEXT_MAX || !has_apostrophe(b, n, 4) || !font_needs_fix(font)) return;
-    copy[0] = buf;
-    copy[1] = copy[2] = buf + fix_text(b, n, 4, buf);
-    saved[2] = (uint64_t)(uintptr_t)copy;
-    font_note(font, "built");
-}
-
-/* rcx = fonte, rdx = texto: guarda os argumentos (inteiros e xmm0-3; pode haver mais na pilha), chama a correcao
-   com r9 = registros guardados (ela pode trocar rdx/r8) e segue para o original pelo trampolim com a pilha da
-   entrada */
+/* rcx = fonte, rdx = texto, r8 = n: guarda os argumentos (inteiros e xmm0-3; pode haver mais na pilha), corrige e
+   segue para o original pelo trampolim com a pilha da entrada */
 void fm6_font_measure_stub(void);
-void fm6_font_geometry_stub(void);
-#define FONT_STUB(name, fix, tramp)                                   \
-    __asm__(".globl " name "\n" name ":\n"                            \
-            "  push %rcx\n  push %rdx\n  push %r8\n  push %r9\n"        \
-            "  sub $0x68, %rsp\n"                                     \
-            "  movups %xmm0, 0x20(%rsp)\n  movups %xmm1, 0x30(%rsp)\n"  \
-            "  movups %xmm2, 0x40(%rsp)\n  movups %xmm3, 0x50(%rsp)\n"  \
-            "  lea 0x68(%rsp), %r9\n"                                 \
-            "  call " fix "\n"                                        \
-            "  movups 0x20(%rsp), %xmm0\n  movups 0x30(%rsp), %xmm1\n"  \
-            "  movups 0x40(%rsp), %xmm2\n  movups 0x50(%rsp), %xmm3\n"  \
-            "  add $0x68, %rsp\n"                                     \
-            "  pop %r9\n  pop %r8\n  pop %rdx\n  pop %rcx\n"          \
-            "  jmp *" tramp "(%rip)\n")
-FONT_STUB("fm6_font_measure_stub", "fm6_font_measure_fix", "fm6_font_measure_tramp");
-FONT_STUB("fm6_font_geometry_stub", "fm6_font_geometry_fix", "fm6_font_geometry_tramp");
+__asm__(".globl fm6_font_measure_stub\n"
+        "fm6_font_measure_stub:\n"
+        "  push %rcx\n  push %rdx\n  push %r8\n  push %r9\n"
+        "  sub $0x68, %rsp\n"
+        "  movups %xmm0, 0x20(%rsp)\n  movups %xmm1, 0x30(%rsp)\n"
+        "  movups %xmm2, 0x40(%rsp)\n  movups %xmm3, 0x50(%rsp)\n"
+        "  call fm6_font_measure_fix\n"
+        "  movups 0x20(%rsp), %xmm0\n  movups 0x30(%rsp), %xmm1\n"
+        "  movups 0x40(%rsp), %xmm2\n  movups 0x50(%rsp), %xmm3\n"
+        "  add $0x68, %rsp\n"
+        "  pop %r9\n  pop %r8\n  pop %rdx\n  pop %rcx\n"
+        "  jmp *fm6_font_measure_tramp(%rip)\n");
 
 void fm6_dash_font_fix(uint8_t *game)
 {
@@ -128,10 +90,8 @@ void fm6_dash_font_fix(uint8_t *game)
     }
     font_find = (int (*)(void *, uint32_t))(game + FM6_FONT_FIND);
     if (!hook_at(game + FM6_FONT_MEASURE, "488bc4488958084889681048897018", 15, (void *)fm6_font_measure_stub,
-                 &fm6_font_measure_tramp) ||
-        !hook_at(game + FM6_FONT_GEOMETRY, "488bc44c8948204c89401848894808", 15, (void *)fm6_font_geometry_stub,
-                 &fm6_font_geometry_tramp)) {
-        wlog("FM6: dash fonts: text hooks not installed");
+                 &fm6_font_measure_tramp)) {
+        wlog("FM6: dash fonts: text hook not installed");
         return;
     }
     wlog("FM6: dash fonts: text of fonts without the apostrophe as in English (pt-BR lap times)");
