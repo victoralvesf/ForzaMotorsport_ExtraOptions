@@ -3278,15 +3278,20 @@ static void fq_install(void)
     wlog("stutter: FM6 queue limiter measured (SwitchToThread game+%#x)", FQ_IAT);
 }
 
-/* ---- perfil continuo (PASSO 72): threads do Azimuth com nome em QP_NAMES amostradas a cada volta do amostrador
- * (~2 ms; so se rodaram desde a volta anterior): RIP em baldes de 16 bytes e o 1o retorno em codigo do jogo/azimuth/
- * proxy (quem chamou o driver). A cada 10 s (vz_poll) "stutter: perfil '<nome>'": % por modulo, RIPs e chamadores. */
-#define QP_N 2
+/* ---- perfil continuo (PASSO 72; PASSO 117: tambem as threads de mais CPU): as threads do perfil sao amostradas a
+ * cada volta do amostrador (~2 ms; so se rodaram >= 30% da volta): RIP em baldes de 16 bytes e o 1o retorno em codigo do
+ * jogo/azimuth/proxy (quem chamou o driver). Slots 0..QP_NAMED-1 = threads do Azimuth por nome; os demais = as threads
+ * de mais CPU da janela anterior (qp_pick no vz_poll). A cada 10 s "stutter: profile '<rotulo>'": % por modulo, RIPs e
+ * chamadores. */
+#define QP_N 8
+#define QP_NAMED 2
 #define QP_RIPS 1024
 #define QP_CALLERS 256
-static const char *const QP_NAMES[QP_N] = { "Azimuth queue", "Azimuth worker" };
+static const char *const QP_NAMES[QP_NAMED] = { "Azimuth queue", "Azimuth worker" };
 static struct { DWORD tid; ULONG64 c; } qp_prev[ST_THREADS];   /* por indice em thr (conferido pelo tid) */
 static struct {
+    DWORD tid;                /* 0 = slot por nome ainda sem thread / slot livre */
+    char label[64];
     uint32_t nrip, ncall, n, lost;
     st_bin rips[QP_RIPS], callers[QP_CALLERS];
 } qp[QP_N];
@@ -3302,9 +3307,14 @@ static void qp_tick(void)
         uintptr_t ret[1] = { 0 };
         uint32_t nq = 0;
         int have;
-        for (k = 0; k < QP_N && strcmp(t->name, QP_NAMES[k]); k++) {}
-        if (k == QP_N) continue;
-        if (k == 0) vz_qtid = t->tid;
+        for (k = 0; k < QP_NAMED && strcmp(t->name, QP_NAMES[k]); k++) {}
+        if (k < QP_NAMED) {
+            if (k == 0) vz_qtid = t->tid;
+            if (qp[k].tid != t->tid) { qp[k].tid = t->tid; strcpy(qp[k].label, QP_NAMES[k]); }
+        } else {
+            for (k = QP_NAMED; k < QP_N && qp[k].tid != t->tid; k++) {}
+            if (k == QP_N) continue;
+        }
         if (!QueryThreadCycleTime(t->h, &c)) continue;
         if (qp_prev[i].tid != t->tid || (double)(c - qp_prev[i].c) < tsc_per_ms * 2 * 0.3) {   /* nova ou quase nao rodou */
             qp_prev[i].tid = t->tid;
@@ -3333,6 +3343,26 @@ static uintptr_t qp_module(uintptr_t a)
     return 0;
 }
 
+/* threads de mais CPU da janela (fora as do perfil por nome) passam a ser perfiladas na proxima: idx = vz_top */
+static void qp_pick(const uint32_t *idx, uint32_t nt)
+{
+    uint32_t i, k = QP_NAMED, j;
+    for (j = QP_NAMED; j < QP_N; j++) qp[j].tid = 0;
+    for (i = 0; i < nt && k < QP_N; i++) {
+        st_thread *t = &thr[idx[i]];
+        for (j = 0; j < QP_NAMED && strcmp(t->name, QP_NAMES[j]); j++) {}
+        if (j < QP_NAMED) continue;
+        qp[k].tid = t->tid;
+        if (t->name[0]) wsprintfA(qp[k].label, "%s tid %lu", t->name, t->tid);
+        else {
+            char one[96];
+            st_label_any(one, t->start);
+            wsprintfA(qp[k].label, "%s tid %lu", one[0] ? one + 1 : "?", t->tid);
+        }
+        k++;
+    }
+}
+
 static void qp_report(void)
 {
     char buf[2400], one[96], path[MAX_PATH], *base;
@@ -3351,7 +3381,7 @@ static void qp_report(void)
             mods[j].n += qp[k].rips[i].n;
         }
         st_hist_sort(mods, nm);
-        len = sprintf(buf, "stutter: profile '%s' 10 s: %u samples (%u outside the table); modules:", QP_NAMES[k], qp[k].n, qp[k].lost);
+        len = sprintf(buf, "stutter: profile '%s' 10 s: %u samples (%u outside the table); modules:", qp[k].label, qp[k].n, qp[k].lost);
         for (i = 0; i < nm && i < 8; i++) {
             if (!mods[i].key) strcpy(path, "?");
             else if ((HMODULE)mods[i].key == self_mod) strcpy(path, "winmm");
@@ -3362,14 +3392,14 @@ static void qp_report(void)
         }
         wlog("%s", buf);
         st_hist_sort(qp[k].rips, qp[k].nrip);
-        len = sprintf(buf, "stutter: profile '%s' RIPs:", QP_NAMES[k]);
+        len = sprintf(buf, "stutter: profile '%s' RIPs:", qp[k].label);
         for (i = 0; i < qp[k].nrip && i < 16 && len < 2200; i++) {
             st_label_any(one, qp[k].rips[i].key);
             len += sprintf(buf + len, "%s %.1f%%;", one, qp[k].rips[i].n * 100 / n);
         }
         wlog("%s", buf);
         st_hist_sort(qp[k].callers, qp[k].ncall);
-        len = sprintf(buf, "stutter: profile '%s' 1st return into game/azimuth/proxy:", QP_NAMES[k]);
+        len = sprintf(buf, "stutter: profile '%s' 1st return into game/azimuth/proxy:", qp[k].label);
         for (i = 0; i < qp[k].ncall && i < 16 && len < 2200; i++) {
             if (qp[k].callers[i].key) st_label_any(one, qp[k].callers[i].key);
             else strcpy(one, " none");
@@ -3467,6 +3497,9 @@ static void vz_poll(LONG64 now)
     len += sprintf(buf + len, " | CPU ms/frame:");
     if (tsc_per_ms > 0) {
         uint32_t idx[VZ_TOP_THREADS], nt = vz_top(cpu, n, idx, VZ_TOP_THREADS);
+        uint64_t total = 0;
+        for (i = 0; i < n; i++) total += cpu[i];
+        len += sprintf(buf + len, " all threads %.1f (%.2f cores)", total / tsc_per_ms / f, total / tsc_per_ms / win);
         for (i = 0; i < nt && len < 1800; i++) {
             st_thread *t = &thr[idx[i]];
             double ms = cpu[idx[i]] / tsc_per_ms;
@@ -3474,10 +3507,15 @@ static void vz_poll(LONG64 now)
             else st_label_any(one, t->start);
             len += sprintf(buf + len, " [%s tid %lu %.1f (%.0f%%)]", one[0] ? one + 1 : "?", t->tid, ms / f, ms * 100 / win);
         }
+        wlog("%s", buf);
+        if (lt_format(buf, sizeof buf, f)) wlog("%s", buf);
+        qp_report();
+        qp_pick(idx, nt);
+    } else {
+        wlog("%s", buf);
+        if (lt_format(buf, sizeof buf, f)) wlog("%s", buf);
+        qp_report();
     }
-    wlog("%s", buf);
-    if (lt_format(buf, sizeof buf, f)) wlog("%s", buf);
-    qp_report();
     mr_report("10 s");
     if (!opens) return;
     {

@@ -507,6 +507,7 @@ TEST(stutter_queue_profile_report)
     log_capture();
     qp_report();
     CHECK(!log_has("stutter: profile"));
+    strcpy(qp[0].label, "Azimuth queue");
     qp[0].n = 2;
     st_hist_add(qp[0].rips, QP_RIPS, &qp[0].nrip, 0x10);
     st_hist_add(qp[0].rips, QP_RIPS, &qp[0].nrip, 0x10);
@@ -517,6 +518,29 @@ TEST(stutter_queue_profile_report)
     CHECK(log_has("? 100%"));
     CHECK(log_has("none 100.0%"));
     CHECK(!qp[0].n && !qp[0].nrip && !qp[0].ncall);
+}
+
+/* PASSO 117: as threads de mais CPU (fora as do Azimuth por nome) ocupam os slots livres do perfil, com rotulo */
+TEST(stutter_profile_picks_top_threads)
+{
+    uint32_t saved = nthr, idx[3] = { 0, 1, 2 };
+    st_thread keep[3];
+    memcpy(keep, thr, sizeof keep);
+    memset(thr, 0, sizeof keep);
+    thr[0].tid = 11; strcpy(thr[0].name, "Azimuth worker");
+    thr[1].tid = 22; strcpy(thr[1].name, "game render");
+    thr[2].tid = 33; thr[2].start = 0x1234;
+    nthr = 3;
+    qp_pick(idx, 3);
+    CHECK_EQ(qp[QP_NAMED].tid, 22);
+    CHECK(!strcmp(qp[QP_NAMED].label, "game render tid 22"));
+    CHECK_EQ(qp[QP_NAMED + 1].tid, 33);
+    CHECK(strstr(qp[QP_NAMED + 1].label, "tid 33") != NULL);
+    CHECK_EQ(qp[QP_NAMED + 2].tid, 0);
+    qp_pick(idx, 0);
+    CHECK_EQ(qp[QP_NAMED].tid, 0);
+    memcpy(thr, keep, sizeof keep);
+    nthr = saved;
 }
 
 /* tempo por metodo na fila (PASSO 73): so a thread da fila soma; formato por quadro, do mais caro, e zera */
