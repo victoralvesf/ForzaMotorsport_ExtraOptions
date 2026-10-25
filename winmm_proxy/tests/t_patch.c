@@ -610,13 +610,41 @@ TEST(fm6_resolution_patches_exe)
     CHECK_HEX(game + 0x9faf52, "b80000f044894538" "b80000874489453c" "0f1f840000000000" "0f1f840000000000" "6690");
     CHECK_HEX(game + 0x9faf74, "488b01");                                /* depois: mov rax,[rcx] intacto */
     CHECK_HEX(game + 0x127ea5, "ff152d090000");                          /* call [rip -> 0x1287d8] */
-    CHECK(*(void **)(game + 0x1287d8) == (void *)fm5_ui_vcall);
+    CHECK(*(void **)(game + 0x1287d8) == (void *)fm5_ui_vcall_stub);
+    CHECK_HEX((uint8_t *)fm5_ui_vcall_stub, "4989f9e9");                 /* mov r9, rdi ; jmp fm5_ui_vcall */
     CHECK(log_has("FM6: resolution: UI viewport scaled to 2560x1440"));
     obj[0x538 / 8] = (void *)ui6_fake_setvp;
     ((void (*)(void *, uint32_t, const float *, uintptr_t))t_call_from(game + 0x127ea5 + 6,
                                                                       (void *)fm5_ui_vcall))(obj, 1, vp, 0);
     CHECK(ui6_seen[2] == 2560.0f && ui6_seen[3] == 1440.0f && ui6_seen[0] == 0.0f && ui6_seen[5] == 1.0f);
     CHECK(vp[2] == 1920.0f);
+    /* renderizador com RT proprio (painel digital do cockpit): so o RT do tamanho do render e escalado */
+    {
+        uint8_t screen[0x80] = { 0 }, dash[0x80] = { 0 }, buf[0x80] = { 0 }, rnd[0x710] = { 0 };
+        void *rtv_screen = (void *)0x5000, *rtv_dash = (void *)0x6000, *rtv_buf = (void *)0x7000;
+        *(uint32_t *)(screen + 0x38) = 0xc; *(uint32_t *)(screen + 0x70) = 2560; *(uint32_t *)(screen + 0x74) = 1440;
+        *(uint32_t *)(dash + 0x38) = 0xc;   *(uint32_t *)(dash + 0x70) = 1024;   *(uint32_t *)(dash + 0x74) = 512;
+        *(uint32_t *)(buf + 0x38) = 0x1;    *(uint32_t *)(buf + 0x70) = 1024;    *(uint32_t *)(buf + 0x74) = 512;
+        ui_rtv_note(rtv_screen, screen); ui_rtv_note(rtv_dash, dash); ui_rtv_note(rtv_buf, buf);
+        *(void **)(rnd + 0x708) = rtv_dash;
+        ((void (*)(void *, uint32_t, const float *, uintptr_t))t_call_from(game + 0x127ea5 + 6,
+                                                   (void *)fm5_ui_vcall))(obj, 1, vp, (uintptr_t)rnd);
+        CHECK(ui6_seen[2] == 1920.0f && ui6_seen[3] == 1080.0f);
+        CHECK(log_has("FM6: UI viewport 0,0 1920x1080 on a 1024x512 target (not the screen): kept"));
+        *(void **)(rnd + 0x708) = rtv_screen;
+        ((void (*)(void *, uint32_t, const float *, uintptr_t))t_call_from(game + 0x127ea5 + 6,
+                                                   (void *)fm5_ui_vcall))(obj, 1, vp, (uintptr_t)rnd);
+        CHECK(ui6_seen[2] == 2560.0f && ui6_seen[3] == 1440.0f);
+        *(void **)(rnd + 0x708) = rtv_buf;          /* nao e Texture2D: tamanho desconhecido -> escala */
+        ((void (*)(void *, uint32_t, const float *, uintptr_t))t_call_from(game + 0x127ea5 + 6,
+                                                   (void *)fm5_ui_vcall))(obj, 1, vp, (uintptr_t)rnd);
+        CHECK(ui6_seen[2] == 2560.0f && ui6_seen[3] == 1440.0f);
+        ui_rtv_note(rtv_dash, screen);              /* view reaproveitada: entrada sobrescrita */
+        *(void **)(rnd + 0x708) = rtv_dash;
+        ((void (*)(void *, uint32_t, const float *, uintptr_t))t_call_from(game + 0x127ea5 + 6,
+                                                   (void *)fm5_ui_vcall))(obj, 1, vp, (uintptr_t)rnd);
+        CHECK(ui6_seen[2] == 2560.0f && ui6_seen[3] == 1440.0f);
+    }
     /* grafico da UI (relacao de marchas): retangulo inteiro do renderizador escalado */
     CHECK_HEX(game + 0xcff5c5, "c5f829442430" "c5fb114c2440" "ff1549" "7f30ff");   /* call [rip -> 0x7520] */
     CHECK(*(void **)(game + 0x7520) == (void *)ui_chart_vcall);
@@ -1420,7 +1448,7 @@ TEST(fm5_patches_all_options_ultra)
     CHECK_EQ(imm32(g + FM5_RES_WIDTH + 0x11), 2560);
     CHECK_HEX(g + FM5_RES_UI_SIZE, "b80000f04489456f" "b800008744894573");
     CHECK_HEX(g + FM5_UI_VP_CALL, "ff15");
-    CHECK(*(void **)(g + FM5_UI_SLOT) == (void *)fm5_ui_vcall);
+    CHECK(*(void **)(g + FM5_UI_SLOT) == (void *)fm5_ui_vcall_stub);
     CHECK_EQ(FM5_UI_VP_CALL + 6 + (int32_t)imm32(g + FM5_UI_VP_CALL + 2), FM5_UI_SLOT);
     /* fps 120: setter do modo de present + limitador + passo medido */
     CHECK(*(void **)(g + FM5_FRAME_VTBL + 0x180) == (void *)fm5_frame_set_sync_stub);

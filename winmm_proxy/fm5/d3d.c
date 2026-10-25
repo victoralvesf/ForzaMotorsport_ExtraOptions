@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include "../proxy.h"
 #include "../common/d3d.h"
+#include "../common/ui.h"
 #include "fm5.h"
 
 #define DEV_X_FIRST  0x33            /* FM5: GetImmediateContextX ; FH2 0x37 */
@@ -377,6 +378,7 @@ static long dev_CreateRenderTargetView(void *dev, void *res, const UINT *desc, v
 {
     long hr = ((rtv_fn)dev_orig[9])(dev, res, desc, out);
     if (hr >= 0 && res && res == sc_buffer && !sc_rtv && out) sc_rtv = *out;
+    if (hr >= 0 && out) ui_rtv_note(*out, res);
     const uint8_t *r = res;
     wlog("d3d: CreateRenderTargetView res=%p (type %#x %ux%u fmt %u) desc fmt=%u dim=%u -> hr=%#lx rtv=%p", res,
          r ? *(const UINT *)(r + 0x38) : 0, r ? *(const UINT *)(r + 0x70) : 0, r ? *(const UINT *)(r + 0x74) : 0,

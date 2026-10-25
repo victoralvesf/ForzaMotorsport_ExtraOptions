@@ -110,7 +110,7 @@ static const ResSites fm6_res_sites = {
     "FM6", FM6_RES_HEIGHT, "c7837825000038040000",
     FM6_RES_WIDTH, "c5fa590d48cedb00c5f25915b0c8db00c4e1fa2cd2", 0xba,           /* rdx -> mov edx */
     FM6_RES_UI_SIZE, "8b4308c5f857c0c4e1fa2ac0c5fa1145388b430cc5f057c9c4e1f22ac8c5fa114d3c",
-    fm6_ui_size_code, sizeof fm6_ui_size_code, FM6_UI_VP_CALL, "ff9038050000", 0x538, FM6_UI_SLOT,
+    fm6_ui_size_code, sizeof fm6_ui_size_code, FM6_UI_VP_CALL, "ff9038050000", 0x538, FM6_UI_SLOT, 0x708,
     FM6_CHART_VP, 0x30, FM6_CHART_SLOT };
 
 /* FM6: mesmos sites. Altura no construtor das opcoes ([rbx+0x2578] = defaultverticalresolution); largura = rdx do

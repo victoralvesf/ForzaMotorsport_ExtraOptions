@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include "../proxy.h"
 #include "../common/d3d.h"
+#include "../common/ui.h"
 #include "fm6.h"
 
 /* Device do FM6: o driver do OS "era" (EmbeddedXvd\...\umd.dll, vtable em .data 0x17f760) tem o mesmo layout
@@ -67,7 +68,7 @@ static rtv_fn orig_fm6_create_rtv;
 static long fm6_CreateRenderTargetView(void *dev, void *res, const UINT *desc, void **out)
 {
     long hr = orig_fm6_create_rtv(dev, res, desc, out);
-    if (hr >= 0 && out && *out) alias_rtv_note(*out, res);
+    if (hr >= 0 && out && *out) { alias_rtv_note(*out, res); ui_rtv_note(*out, res); }
     return hr;
 }
 

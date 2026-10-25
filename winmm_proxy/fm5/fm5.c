@@ -129,7 +129,7 @@ static const ResSites fm5_res_sites = {
     "FM5", FM5_RES_HEIGHT, "c7836025000038040000",
     FM5_RES_WIDTH, "c5fa590d0b2aba01c5f259153f22ba01c4e1fa2cea", 0xbd,           /* rbp -> mov ebp */
     FM5_RES_UI_SIZE, "418b4708c5f857c0c4e1fa2ac0c5fa11456f418b470cc5f057c9c4e1f22ac8c5fa114d73",
-    fm5_ui_size_code, sizeof fm5_ui_size_code, FM5_UI_VP_CALL, "ff9088010000", 0x188, FM5_UI_SLOT,
+    fm5_ui_size_code, sizeof fm5_ui_size_code, FM5_UI_VP_CALL, "ff9088010000", 0x188, FM5_UI_SLOT, 0x618,
     FM5_CHART_VP, 0x28, FM5_CHART_SLOT };
 
 static void fm5_resolution(uint8_t *game, uint32_t height, uint32_t width)

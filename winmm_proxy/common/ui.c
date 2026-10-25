@@ -22,23 +22,83 @@
 static uint8_t *ui_game;
 static const ResSites *ui_sites;
 static float ui_sx = 1, ui_sy = 1;
+static uint32_t ui_w, ui_h;                      /* tamanho do render (launcher) */
 
-static void fm5_ui_vcall(void *obj, uint32_t n, void *p, uintptr_t r9)
+/* Tamanho do RT de cada RTV (CreateRenderTargetView do FM5/FM6 -> ui_rtv_note): o renderizador da UI tambem desenha
+   paginas em texturas proprias (painel digital do cockpit, FM6 2026-10-25) com o mesmo viewport 1920x1080; so o
+   alvo do tamanho do render e escalado. Tabela aberta por ponteiro; view reaproveitada = entrada sobrescrita. */
+#define UI_RTV_N 4096
+static struct { const void *rtv; uint32_t w, h; } ui_rtv[UI_RTV_N];
+static SRWLOCK ui_rtv_lock = SRWLOCK_INIT;
+static unsigned ui_rtv_home(const void *rtv) { return (unsigned)(((uintptr_t)rtv >> 4) * 0x9e3779b1u) % UI_RTV_N; }
+
+void ui_rtv_note(const void *rtv, const void *res)
+{
+    const uint8_t *r = res;
+    unsigned i, k, h;
+    if (!rtv) return;
+    h = ui_rtv_home(rtv);
+    AcquireSRWLockExclusive(&ui_rtv_lock);
+    for (k = 0, i = h; k < 16; k++, i = (i + 1) % UI_RTV_N)
+        if (ui_rtv[i].rtv == rtv || !ui_rtv[i].rtv) break;
+    if (k == 16) i = h;
+    ui_rtv[i].rtv = rtv;
+    ui_rtv[i].w = r && *(const uint32_t *)(r + 0x38) == 0xc ? *(const uint32_t *)(r + 0x70) : 0;   /* Texture2D */
+    ui_rtv[i].h = r && *(const uint32_t *)(r + 0x38) == 0xc ? *(const uint32_t *)(r + 0x74) : 0;
+    ReleaseSRWLockExclusive(&ui_rtv_lock);
+}
+
+static int ui_rtv_size(const void *rtv, uint32_t *w, uint32_t *h)
+{
+    unsigned i, k;
+    int found = 0;
+    if (!rtv) return 0;
+    AcquireSRWLockShared(&ui_rtv_lock);
+    for (k = 0, i = ui_rtv_home(rtv); k < 16 && ui_rtv[i].rtv; k++, i = (i + 1) % UI_RTV_N)
+        if (ui_rtv[i].rtv == rtv) { *w = ui_rtv[i].w; *h = ui_rtv[i].h; found = ui_rtv[i].w != 0; break; }
+    ReleaseSRWLockShared(&ui_rtv_lock);
+    return found;
+}
+
+/* renderizador da UI (rdi, preservado) no 4o argumento: o RSSetViewports so tem 3 */
+void fm5_ui_vcall_stub(void);
+__asm__(".globl fm5_ui_vcall_stub\n"
+        "fm5_ui_vcall_stub:\n"
+        "  mov %rdi, %r9\n"
+        "  jmp fm5_ui_vcall\n");
+
+void fm5_ui_vcall(void *obj, uint32_t n, void *p, uintptr_t renderer)
 {
     typedef void (*vc_fn)(void *, uint32_t, void *, uintptr_t);
-    static volatile LONG logged_vp;
+    static volatile LONG logged_vp, logged_unknown, nkept;
+    static struct { uint32_t w, h; } kept[8];
     const ResSites *rs = ui_sites;
     uintptr_t ret = (uintptr_t)__builtin_return_address(0) - (uintptr_t)ui_game;
     void **tab = (void **)obj;                   /* call [rax+off] com rax = objeto: ponteiro NO objeto (tabela rapida do XDK) */
     if (ret == rs->vp_call + 6 && p) {
         float v[6];
+        void *rtv = renderer ? *(void **)(renderer + rs->vp_rtv) : NULL;   /* RT que ele liga logo depois */
+        uint32_t w = 0, h = 0;
+        if (ui_rtv_size(rtv, &w, &h) && (w != ui_w || h != ui_h)) {
+            LONG i, k = nkept < 8 ? nkept : 8;
+            for (i = 0; i < k && (kept[i].w != w || kept[i].h != h); i++) ;
+            if (i == k && k < 8) {
+                kept[k].w = w; kept[k].h = h; nkept = k + 1;
+                wlog("%s: UI viewport %.0f,%.0f %.0fx%.0f on a %ux%u target (not the screen): kept", rs->tag,
+                     ((float *)p)[0], ((float *)p)[1], ((float *)p)[2], ((float *)p)[3], w, h);
+            }
+            ((vc_fn)tab[rs->vp_off / 8])(obj, n, p, 0);
+            return;
+        }
+        if (!w && rtv && InterlockedIncrement(&logged_unknown) <= 2)
+            wlog("%s: UI viewport: target size unknown (rtv %p), scaled", rs->tag, rtv);
         memcpy(v, p, sizeof v);
         v[0] *= ui_sx; v[2] *= ui_sx; v[1] *= ui_sy; v[3] *= ui_sy;
         if (InterlockedIncrement(&logged_vp) <= 2)
             wlog("%s: UI viewport %.0f,%.0f %.0fx%.0f -> %.0f,%.0f %.0fx%.0f (target game+%#llx)", rs->tag,
                  ((float *)p)[0], ((float *)p)[1], ((float *)p)[2], ((float *)p)[3], v[0], v[1], v[2], v[3],
                  (unsigned long long)((uintptr_t)tab[rs->vp_off / 8] - (uintptr_t)ui_game));
-        ((vc_fn)tab[rs->vp_off / 8])(obj, n, v, r9);
+        ((vc_fn)tab[rs->vp_off / 8])(obj, n, v, 0);
         return;
     }
     wlog("%s: fm5_ui_vcall called from unexpected game+%#llx", rs->tag, (unsigned long long)ret);
@@ -47,14 +107,14 @@ static void fm5_ui_vcall(void *obj, uint32_t n, void *p, uintptr_t r9)
 static void fm5_ui_viewport(uint8_t *game, const ResSites *rs, uint32_t w, uint32_t h)
 {
     static const uint8_t pad[8] = { 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc };
-    void *fn = (void *)fm5_ui_vcall;
+    void *fn = (void *)fm5_ui_vcall_stub;
     uint8_t code[6] = { 0xff, 0x15 };
     int32_t rel;
     if (!bytes_match(game + rs->vp_call, rs->vp_call_orig, 6) || memcmp(game + rs->vp_slot, pad, 8)) {
         wlog("%s: resolution: UI viewport sites do not match, ignored", rs->tag);
         return;
     }
-    ui_game = game; ui_sites = rs; ui_sx = w / 1920.0f; ui_sy = h / 1080.0f;
+    ui_game = game; ui_sites = rs; ui_sx = w / 1920.0f; ui_sy = h / 1080.0f; ui_w = w; ui_h = h;
     write_mem(game + rs->vp_slot, &fn, 8);
     rel = (int32_t)(rs->vp_slot - (rs->vp_call + 6));   memcpy(code + 2, &rel, 4); write_mem(game + rs->vp_call, code, 6);
     wlog("%s: resolution: UI viewport scaled to %ux%u", rs->tag, w, h);

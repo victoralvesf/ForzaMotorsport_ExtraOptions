@@ -17,13 +17,15 @@ typedef struct {
     uint32_t vp_call;                /* call [rax+off] do viewport da UI */
     const char *vp_call_orig;
     uint32_t vp_off;
-    uint32_t vp_slot;                /* 8 bytes cc de padding (ponteiro p/ fm5_ui_vcall) */
+    uint32_t vp_slot;                /* 8 bytes cc de padding (ponteiro p/ fm5_ui_vcall_stub) */
+    uint32_t vp_rtv;                 /* renderizador (rdi): RTV ligado pelo OMSetRenderTargets logo depois */
     uint32_t chart_vp;               /* mov rax,[rcx] ; 2 stores do retangulo ; call [rax+chart_off] (graficos da UI) */
     uint8_t chart_off;               /* SetViewport do renderizador dos graficos */
     uint32_t chart_slot;             /* 8 bytes cc de padding (ponteiro p/ ui_chart_vcall) */
 } ResSites;
 
 void game_resolution(uint8_t *game, const ResSites *rs, uint32_t height, uint32_t width);
+void ui_rtv_note(const void *rtv, const void *res);   /* CreateRenderTargetView: tamanho do RT da view */
 
 /* modo de present: o setter do Frame (slot do jogo) aponta para fm5_frame_set_sync_stub */
 extern uint8_t *fps_game;
