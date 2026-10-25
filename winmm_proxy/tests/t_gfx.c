@@ -1,9 +1,10 @@
 /*
- * Testes de fm5/gfx.c: valores que os getters com hook devolvem em cada nivel do launcher (PASSO 9).
+ * Testes de fm5/gfx.c, fm6/gfx.c e fm6/font.c (apostrofos nas fontes dos paineis): valores que os getters com hook devolvem em cada nivel do launcher (PASSO 9).
  * Os sites/getters no exe real sao conferidos em t_patch.c (fm5_patches_*).
  */
 #include "../fm5/gfx.c"
 #include "../fm6/gfx.c"
+#include "../fm6/font.c"
 #include "test.h"
 
 static int32_t fake_i4[4];
@@ -282,6 +283,105 @@ TEST(fm6_shadows_on_fm6_exe)
             CHECK_HEX((uint8_t *)fm6_orig_shadow_res, "40574883ec4048c7442420feffffff48895c2458");
             CHECK(*(uint8_t **)((uint8_t *)fm6_orig_shadow_res + 20 + 6) == g + 0x4410e4 + 20);
         }
+        pe_unmap(g);
+    }
+}
+
+/* ---- fm6/font.c: apostrofos do tempo (pt-BR) nas fontes dos paineis sem o glifo ---- */
+static const char *fake_font_cps;       /* codigos que a fonte falsa tem */
+static int fake_font_find(void *map, uint32_t cp)
+{
+    const char *p;
+    (void)map;
+    for (p = fake_font_cps; *p; p++) if ((uint8_t)*p == cp) return (int)(p - fake_font_cps);
+    return -1;
+}
+
+static struct { void *rcx, *rdx; uint64_t r8, r9, a5; } font_seen;
+static void fake_font_orig(void *rcx, void *rdx, uint64_t r8, uint64_t r9, uint64_t a5)
+{
+    font_seen.rcx = rcx; font_seen.rdx = rdx; font_seen.r8 = r8; font_seen.r9 = r9; font_seen.a5 = a5;
+}
+
+TEST(fm6_dash_font_apostrophes)
+{
+    uint8_t font[0x170] = { 0 };
+    int32_t values[64] = { 0 };
+    wchar_t lap[] = L"00'12,977''", hour[] = L"1h05'02,1''", plain[] = L"00:12,977";
+    uint32_t codes[] = { '0', '0', '\'', '1', '2', ',', '9', '\'', '\'' }, *vec[2] = { codes, codes + 9 };
+    *(int32_t **)(font + 0x160) = values;
+    font_find = fake_font_find;
+    /* fonte do painel: sem o apostrofo */
+    fake_font_cps = " \",-./0123456789:DNPR";
+    fm6_font_measure_fix(font, (uint16_t *)lap, 11);
+    CHECK(!wcscmp(lap, L"00:12,977\" "));
+    fm6_font_measure_fix(font, (uint16_t *)hour, 11);
+    CHECK(!wcscmp(hour, L"1h05:02,1\" "));
+    fm6_font_measure_fix(font, (uint16_t *)plain, 9);
+    CHECK(!wcscmp(plain, L"00:12,977"));
+    fm6_font_geometry_fix(font, vec);
+    CHECK(codes[2] == ':' && codes[7] == '"' && codes[8] == ' ' && codes[3] == '1');
+    /* so ate n: o apostrofo depois do fim fica */
+    wcscpy(lap, L"00'12''");
+    fm6_font_measure_fix(font, (uint16_t *)lap, 5);
+    CHECK(!wcscmp(lap, L"00:12''"));
+    /* fonte com o apostrofo (HUD/Planer): nada muda */
+    fake_font_cps = " '\",-./0123456789:";
+    wcscpy(lap, L"00'12,977''");
+    fm6_font_measure_fix(font, (uint16_t *)lap, 11);
+    CHECK(!wcscmp(lap, L"00'12,977''"));
+    fake_font_cps = " '\",-./0123456789:";
+    values[1] = -1;                                  /* "'" na tabela mas sem glifo */
+    fm6_font_measure_fix(font, (uint16_t *)lap, 11);
+    CHECK(!wcscmp(lap, L"00:12,977\" "));
+    values[1] = 0;
+    /* fonte sem ':' ou '"' para trocar: nada muda */
+    fake_font_cps = " ,.0123456789";
+    wcscpy(lap, L"00'12,977''");
+    fm6_font_measure_fix(font, (uint16_t *)lap, 11);
+    CHECK(!wcscmp(lap, L"00'12,977''"));
+    /* texto em memoria so de leitura: nada muda (sem queda) */
+    {
+        uint16_t *ro = VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        DWORD old;
+        fake_font_cps = " \",-./0123456789:";
+        memcpy(ro, L"0'1''", 12);
+        VirtualProtect(ro, 4096, PAGE_READONLY, &old);
+        fm6_font_measure_fix(font, ro, 5);
+        CHECK(ro[1] == '\'' && ro[3] == '\'');
+        VirtualFree(ro, 0, MEM_RELEASE);
+    }
+    /* stub: corrige e repassa rcx/rdx/r8/r9 e o 5o argumento (pilha) ao trampolim */
+    {
+        typedef void (*stub_fn)(void *, void *, uint64_t, uint64_t, uint64_t);
+        void *saved = fm6_font_measure_tramp;
+        stub_fn stub = (stub_fn)(uintptr_t)fm6_font_measure_stub;
+        fake_font_cps = " \",-./0123456789:";
+        wcscpy(lap, L"00'12,977''");
+        fm6_font_measure_tramp = (void *)fake_font_orig;
+        stub(font, lap, 11, 0x1234, 0x5678);
+        CHECK(!wcscmp(lap, L"00:12,977\" "));
+        CHECK(font_seen.rcx == font && font_seen.rdx == lap && font_seen.r8 == 11 && font_seen.r9 == 0x1234);
+        CHECK(font_seen.a5 == 0x5678);
+        fm6_font_measure_tramp = saved;
+    }
+    /* no exe real: os dois hooks com trampolim */
+    {
+        uint8_t *g = pe_map(FM6_EXE, NULL);
+        if (!g) { test_skip(FM6_EXE " ausente"); return; }
+        log_capture();
+        fm6_dash_font_fix(g);
+        CHECK(!log_has("does not match") && !log_has("not installed"));
+        CHECK(log_has("FM6: dash fonts: apostrophes in text of fonts without them"));
+        CHECK(hooked_to(g + 0x10bf78, (void *)fm6_font_measure_stub));
+        CHECK(hooked_to(g + 0x2b7ef0, (void *)fm6_font_geometry_stub));
+        CHECK_HEX((uint8_t *)fm6_font_measure_tramp, "488bc4488958084889681048897018" "ff2500000000");
+        CHECK(*(uint8_t **)((uint8_t *)fm6_font_measure_tramp + 15 + 6) == g + 0x10bf78 + 15);
+        CHECK_HEX((uint8_t *)fm6_font_geometry_tramp, "488bc44c8948204c89401848894808" "ff2500000000");
+        CHECK(font_find == (void *)(g + 0x10c270));
+        log_capture();                               /* apply_patches de novo: nada (ja instalado) */
+        fm6_dash_font_fix(g);
+        CHECK(!log_has("do not match") && !log_has("not installed") && !log_has("dash fonts"));
         pe_unmap(g);
     }
 }

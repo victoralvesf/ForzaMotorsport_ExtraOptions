@@ -21,6 +21,8 @@ void fm6_xg_computer(void *out, const char *name, uint32_t *desc);
 /* gfx.c */
 void fm6_car_detail(uint8_t *game, int level);
 void fm6_shadows(uint8_t *game, int level);
+/* font.c */
+void fm6_dash_font_fix(uint8_t *game);
 
 /* audio.c */
 int audio_fm6_install(void);

@@ -380,6 +380,7 @@ static void fm6_patches(uint8_t *game)
        debug.ini PlacementCommitted=0 volta ao reservado; D3D12Debug=5 (antigo) tambem liga. */
     if (dbg_int(L"PlacementCommitted", 1) > 0 || dbg_int(L"D3D12Debug", 0) == 5) fm6_committed_placement_textures();
     if (dbg_int(L"D3D12Debug", 0) == 6) fm6_leak_gfx_objects();
+    fm6_dash_font_fix(game);   /* PASSO 119: apostrofos do tempo em pt-BR nas fontes dos paineis */
     if (cfg6_int(L"SkipIntro", 0)) {
         static const uint8_t nop2[2] = { 0x66, 0x90 }, jmp8 = 0xeb;
         size_t i, n = sizeof fm6_splash_intro_cmps / sizeof *fm6_splash_intro_cmps;
