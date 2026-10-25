@@ -30,6 +30,13 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **FM5:** the Particles and Motion Blur presets have no effect.
 - No Xbox Live features (Rivals, online play, leaderboards).
 
+## v1.4.1 — FM6 tuning setup name fix
+
+### Fixes
+- **FM6:** the game crashed when saving a tuning setup. Naming the setup opens the console's virtual keyboard,
+  which Azimuth didn't provide for FM6. It now opens Azimuth's text input (the same one FH2 uses), and the setup
+  is saved with the name you type.
+
 ## v1.4.0 — FM5 sun flare fix and FM6 crash fix
 
 ### Fixes
