@@ -1164,6 +1164,7 @@ TEST(fm6_resource_batch_holds_srv_refs)
     fm6_batch_add_srv(&b, NULL, 2);                           /* nulo: solta o anterior, nada a segurar */
     CHECK_EQ(a.refs, 1);
     az_tab[0x43] = (void *)fake_batch_43;
+    st_on = 1;                                                /* a sonda e diagnostico do StutterLog (PASSO 117) */
     a.refs = 1;
     fm6_batch_add_srv(&b, &a, 3);
     a.refs--;                                                 /* o jogo solta a view */
@@ -1178,6 +1179,12 @@ TEST(fm6_resource_batch_holds_srv_refs)
     fm6_SetFastResourcesFromBatch(ctx, srv + 1 * 36, 36);     /* b2 ainda do jogo: sem aviso */
     CHECK(batch_calls == 1 && batch_obj[0] == &b2);
     CHECK(!log_has("already released by the game"));
+    st_on = 0;
+    batch_calls = 0;
+    log_capture();
+    fm6_SetFastResourcesFromBatch(ctx, srv + 3 * 36, 36);     /* sem StutterLog: sem sonda, sem aviso */
+    CHECK(batch_calls == 1 && a.refs == 1);
+    CHECK(!log_has("already released by the game"));
     fm6_batch_hold = 1;
 }
 
@@ -1188,6 +1195,7 @@ TEST(fm6_immediate_srv_hold)
     int k;
     memset(ih_ctx, 0, sizeof ih_ctx);
     ih_head = ih_tail = 0;
+    st_on = 1;                                                /* sonda do jogo ter soltado: so com StutterLog */
     k = ih_bind(ctx, 4, 3, 1, (void *[]){ &a }, 100, 50, out, 8);
     CHECK_EQ(k, 0);
     CHECK_EQ(a.refs, 2);                                      /* o jogo + o estado do imediato */
@@ -1213,6 +1221,32 @@ TEST(fm6_immediate_srv_hold)
     CHECK(ih_ctx[0].v[4][3] == NULL && ih_ctx[0].v[4][4] == NULL);
     k = ih_bind(ctx, 6, 0, 1, (void *[]){ &a }, 300, 50, out, 8);   /* estagio invalido: so drena */
     CHECK(k == 2 && a.refs == 1);
+    st_on = 0;
+    while (k) fake_ref_release(out[--k]);
+    k = ih_bind(ctx, 4, 3, 1, (void *[]){ &c }, 400, 50, out, 8);
+    a.refs = 1;
+    log_capture();
+    k = ih_bind(ctx, 4, 3, 1, (void *[]){ &a }, 410, 50, out, 8);   /* sem StutterLog: troca sem sonda */
+    CHECK(k == 0 && a.refs == 2 && c.refs == 2);              /* c: o jogo + a fila */
+    CHECK(!log_has("still bound on immediate"));
+}
+
+/* PASSO 117: a copia da heranca so leva os slots ate ncb/nsrv (o resto do estado igual) */
+TEST(fm6_om_copy_used_part)
+{
+    static fm6_om src, dst;
+    memset(&src, 0, sizeof src);
+    memset(&dst, 0xcc, sizeof dst);
+    src.nrtv = 2; src.rtv[1] = (void *)0x10; src.nvp = 1; src.vp[0][2] = 3.0f;
+    src.ncb[4] = 5; src.cb[4][4] = (void *)0x20;
+    src.nsrv[0] = 3; src.srv[0][2] = (void *)0x30; src.srv[0][3] = (void *)0x40;   /* alem de nsrv: nao vai */
+    src.srvset[0][0] = 4; src.has = FM6_HAS_RS; src.rs = (void *)0x50; src.blend_factor[3] = 1.0f;
+    fm6_om_copy(&dst, &src);
+    CHECK(dst.nrtv == 2 && dst.rtv[1] == (void *)0x10 && dst.vp[0][2] == 3.0f);
+    CHECK(dst.ncb[4] == 5 && dst.cb[4][4] == (void *)0x20 && dst.cb[4][0] == NULL);
+    CHECK(dst.nsrv[0] == 3 && dst.srv[0][2] == (void *)0x30 && dst.srv[0][0] == NULL);
+    CHECK(dst.srv[0][3] != (void *)0x40);
+    CHECK(dst.srvset[0][0] == 4 && dst.has == FM6_HAS_RS && dst.rs == (void *)0x50 && dst.blend_factor[3] == 1.0f);
 }
 
 TEST(fm6_resource_batch_builders_patched)

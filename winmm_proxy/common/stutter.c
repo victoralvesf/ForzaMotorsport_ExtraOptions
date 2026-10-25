@@ -1237,7 +1237,6 @@ static int pa_on;
 static volatile LONG pa_made, pa_fallback, pa_freed;
 static volatile LONG64 pa_used_pages;
 
-static int pa_bit(const pa_heap *H, uint32_t p) { return (int)((H->used[p >> 6] >> (p & 63)) & 1); }
 static void pa_set(pa_heap *H, uint32_t p, uint32_t n, int on)
 {
     uint32_t i;
@@ -1248,18 +1247,32 @@ static void pa_set(pa_heap *H, uint32_t p, uint32_t n, int on)
     if (on) H->free_pages -= n; else H->free_pages += n;
 }
 
-/* 1a faixa livre de n paginas alinhada a `al` paginas; -1 se nao ha */
+/* 1a pagina >= p livre (used 0) ou ocupada (used 1); PA_PAGES se nao ha */
+static uint32_t pa_next(const pa_heap *H, uint32_t p, int used)
+{
+    while (p < PA_PAGES) {
+        uint64_t w = H->used[p >> 6];
+        if (!used) w = ~w;
+        w >>= p & 63;
+        if (w) return p + (uint32_t)__builtin_ctzll(w);
+        p = (p | 63) + 1;
+    }
+    return PA_PAGES;
+}
+
+/* 1a faixa livre de n paginas alinhada a `al` paginas; -1 se nao ha (PASSO 117: de 64 em 64 bits; era bit a bit) */
 int pa_find(const pa_heap *H, uint32_t n, uint32_t al)
 {
-    uint32_t p = 0, k;
-    if (!n || n > PA_PAGES || H->free_pages < n) return -1;
-    while (p + n <= PA_PAGES) {
-        if (!(p & 63) && H->used[p >> 6] == ~0ull) { p += 64; continue; }
-        for (k = 0; k < n && !pa_bit(H, p + k); k++) {}
-        if (k == n) return (int)p;
-        p = (p + k + 1 + al - 1) / al * al;
+    uint32_t p = 0, u;
+    if (!n || n > PA_PAGES || H->free_pages < n || !al) return -1;
+    for (;;) {
+        p = pa_next(H, p, 0);
+        p = (p + al - 1) / al * al;
+        if (p >= PA_PAGES || n > PA_PAGES - p) return -1;
+        u = pa_next(H, p, 1);
+        if (u >= p + n) return (int)p;
+        p = u + 1;
     }
-    return -1;
 }
 
 static uint32_t pa_slot(const void *r) { return (uint32_t)((((uintptr_t)r >> 4) * 0x9E3779B97F4A7C15ull) >> (64 - PA_BITS)); }
@@ -1422,6 +1435,7 @@ static void pa_describe(pa_ent *e, const void *res, const D3D12_RESOURCE_DESC *r
 static int pa_reclaim_on;
 int pa_hold_ms = 2000;
 static uint64_t *pi_addr;                                  /* indice por endereco no jogo (ordem crescente) */
+static uint64_t *pi_end;                                   /* fim da faixa (addr + lo): o pa_reclaim pula sem pa_get */
 static const void **pi_res;
 static uint32_t pi_n;
 static uint64_t pi_maxlen;
@@ -1485,13 +1499,15 @@ static void pi_add(uint64_t addr, const void *res, uint64_t len)
     uint32_t i;
     if (!pi_addr) {
         pi_addr = VirtualAlloc(NULL, PA_TAB * sizeof *pi_addr, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        pi_end = VirtualAlloc(NULL, PA_TAB * sizeof *pi_end, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
         pi_res = VirtualAlloc(NULL, PA_TAB * sizeof *pi_res, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     }
-    if (!pi_addr || !pi_res || pi_n >= PA_TAB) return;
+    if (!pi_addr || !pi_end || !pi_res || pi_n >= PA_TAB) return;
     i = pi_lower(addr, res);
     memmove(&pi_addr[i + 1], &pi_addr[i], (pi_n - i) * sizeof *pi_addr);
+    memmove(&pi_end[i + 1], &pi_end[i], (pi_n - i) * sizeof *pi_end);
     memmove(&pi_res[i + 1], &pi_res[i], (pi_n - i) * sizeof *pi_res);
-    pi_addr[i] = addr; pi_res[i] = res; pi_n++;
+    pi_addr[i] = addr; pi_end[i] = addr + len; pi_res[i] = res; pi_n++;
     if (len > pi_maxlen) pi_maxlen = len;
 }
 
@@ -1503,6 +1519,7 @@ static void pi_del(uint64_t addr, const void *res)
     i = pi_lower(addr, res);
     if (i >= pi_n || pi_addr[i] != addr || pi_res[i] != res) return;
     memmove(&pi_addr[i], &pi_addr[i + 1], (pi_n - i - 1) * sizeof *pi_addr);
+    memmove(&pi_end[i], &pi_end[i + 1], (pi_n - i - 1) * sizeof *pi_end);
     memmove(&pi_res[i], &pi_res[i + 1], (pi_n - i - 1) * sizeof *pi_res);
     pi_n--;
 }
@@ -1526,7 +1543,9 @@ static void pa_reclaim(uint64_t addr, uint64_t len, uint64_t now_ms)
     if (!pq_ring) pq_ring = VirtualAlloc(NULL, PQ_RING * sizeof *pq_ring, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!pq_ring) return;
     for (i = pi_lower(addr > pi_maxlen ? addr - pi_maxlen : 0, NULL); i < pi_n && pi_addr[i] < addr + len; i++) {
-        pa_ent *e = pa_get(pi_res[i]);
+        pa_ent *e;
+        if (pi_end[i] <= addr) continue;               /* termina antes da nova: sem a tabela (falta de cache) */
+        e = pa_get(pi_res[i]);
         if (!e || e->orphan || !e->obj || e->gone || !e->lo || e->addr + e->lo <= addr) continue;
         if (pq_head - pq_tail >= PQ_RING) break;      /* quarentena cheia: fica para a proxima */
         pq_ring[pq_head % PQ_RING].t = now_ms;

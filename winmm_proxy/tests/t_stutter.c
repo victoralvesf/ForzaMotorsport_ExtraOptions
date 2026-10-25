@@ -1131,6 +1131,16 @@ TEST(stutter_placed_bitmap)
     H.free_pages = 1;
     CHECK_EQ(pa_find(&H, 1, 1), (int)PA_PAGES - 1);
     CHECK_EQ(pa_find(&H, 1, 16), -1);
+    memset(H.used, 0, sizeof H.used);                    /* PASSO 117: faixas que cruzam palavras de 64 bits */
+    H.free_pages = PA_PAGES;
+    H.used[0] = ~0ull >> 2;                              /* 0..61 ocupadas, 62..63 livres */
+    H.used[1] = 1ull << 5;                               /* 69 ocupada */
+    CHECK_EQ(pa_find(&H, 2, 1), 62);
+    CHECK_EQ(pa_find(&H, 8, 1), 70);                     /* 62..68 (7) nao cabe */
+    CHECK_EQ(pa_find(&H, 7, 1), 62);
+    CHECK_EQ(pa_find(&H, 4, 4), 64);                     /* alinhada: 64..67 */
+    CHECK_EQ(pa_find(&H, 16, 16), 80);
+    CHECK_EQ(pa_find(&H, PA_PAGES, 1), -1);
 }
 
 TEST(stutter_placed_wants)

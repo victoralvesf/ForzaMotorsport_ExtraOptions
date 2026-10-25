@@ -256,17 +256,27 @@ typedef struct { volatile LONG ref; UINT size; uint8_t data[]; } fm6_ver;
 typedef struct { void *buf; UINT size, dirty; fm6_ver *cur; } fm6_upd;
 typedef struct { void *ctx; UINT flags; uintptr_t caller; volatile LONG om, om_empty; int idx; fm6_om st;
                  fm6_upd upd[FM6_UPD_MAX]; } fm6_dctx_info;
+extern int st_on;
 static fm6_dctx_info fm6_dctx[128];
 static volatile LONG fm6_dctx_n;
 static defctx_fn orig_fm6_defctx[3];
 static struct { void *ctx; void *const *src; } fm6_ctx_src[256];   /* diferido -> tabela do Azimuth de onde veio */
 static volatile LONG fm6_ctx_src_n;
 
+/* PASSO 117: chamado em todo Set* dos diferidos; a busca linear passava por ate 128 entradas de ~8 KB (falta de cache
+   em cada uma) -> ultima resposta por thread, valida enquanto nenhum diferido novo entrou (o mais novo ganha) */
 static fm6_dctx_info *fm6_dctx_find(const void *ctx)
 {
+    static __thread const void *last_ctx;
+    static __thread fm6_dctx_info *last_d;
+    static __thread LONG last_n;
     LONG i, n = fm6_dctx_n < 128 ? fm6_dctx_n : 128;
+    if (ctx && ctx == last_ctx && n == last_n && last_d->ctx == ctx) return last_d;
     for (i = n - 1; i >= 0; i--)
-        if (fm6_dctx[i].ctx == ctx) return &fm6_dctx[i];
+        if (fm6_dctx[i].ctx == ctx) {
+            last_ctx = ctx; last_d = &fm6_dctx[i]; last_n = n;
+            return &fm6_dctx[i];
+        }
     return NULL;
 }
 
@@ -494,6 +504,19 @@ static void fm6_obj_ref(void *o, int add)
 {
     if (o) ((ULONG (*)(void *))(*(void ***)o)[add ? 1 : 2])(o);
 }
+/* copia so a parte usada (PASSO 117: o estado inteiro tem ~8 KB e e copiado a cada bundle aninhado); quem le a
+   copia so passa de nrtv/nvp/nsc/ncb/nsrv por aqui */
+static void fm6_om_copy(fm6_om *dst, const fm6_om *src)
+{
+    int s;
+    memcpy(dst, src, offsetof(fm6_om, cb));
+    for (s = 0; s < 6; s++) {
+        memcpy(dst->cb[s], src->cb[s], src->ncb[s] * sizeof src->cb[s][0]);
+        memcpy(dst->srv[s], src->srv[s], src->nsrv[s] * sizeof src->srv[s][0]);
+    }
+    memcpy(dst->cbset, src->cbset, sizeof *dst - offsetof(fm6_om, cbset));
+}
+
 static void fm6_om_views(fm6_om *st, int add)
 {
     UINT i, s;
@@ -571,7 +594,7 @@ static fm6_om_item *fm6_om_snapshot(void *ctx)
     if (!(o = malloc(sizeof *o))) return NULL;
     o->vt = fm6_om_item_vt;
     o->ref = 1;
-    o->st = d->st;
+    fm6_om_copy(&o->st, &d->st);
     fm6_om_views(&o->st, 1);
     /* versao dos placement buffers que o juntador atualizou: o que o bundle le neste ponto da lista */
     o->nupd = 0;
@@ -715,10 +738,14 @@ static void *fm6_cl_owner_find(const void *cl)
 static void fm6_nest_note(void *ctx, void *cl)
 {
     static struct { void *j, *w; } seen[64];
-    static volatile LONG nseen;
-    void *w = fm6_cl_owner_find(cl);
-    fm6_dctx_info *dj = fm6_dctx_find(ctx), *dw = w ? fm6_dctx_find(w) : NULL;
+    static volatile LONG nseen, calls;
+    void *w;
+    fm6_dctx_info *dj, *dw;
     LONG i, n = nseen < 64 ? nseen : 64;
+    if (n >= 64 || InterlockedIncrement(&calls) > 4096) return;   /* so diagnostico: os pares aparecem no inicio */
+    w = fm6_cl_owner_find(cl);
+    dj = fm6_dctx_find(ctx);
+    dw = w ? fm6_dctx_find(w) : NULL;
     for (i = 0; i < n; i++)
         if (seen[i].j == ctx && seen[i].w == w) return;
     i = InterlockedIncrement(&nseen) - 1;
@@ -1121,7 +1148,7 @@ static void fm6_SetFastResourcesFromBatch(void *ctx, const uint8_t *p, UINT size
                      vt >= tabs && vt < tabs + NTYPES * SLOTS * 8 ? (int)((vt - tabs) / (SLOTS * 8)) : -1);
             }
         }
-        if (fm6_batch_hold && obj && hdr & FM6_BATCH_SRV_FLAG) fm6_batch_probe(p, obj);
+        if (st_on && fm6_batch_hold && obj && hdr & FM6_BATCH_SRV_FLAG) fm6_batch_probe(p, obj);   /* diagnostico */
         ((set_fn)(*(void ***)ctx)[hdr & FM6_BATCH_SRV_FLAG ? fm6_stage_srv[stage] : fm6_stage_cb[stage]])
             (ctx, slot, 1, &obj);
         fm6_res_note(ctx, !!(hdr & FM6_BATCH_SRV_FLAG), stage, slot, 1, &obj);
@@ -1415,7 +1442,6 @@ static HRESULT fm6_FinishCommandList(void *ctx, BOOL restore, void **out)
    ainda nao passou dela: submete o lote atual se ela ainda nao saiu e espera a fence (o mesmo par submit/espera
    que o Azimuth ja usa nessa funcao para os dados de upload da lista). */
 extern void cx_add(uint32_t kind, void *a, void *b, const uint32_t *x, int nx);
-extern int st_on;
 #define CX_REEXEC_KIND 8   /* CX_REEXEC em common/stutter.c */
 #define RVA_APPLY_EXECUTE   0x11bd40
 #define RVA_SUBMIT          0xdf730
@@ -1516,13 +1542,15 @@ static int ih_bind(void *ctx, UINT stage, UINT start, UINT n, void *const *views
         if (nv) ih_addref(nv);
         *slot = nv;
         if (!old) continue;
-        if (ih_addref(old) == 2) {                /* so a nossa (+ a sonda): o jogo ja soltou */
-            LONG d = InterlockedIncrement(&ih_dead_bound);
-            if (d <= 8 || !(d & (d - 1)))
-                wlog("d3d: SRV %p released by the game still bound on immediate %p (stage %u slot %u; %ld times)", old,
-                     ctx, stage, start + i, d);
+        if (st_on) {                              /* diagnostico (StutterLog): sonda = 2 chamadas atomicas por troca */
+            if (ih_addref(old) == 2) {            /* so a nossa (+ a sonda): o jogo ja soltou */
+                LONG d = InterlockedIncrement(&ih_dead_bound);
+                if (d <= 8 || !(d & (d - 1)))
+                    wlog("d3d: SRV %p released by the game still bound on immediate %p (stage %u slot %u; %ld times)",
+                         old, ctx, stage, start + i, d);
+            }
+            ih_release(old);
         }
-        ih_release(old);
         if (ih_head - ih_tail >= IH_RING) {       /* fila cheia: a mais antiga sai agora */
             if (k < max) out[k++] = ih_q[ih_tail % IH_RING].obj;
             else ih_release(ih_q[ih_tail % IH_RING].obj);
