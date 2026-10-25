@@ -19,6 +19,8 @@ long STDMETHODCALLTYPE sf_GetTrustLevel(StubFactory *self, int *level);
 /* HSTRING local do Azimuth (GetTemplateByName) */
 #define HSTRING_MAGIC        0x32485346u  /* "FSH2" */
 typedef struct { uint32_t magic, len; uint64_t pad; const wchar_t *buf; } LocalHString;
+/* GetActivationFactoryByPCWSTR original do Azimuth (sem passar pelo jogo carregado) */
+long winrt_factory_orig(const wchar_t *cls, const GUID *iid, void **out);
 long winrt_template_orig(void *self, const LocalHString *name, void **out);
 uint64_t winrt_table_orig(uint32_t slot, uint64_t *args, void *ret, double *fargs);
 #endif

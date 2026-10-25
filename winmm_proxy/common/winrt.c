@@ -73,6 +73,11 @@ void *const sf_vtbl[] = {
     (void *)sf_ActivateInstance,
 };
 
+long winrt_factory_orig(const wchar_t *cls, const GUID *iid, void **out)
+{
+    return orig_get_factory(cls, iid, out);
+}
+
 static long hook_get_factory(const wchar_t *cls, const GUID *iid, void **out)
 {
     const game *g = game_current();

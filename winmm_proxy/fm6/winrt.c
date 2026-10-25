@@ -85,19 +85,24 @@ static StubFactory core_app_context = { cac_vtbl, CORE_APP_CONTEXT };
  * so usa o 1a0dd80e), slot 6 (options) -> IAsyncOperation<String>. O jogo guarda a operacao e consulta por
  * polling (game+0xcb1f74): QI IAsyncInfo, get_Status 1 -> GetResults vira o nome; 2 = cancelado; 3 = erro.
  * O Azimuth nao tem KeyboardOptions nem essa interface -> STOPPED "activation Windows.Xbox.UI.KeyboardOptions".
- * => objetos proprios: as opcoes guardam o texto padrao; o teclado "fecha na hora" (como o Azimuth faz com as
- *    telas do sistema no FH2) aceitando o texto padrao (Completed); sem texto padrao = Canceled.
+ * O objeto das opcoes e convertido (0x25f3c0) para IKeyboardOptions 74782f58-... (QI; NULL -> queda game+0xcaf862).
+ * => objetos proprios: as opcoes guardam texto padrao/titulo/descricao; o slot 6 abre a janela de texto do Azimuth
+ *    (ShowVirtualKeyboardAsync do FH2) e devolve a operacao dele; se falhar, operacao propria ja concluida com o
+ *    texto padrao (Completed) ou Canceled se vazio.
  */
 static const wchar_t KEYBOARD_OPTIONS[] = L"Windows.Xbox.UI.KeyboardOptions";
 static const wchar_t SYSTEM_UI[] = L"Windows.Xbox.UI.SystemUI";
 static const GUID IID_ISystemUIStatics_Kbd_ =
     { 0x01f75706, 0x9df0, 0x44d8, { 0x83, 0x7c, 0xa9, 0x30, 0xda, 0x05, 0xa7, 0x4a } };
+static const GUID IID_ISystemUIStatics_ =      /* o do FH2: ShowVirtualKeyboardAsync = slot 11 */
+    { 0x1a0dd80e, 0x3f9d, 0x4cfa, { 0x8e, 0x50, 0x0e, 0x2e, 0xbd, 0x1a, 0xa7, 0x2f } };
+static const GUID IID_IKeyboardOptions_ =
+    { 0x74782f58, 0xda5d, 0x4e31, { 0x9e, 0x6e, 0xbd, 0x10, 0xc9, 0x1f, 0x1b, 0xe7 } };
 static const GUID IID_IAsyncInfo_ = { 0x00000036, 0x0000, 0x0000, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
 static const GUID IID_IAsyncOperation_String_ =
     { 0x3e1fe603, 0xf897, 0x5263, { 0xb3, 0x28, 0x08, 0x06, 0x42, 0x6b, 0x8a, 0x79 } };
 #define RVA_HSTRING_ALLOC   0xb2e10    /* (len) -> HSTRING local do Azimuth; texto em [h+0x10] */
 #define KBD_OPTION_SLOTS    20
-#define KBD_DEFAULT_TEXT    7
 enum { ASYNC_STARTED, ASYNC_COMPLETED, ASYNC_CANCELED, ASYNC_ERROR };
 #ifndef E_ILLEGAL_METHOD_CALL
 #define E_ILLEGAL_METHOD_CALL ((long)0x8000000eL)
@@ -137,13 +142,14 @@ static long hstring_new(const wchar_t *s, uint32_t len, void **out)
 }
 
 /* --- KeyboardOptions --- */
-typedef struct { void *const *vtbl; volatile LONG refs; uint32_t len; wchar_t *text; } KbdOptions;
+enum { KBD_DEFAULT, KBD_TITLE, KBD_DESCRIPTION, KBD_N };      /* slots 7/9/11 (put) e 6/8/10 (get) */
+typedef struct { void *const *vtbl; volatile LONG refs; uint32_t len[KBD_N]; wchar_t *text[KBD_N]; } KbdOptions;
 
 static long STDMETHODCALLTYPE ko_QueryInterface(KbdOptions *self, const GUID *iid, void **out)
 {
     if (!out) return E_POINTER;
     if (IsEqualGUID(iid, &IID_IUnknown_) || IsEqualGUID(iid, &IID_IInspectable_) ||
-        IsEqualGUID(iid, &IID_IAgileObject_)) {
+        IsEqualGUID(iid, &IID_IAgileObject_) || IsEqualGUID(iid, &IID_IKeyboardOptions_)) {
         InterlockedIncrement(&self->refs);
         *out = self;
         return S_OK;
@@ -156,29 +162,35 @@ static ULONG STDMETHODCALLTYPE ko_AddRef(KbdOptions *self) { return (ULONG)Inter
 static ULONG STDMETHODCALLTYPE ko_Release(KbdOptions *self)
 {
     LONG n = InterlockedDecrement(&self->refs);
-    if (!n) { free(self->text); free(self); }
+    int i;
+    if (!n) {
+        for (i = 0; i < KBD_N; i++) free(self->text[i]);
+        free(self);
+    }
     return (ULONG)n;
 }
-static long STDMETHODCALLTYPE ko_get_DefaultText(KbdOptions *self, void **out)
+static long ko_get(KbdOptions *self, int i, void **out)
 {
     if (!out) return E_POINTER;
-    return hstring_new(self->text, self->len, out);
+    return hstring_new(self->text[i], self->len[i], out);
 }
-static long STDMETHODCALLTYPE ko_put_DefaultText(KbdOptions *self, const LocalHString *h)
+static long ko_put(KbdOptions *self, int i, const LocalHString *h)
 {
     uint32_t len;
     wchar_t *s = hstring_dup(h, &len);
-    free(self->text);
-    self->text = s;
-    self->len = s ? len : 0;
+    free(self->text[i]);
+    self->text[i] = s;
+    self->len[i] = s ? len : 0;
     return S_OK;
 }
-static long STDMETHODCALLTYPE ko_get_String(KbdOptions *self, void **out)
+static long STDMETHODCALLTYPE ko_get_DefaultText(KbdOptions *self, void **out) { return ko_get(self, KBD_DEFAULT, out); }
+static long STDMETHODCALLTYPE ko_put_DefaultText(KbdOptions *self, const LocalHString *h) { return ko_put(self, KBD_DEFAULT, h); }
+static long STDMETHODCALLTYPE ko_get_Title(KbdOptions *self, void **out) { return ko_get(self, KBD_TITLE, out); }
+static long STDMETHODCALLTYPE ko_put_Title(KbdOptions *self, const LocalHString *h) { return ko_put(self, KBD_TITLE, h); }
+static long STDMETHODCALLTYPE ko_get_Description(KbdOptions *self, void **out) { return ko_get(self, KBD_DESCRIPTION, out); }
+static long STDMETHODCALLTYPE ko_put_Description(KbdOptions *self, const LocalHString *h)
 {
-    (void)self;
-    if (!out) return E_POINTER;
-    *out = NULL;
-    return S_OK;
+    return ko_put(self, KBD_DESCRIPTION, h);
 }
 static long STDMETHODCALLTYPE ko_get_UInt32(KbdOptions *self, uint32_t *out)
 {
@@ -200,8 +212,8 @@ static void *const kbd_options_vtbl[KBD_OPTION_SLOTS] = {
     (void *)ko_QueryInterface, (void *)ko_AddRef, (void *)ko_Release,
     (void *)sf_GetIids, (void *)sf_GetRuntimeClassName, (void *)sf_GetTrustLevel,
     (void *)ko_get_DefaultText, (void *)ko_put_DefaultText,      /* 6/7 */
-    (void *)ko_get_String, (void *)ko_put_ignored,               /* 8/9 */
-    (void *)ko_get_String, (void *)ko_put_ignored,               /* 10/11 */
+    (void *)ko_get_Title, (void *)ko_put_Title,                  /* 8/9 */
+    (void *)ko_get_Description, (void *)ko_put_Description,      /* 10/11 */
     (void *)ko_get_UInt32, (void *)ko_put_ignored,               /* 12/13 */
     (void *)ko_get_Boolean, (void *)ko_put_ignored,              /* 14/15 */
     (void *)ko_get_UInt32, (void *)ko_put_ignored,               /* 16/17 */
@@ -336,21 +348,18 @@ static long STDMETHODCALLTYPE kui_QueryInterface(StubFactory *self, const GUID *
     return E_NOINTERFACE;
 }
 
-/* slot 6: ShowVirtualKeyboard com KeyboardOptions -> operacao concluida com o texto padrao */
-static long STDMETHODCALLTYPE kui_show_keyboard(StubFactory *self, const KbdOptions *opts, void **out)
+/* reserva: operacao propria ja concluida com o texto padrao (Canceled se vazio) */
+static KbdOp *kbd_op_closed(const KbdOptions *opts)
 {
-    KbdOp *op;
-    (void)self;
-    if (!out) return E_POINTER;
-    *out = NULL;
-    if (!(op = calloc(1, sizeof *op))) return E_OUTOFMEMORY;
+    KbdOp *op = calloc(1, sizeof *op);
+    if (!op) return NULL;
     op->vtbl = kbd_op_vtbl;
     op->info_vtbl = kbd_info_vtbl;
     op->refs = 1;
     op->status = ASYNC_CANCELED;
-    if (opts && opts->vtbl == kbd_options_vtbl && opts->len && (op->text = malloc(opts->len * sizeof(wchar_t)))) {
-        memcpy(op->text, opts->text, opts->len * sizeof(wchar_t));
-        op->len = opts->len;
+    if (opts->len[KBD_DEFAULT] && (op->text = malloc(opts->len[KBD_DEFAULT] * sizeof(wchar_t)))) {
+        memcpy(op->text, opts->text[KBD_DEFAULT], opts->len[KBD_DEFAULT] * sizeof(wchar_t));
+        op->len = opts->len[KBD_DEFAULT];
         op->status = ASYNC_COMPLETED;
     }
     if (op->status == ASYNC_COMPLETED)
@@ -358,8 +367,53 @@ static long STDMETHODCALLTYPE kui_show_keyboard(StubFactory *self, const KbdOpti
              op->text);
     else
         wlog("winrt: SystemUI virtual keyboard -> closed at once (canceled, no default text)");
-    *out = op;
-    return S_OK;
+    return op;
+}
+
+/*
+ * ShowVirtualKeyboardAsync do Azimuth (o do FH2: statics 1a0dd80e slot 11 (default, titulo, descricao, escopo, out)
+ * -> IAsyncOperation<String> com a janela de texto do Azimuth). Os HSTRINGs passados ficam com o Azimuth (nao ha
+ * como solta-los daqui; poucos bytes por teclado aberto). Escopo 0 (Default): o significado dos inteiros das
+ * opcoes nao e conhecido.
+ */
+typedef long (STDMETHODCALLTYPE *show_keyboard_fn)(void *self, void *def, void *title, void *desc, int scope,
+                                                   void **out);
+static long azimuth_keyboard(const KbdOptions *opts, void **out)
+{
+    void ***st = NULL, *h[KBD_N];
+    long hr;
+    int i;
+    *out = NULL;
+    hr = winrt_factory_orig(SYSTEM_UI, &IID_ISystemUIStatics_, (void **)&st);
+    if (hr < 0 || !st) return hr < 0 ? hr : E_FAIL;
+    for (i = 0; i < KBD_N && hr >= 0; i++) hr = hstring_new(opts->text[i], opts->len[i], &h[i]);
+    if (hr >= 0) hr = ((show_keyboard_fn)(*st)[11])(st, h[KBD_DEFAULT], h[KBD_TITLE], h[KBD_DESCRIPTION], 0, out);
+    ((ULONG (STDMETHODCALLTYPE *)(void *))(*st)[2])(st);
+    if (hr >= 0 && !*out) hr = E_FAIL;
+    return hr;
+}
+
+/* slot 6: ShowVirtualKeyboard(KeyboardOptions) -> teclado do Azimuth; se ele falhar, fecha na hora */
+static long STDMETHODCALLTYPE kui_show_keyboard(StubFactory *self, const KbdOptions *opts, void **out)
+{
+    static const KbdOptions empty = { kbd_options_vtbl, 0, { 0 }, { 0 } };
+    long hr;
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!opts || opts->vtbl != kbd_options_vtbl) {
+        wlog("winrt: SystemUI virtual keyboard: options are not ours");
+        opts = &empty;
+    }
+    hr = azimuth_keyboard(opts, out);
+    if (hr >= 0) {
+        wlog("winrt: SystemUI virtual keyboard -> Azimuth text input (default \"%.*ls\")",
+             (int)opts->len[KBD_DEFAULT], opts->text[KBD_DEFAULT] ? opts->text[KBD_DEFAULT] : L"");
+        return S_OK;
+    }
+    wlog("winrt: SystemUI virtual keyboard: Azimuth ShowVirtualKeyboardAsync failed hr=%#lx", hr);
+    *out = kbd_op_closed(opts);
+    return *out ? S_OK : E_OUTOFMEMORY;
 }
 
 static long STDMETHODCALLTYPE kui_unsupported(StubFactory *self)
