@@ -30,6 +30,14 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **FM5:** the Particles and Motion Blur presets have no effect.
 - No Xbox Live features (Rivals, online play, leaderboards).
 
+## v1.4.0 — FM5 sun flare fix and FM6 crash fix
+
+### Fixes
+- **FM5:** the colored line across the sun lens flare is now really gone. The v1.3.1 fix covered only part of
+  the problem: the last row of the smaller mip levels of some compressed textures (such as the lens dirt) was
+  still never uploaded to the GPU, so leftover memory kept showing up on screen.
+- **FM6:** random driver crash (device removed after a GPU page fault) during races and in the menus.
+
 ## v1.3.1 — FM5 tuning chart and sun flare fixes
 
 ### Fixes
