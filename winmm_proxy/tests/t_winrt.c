@@ -330,3 +330,99 @@ TEST(core_app_context_current_user)
     CHECK_EQ(hook_get_factory(L"Windows.Xbox.System.User", &statics_iid, &out), REGDB_E_CLASSNOTREG);
     CHECK_EQ(orig_factory_calls, 2);
 }
+
+/* ---- FM6: teclado virtual (KeyboardOptions + SystemUI 01f75706) ---- */
+static uint8_t *fake_hstring_alloc(uint32_t len)
+{
+    uint8_t *h = calloc(1, 0x18 + (len + 1) * 2);
+    *(uint32_t *)h = HSTRING_MAGIC;
+    *(uint32_t *)(h + 4) = len;
+    *(uint32_t *)(h + 8) = *(uint32_t *)(h + 0xc) = 1;
+    *(uint8_t **)(h + 0x10) = h + 0x18;
+    return h;
+}
+static int handler_calls, handler_status;
+static void *handler_op;
+static long STDMETHODCALLTYPE fake_invoke(void *self, void *op, int status)
+{
+    (void)self;
+    handler_calls++; handler_op = op; handler_status = status;
+    return S_OK;
+}
+static void *fake_handler_vtbl[4] = { NULL, NULL, NULL, (void *)fake_invoke };
+static void *fake_handler = fake_handler_vtbl;
+
+typedef long (STDMETHODCALLTYPE *slot_fn)(void *, ...);
+#define VCALL(obj, slot, ...) (((slot_fn)(*(void ***)(obj))[slot])((obj), ##__VA_ARGS__))
+
+TEST(keyboard_options_and_system_ui)
+{
+    static const GUID kbd_iid = { 0x01f75706, 0x9df0, 0x44d8, { 0x83, 0x7c, 0xa9, 0x30, 0xda, 0x05, 0xa7, 0x4a } };
+    static const GUID old_iid = { 0x1a0dd80e, 0x3f9d, 0x4cfa, { 0x8e, 0x50, 0x0e, 0x2e, 0xbd, 0x1a, 0xa7, 0x2f } };
+    static const GUID info_iid = { 0x00000036, 0, 0, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+    uint8_t *az = fake_azimuth(2);
+    LocalHString name = { HSTRING_MAGIC, 7, 0, L"My Tune" };
+    void *fac = NULL, *opts = NULL, *opts2 = NULL, *ui = NULL, *op = NULL, *info = NULL;
+    uint8_t *res = NULL;
+    uint32_t status = 9;
+    /* prologo real (mov [rsp+8],rbx ; push rdi ; sub rsp,0x20 ; mov edi,ecx) + add rsp,0x20 ; pop rdi ; jmp */
+    memcpy(az + 0xb2e10, "\x48\x89\x5c\x24\x08\x57\x48\x83\xec\x20\x8b\xf9\x48\x83\xc4\x20\x5f", 17);
+    jmp_to(az + 0xb2e10 + 17, (void *)fake_hstring_alloc);
+    orig_get_factory = fake_orig_factory;
+    orig_factory_calls = 0;
+    log_capture();
+
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.UI.KeyboardOptions", &IID_IActivationFactory_, &fac), S_OK);
+    REQUIRE(fac != NULL);
+    CHECK_EQ(VCALL(fac, 6, &opts), S_OK);                        /* ActivateInstance */
+    REQUIRE(opts != NULL);
+    CHECK_EQ(VCALL(opts, 7, &name), S_OK);                       /* put_DefaultText */
+    CHECK_EQ(VCALL(opts, 9, NULL), S_OK);
+    CHECK_EQ(VCALL(opts, 15, 1), S_OK);
+    CHECK_EQ(VCALL(opts, 19, 40), S_OK);
+
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.UI.SystemUI", &kbd_iid, &ui), S_OK);
+    REQUIRE(ui != NULL);
+    CHECK_EQ(orig_factory_calls, 0);
+    CHECK_EQ(VCALL(ui, 6, opts, &op), S_OK);                     /* ShowVirtualKeyboard(options) */
+    REQUIRE(op != NULL);
+    CHECK(log_has("closed at once with the default text \"My Tune\""));
+    CHECK_EQ(VCALL(op, 0, &info_iid, &info), S_OK);
+    REQUIRE(info != NULL);
+    CHECK_EQ(VCALL(info, 7, &status), S_OK);                     /* get_Status */
+    CHECK_EQ(status, 1);
+    CHECK_EQ(VCALL(op, 8, &res), S_OK);                          /* GetResults */
+    REQUIRE(res != NULL);
+    CHECK_EQ(*(uint32_t *)res, HSTRING_MAGIC);
+    CHECK_EQ(*(uint32_t *)(res + 4), 7);
+    CHECK(!memcmp(*(wchar_t **)(res + 0x10), L"My Tune", 14));
+    CHECK_EQ(VCALL(op, 6, &fake_handler), S_OK);                 /* put_Completed: handler na hora */
+    CHECK(handler_calls == 1 && handler_op == op && handler_status == 1);
+    CHECK_EQ(VCALL(info, 2), 1);                                 /* Release via IAsyncInfo */
+    CHECK_EQ(VCALL(op, 2), 0);
+    free(res);
+
+    /* sem texto padrao -> cancelado */
+    CHECK_EQ(VCALL(fac, 6, &opts2), S_OK);
+    op = NULL;
+    CHECK_EQ(VCALL(ui, 6, opts2, &op), S_OK);
+    REQUIRE(op != NULL);
+    CHECK(log_has("closed at once (canceled, no default text)"));
+    CHECK_EQ(VCALL(op, 0, &info_iid, &info), S_OK);
+    CHECK_EQ(VCALL(info, 7, &status), S_OK);
+    CHECK_EQ(status, 2);
+    res = (uint8_t *)1;
+    CHECK_EQ(VCALL(op, 8, &res), E_ILLEGAL_METHOD_CALL);
+    CHECK(res == NULL);
+    CHECK_EQ(VCALL(info, 2), 1);
+    CHECK_EQ(VCALL(op, 2), 0);
+    CHECK_EQ(VCALL(opts, 2), 0);
+    CHECK_EQ(VCALL(opts2, 2), 0);
+
+    /* SystemUI com a interface do FH2 e FM5: seguem para o Azimuth */
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.UI.SystemUI", &old_iid, &ui), REGDB_E_CLASSNOTREG);
+    fake_azimuth(1);
+    CHECK_EQ(hook_get_factory(L"Windows.Xbox.UI.KeyboardOptions", &IID_IActivationFactory_, &fac),
+             REGDB_E_CLASSNOTREG);
+    CHECK_EQ(orig_factory_calls, 2);
+}

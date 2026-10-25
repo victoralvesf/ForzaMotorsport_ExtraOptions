@@ -2,7 +2,9 @@
  * Ativacao WinRT do FM6 (common/winrt.c): CoreApplicationContext.CurrentUser e o GameChat no layout do FM6.
  */
 #include <windows.h>
+#include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include "../proxy.h"
 #include "../common/winrt.h"
@@ -73,11 +75,318 @@ static void *const cac_vtbl[] = {
 };
 static StubFactory core_app_context = { cac_vtbl, CORE_APP_CONTEXT };
 
+/* ------------------------------------------------------------------------ */
+/* FM6: teclado virtual (Windows.Xbox.UI.KeyboardOptions + SystemUI 01f75706) */
+/* ------------------------------------------------------------------------ */
+/*
+ * Nomear um tune/setup (game+0xcaf7d0): ref new KeyboardOptions (fabrica + ActivateInstance, o objeto e usado como
+ * IKeyboardOptions sem QI), 7 setters (slot 7 = texto padrao, o nome atual do jogo em [this+0x460]; 9/11 = strings
+ * de titulo/descricao; 13/17/19 = inteiros; 15 = Boolean), depois os statics de SystemUI com o iid 01f75706 (o FH2
+ * so usa o 1a0dd80e), slot 6 (options) -> IAsyncOperation<String>. O jogo guarda a operacao e consulta por
+ * polling (game+0xcb1f74): QI IAsyncInfo, get_Status 1 -> GetResults vira o nome; 2 = cancelado; 3 = erro.
+ * O Azimuth nao tem KeyboardOptions nem essa interface -> STOPPED "activation Windows.Xbox.UI.KeyboardOptions".
+ * => objetos proprios: as opcoes guardam o texto padrao; o teclado "fecha na hora" (como o Azimuth faz com as
+ *    telas do sistema no FH2) aceitando o texto padrao (Completed); sem texto padrao = Canceled.
+ */
+static const wchar_t KEYBOARD_OPTIONS[] = L"Windows.Xbox.UI.KeyboardOptions";
+static const wchar_t SYSTEM_UI[] = L"Windows.Xbox.UI.SystemUI";
+static const GUID IID_ISystemUIStatics_Kbd_ =
+    { 0x01f75706, 0x9df0, 0x44d8, { 0x83, 0x7c, 0xa9, 0x30, 0xda, 0x05, 0xa7, 0x4a } };
+static const GUID IID_IAsyncInfo_ = { 0x00000036, 0x0000, 0x0000, { 0xc0, 0, 0, 0, 0, 0, 0, 0x46 } };
+static const GUID IID_IAsyncOperation_String_ =
+    { 0x3e1fe603, 0xf897, 0x5263, { 0xb3, 0x28, 0x08, 0x06, 0x42, 0x6b, 0x8a, 0x79 } };
+#define RVA_HSTRING_ALLOC   0xb2e10    /* (len) -> HSTRING local do Azimuth; texto em [h+0x10] */
+#define KBD_OPTION_SLOTS    20
+#define KBD_DEFAULT_TEXT    7
+enum { ASYNC_STARTED, ASYNC_COMPLETED, ASYNC_CANCELED, ASYNC_ERROR };
+#ifndef E_ILLEGAL_METHOD_CALL
+#define E_ILLEGAL_METHOD_CALL ((long)0x8000000eL)
+#endif
+
+typedef uint8_t *(*hstring_alloc_fn)(uint32_t len);
+
+/* texto de um HSTRING do Azimuth (copia em malloc, NULL = vazio) */
+static wchar_t *hstring_dup(const LocalHString *h, uint32_t *len)
+{
+    wchar_t *s;
+    *len = 0;
+    if (!h) return NULL;
+    if (h->magic != HSTRING_MAGIC) { wlog("winrt: keyboard: foreign HSTRING ignored"); return NULL; }
+    if (!h->len || !(s = malloc((h->len + 1) * sizeof(wchar_t)))) return NULL;
+    memcpy(s, h->buf, h->len * sizeof(wchar_t));
+    s[h->len] = 0;
+    *len = h->len;
+    return s;
+}
+
+static long hstring_new(const wchar_t *s, uint32_t len, void **out)
+{
+    uint8_t *h;
+    *out = NULL;
+    if (!len) return S_OK;
+    /* mov [rsp+8],rbx ; push rdi ; sub rsp,0x20 ; mov edi,ecx */
+    if (!bytes_match(g_base + RVA_HSTRING_ALLOC, "48895c2408" "57" "4883ec20" "8bf9", 12)) {
+        wlog("winrt: keyboard: %#x does not match", RVA_HSTRING_ALLOC);
+        return E_FAIL;
+    }
+    h = ((hstring_alloc_fn)(g_base + RVA_HSTRING_ALLOC))(len);
+    if (!h) return E_OUTOFMEMORY;
+    memcpy(*(void **)(h + 0x10), s, len * sizeof(wchar_t));
+    *out = h;
+    return S_OK;
+}
+
+/* --- KeyboardOptions --- */
+typedef struct { void *const *vtbl; volatile LONG refs; uint32_t len; wchar_t *text; } KbdOptions;
+
+static long STDMETHODCALLTYPE ko_QueryInterface(KbdOptions *self, const GUID *iid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(iid, &IID_IUnknown_) || IsEqualGUID(iid, &IID_IInspectable_) ||
+        IsEqualGUID(iid, &IID_IAgileObject_)) {
+        InterlockedIncrement(&self->refs);
+        *out = self;
+        return S_OK;
+    }
+    *out = NULL;
+    wlog("winrt: KeyboardOptions: QI %08lx-... refused", iid->Data1);
+    return E_NOINTERFACE;
+}
+static ULONG STDMETHODCALLTYPE ko_AddRef(KbdOptions *self) { return (ULONG)InterlockedIncrement(&self->refs); }
+static ULONG STDMETHODCALLTYPE ko_Release(KbdOptions *self)
+{
+    LONG n = InterlockedDecrement(&self->refs);
+    if (!n) { free(self->text); free(self); }
+    return (ULONG)n;
+}
+static long STDMETHODCALLTYPE ko_get_DefaultText(KbdOptions *self, void **out)
+{
+    if (!out) return E_POINTER;
+    return hstring_new(self->text, self->len, out);
+}
+static long STDMETHODCALLTYPE ko_put_DefaultText(KbdOptions *self, const LocalHString *h)
+{
+    uint32_t len;
+    wchar_t *s = hstring_dup(h, &len);
+    free(self->text);
+    self->text = s;
+    self->len = s ? len : 0;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE ko_get_String(KbdOptions *self, void **out)
+{
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE ko_get_UInt32(KbdOptions *self, uint32_t *out)
+{
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = 0;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE ko_get_Boolean(KbdOptions *self, uint8_t *out)
+{
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = 0;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE ko_put_ignored(KbdOptions *self, uint64_t v) { (void)self; (void)v; return S_OK; }
+
+static void *const kbd_options_vtbl[KBD_OPTION_SLOTS] = {
+    (void *)ko_QueryInterface, (void *)ko_AddRef, (void *)ko_Release,
+    (void *)sf_GetIids, (void *)sf_GetRuntimeClassName, (void *)sf_GetTrustLevel,
+    (void *)ko_get_DefaultText, (void *)ko_put_DefaultText,      /* 6/7 */
+    (void *)ko_get_String, (void *)ko_put_ignored,               /* 8/9 */
+    (void *)ko_get_String, (void *)ko_put_ignored,               /* 10/11 */
+    (void *)ko_get_UInt32, (void *)ko_put_ignored,               /* 12/13 */
+    (void *)ko_get_Boolean, (void *)ko_put_ignored,              /* 14/15 */
+    (void *)ko_get_UInt32, (void *)ko_put_ignored,               /* 16/17 */
+    (void *)ko_get_UInt32, (void *)ko_put_ignored,               /* 18/19 */
+};
+
+static long STDMETHODCALLTYPE ko_ActivateInstance(StubFactory *self, void **out)
+{
+    KbdOptions *o;
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(o = calloc(1, sizeof *o))) return E_OUTOFMEMORY;
+    o->vtbl = kbd_options_vtbl;
+    o->refs = 1;
+    *out = o;
+    return S_OK;
+}
+static void *const ko_factory_vtbl[] = {
+    (void *)sf_QueryInterface, (void *)sf_AddRef, (void *)sf_Release,
+    (void *)sf_GetIids, (void *)sf_GetRuntimeClassName, (void *)sf_GetTrustLevel,
+    (void *)ko_ActivateInstance,
+};
+static StubFactory kbd_options_factory = { ko_factory_vtbl, KEYBOARD_OPTIONS };
+
+/* --- IAsyncOperation<String> ja concluida (op em +0, IAsyncInfo em +8) --- */
+typedef struct {
+    void *const *vtbl, *const *info_vtbl;
+    volatile LONG refs;
+    uint32_t status, len;
+    wchar_t *text;
+} KbdOp;
+#define OP_OF_INFO(p) ((KbdOp *)((uint8_t *)(p) - offsetof(KbdOp, info_vtbl)))
+
+static long STDMETHODCALLTYPE op_QueryInterface(KbdOp *self, const GUID *iid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(iid, &IID_IUnknown_) || IsEqualGUID(iid, &IID_IInspectable_) ||
+        IsEqualGUID(iid, &IID_IAgileObject_) || IsEqualGUID(iid, &IID_IAsyncOperation_String_))
+        *out = self;
+    else if (IsEqualGUID(iid, &IID_IAsyncInfo_))
+        *out = &self->info_vtbl;
+    else {
+        *out = NULL;
+        wlog("winrt: keyboard operation: QI %08lx-... refused", iid->Data1);
+        return E_NOINTERFACE;
+    }
+    InterlockedIncrement(&self->refs);
+    return S_OK;
+}
+static ULONG STDMETHODCALLTYPE op_AddRef(KbdOp *self) { return (ULONG)InterlockedIncrement(&self->refs); }
+static ULONG STDMETHODCALLTYPE op_Release(KbdOp *self)
+{
+    LONG n = InterlockedDecrement(&self->refs);
+    if (!n) { free(self->text); free(self); }
+    return (ULONG)n;
+}
+/* ja concluida: o handler roda na hora (Invoke = slot 3 do delegate) */
+static long STDMETHODCALLTYPE op_put_Completed(KbdOp *self, void ***handler)
+{
+    if (handler) ((long (STDMETHODCALLTYPE *)(void *, void *, int))(*handler)[3])(handler, self, (int)self->status);
+    return S_OK;
+}
+static long STDMETHODCALLTYPE op_get_Completed(KbdOp *self, void **out)
+{
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE op_GetResults(KbdOp *self, void **out)
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (self->status != ASYNC_COMPLETED) return E_ILLEGAL_METHOD_CALL;
+    return hstring_new(self->text, self->len, out);
+}
+
+static void *const kbd_op_vtbl[] = {
+    (void *)op_QueryInterface, (void *)op_AddRef, (void *)op_Release,
+    (void *)sf_GetIids, (void *)sf_GetRuntimeClassName, (void *)sf_GetTrustLevel,
+    (void *)op_put_Completed, (void *)op_get_Completed, (void *)op_GetResults,
+};
+
+static long STDMETHODCALLTYPE info_QueryInterface(void *self, const GUID *iid, void **out)
+{
+    return op_QueryInterface(OP_OF_INFO(self), iid, out);
+}
+static ULONG STDMETHODCALLTYPE info_AddRef(void *self) { return op_AddRef(OP_OF_INFO(self)); }
+static ULONG STDMETHODCALLTYPE info_Release(void *self) { return op_Release(OP_OF_INFO(self)); }
+static long STDMETHODCALLTYPE info_get_Id(void *self, uint32_t *out)
+{
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = 1;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE info_get_Status(void *self, uint32_t *out)
+{
+    if (!out) return E_POINTER;
+    *out = OP_OF_INFO(self)->status;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE info_get_ErrorCode(void *self, long *out)
+{
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = S_OK;
+    return S_OK;
+}
+static long STDMETHODCALLTYPE info_Cancel(void *self) { (void)self; return S_OK; }
+static long STDMETHODCALLTYPE info_Close(void *self) { (void)self; return S_OK; }
+
+static void *const kbd_info_vtbl[] = {
+    (void *)info_QueryInterface, (void *)info_AddRef, (void *)info_Release,
+    (void *)sf_GetIids, (void *)sf_GetRuntimeClassName, (void *)sf_GetTrustLevel,
+    (void *)info_get_Id, (void *)info_get_Status, (void *)info_get_ErrorCode, (void *)info_Cancel,
+    (void *)info_Close,
+};
+
+/* --- SystemUI statics 01f75706 --- */
+static long STDMETHODCALLTYPE kui_QueryInterface(StubFactory *self, const GUID *iid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID(iid, &IID_IUnknown_) || IsEqualGUID(iid, &IID_IInspectable_) ||
+        IsEqualGUID(iid, &IID_IAgileObject_) || IsEqualGUID(iid, &IID_ISystemUIStatics_Kbd_)) {
+        *out = self;
+        return S_OK;
+    }
+    *out = NULL;
+    wlog("winrt: SystemUI (keyboard statics): QI %08lx-... refused", iid->Data1);
+    return E_NOINTERFACE;
+}
+
+/* slot 6: ShowVirtualKeyboard com KeyboardOptions -> operacao concluida com o texto padrao */
+static long STDMETHODCALLTYPE kui_show_keyboard(StubFactory *self, const KbdOptions *opts, void **out)
+{
+    KbdOp *op;
+    (void)self;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(op = calloc(1, sizeof *op))) return E_OUTOFMEMORY;
+    op->vtbl = kbd_op_vtbl;
+    op->info_vtbl = kbd_info_vtbl;
+    op->refs = 1;
+    op->status = ASYNC_CANCELED;
+    if (opts && opts->vtbl == kbd_options_vtbl && opts->len && (op->text = malloc(opts->len * sizeof(wchar_t)))) {
+        memcpy(op->text, opts->text, opts->len * sizeof(wchar_t));
+        op->len = opts->len;
+        op->status = ASYNC_COMPLETED;
+    }
+    if (op->status == ASYNC_COMPLETED)
+        wlog("winrt: SystemUI virtual keyboard -> closed at once with the default text \"%.*ls\"", (int)op->len,
+             op->text);
+    else
+        wlog("winrt: SystemUI virtual keyboard -> closed at once (canceled, no default text)");
+    *out = op;
+    return S_OK;
+}
+
+static long STDMETHODCALLTYPE kui_unsupported(StubFactory *self)
+{
+    (void)self;
+    wlog("winrt: SystemUI (keyboard statics) slot 7 not supported");
+    return E_NOTIMPL;
+}
+
+static void *const kui_vtbl[] = {
+    (void *)kui_QueryInterface, (void *)sf_AddRef, (void *)sf_Release,
+    (void *)sf_GetIids, (void *)sf_GetRuntimeClassName, (void *)sf_GetTrustLevel,
+    (void *)kui_show_keyboard, (void *)kui_unsupported,
+};
+static StubFactory keyboard_ui = { kui_vtbl, SYSTEM_UI };
+
 long fm6_winrt_factory(const wchar_t *cls, const GUID *iid, void **out, int *handled)
 {
     long hr;
-    if (wcscmp(cls, CORE_APP_CONTEXT)) return 0;
-    hr = cac_QueryInterface(&core_app_context, iid, out);
+    if (!wcscmp(cls, CORE_APP_CONTEXT))
+        hr = cac_QueryInterface(&core_app_context, iid, out);
+    else if (!wcscmp(cls, KEYBOARD_OPTIONS))
+        hr = sf_QueryInterface(&kbd_options_factory, iid, out);
+    else if (!wcscmp(cls, SYSTEM_UI) && IsEqualGUID(iid, &IID_ISystemUIStatics_Kbd_))
+        hr = kui_QueryInterface(&keyboard_ui, iid, out);
+    else
+        return 0;
     wlog("winrt: activation %ls iid=%08lx-... -> proxy statics hr=%#lx", cls, iid->Data1, hr);
     *handled = 1;
     return hr;
