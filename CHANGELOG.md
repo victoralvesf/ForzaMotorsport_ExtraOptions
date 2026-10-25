@@ -30,6 +30,14 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **FM5:** the Particles and Motion Blur presets have no effect.
 - No Xbox Live features (Rivals, online play, leaderboards).
 
+## Unreleased
+
+### Improvements
+- **FM6:** fewer stutters while racing. The proxy did extra CPU work on the game's own threads: it copied large
+  blocks of render state for every nested draw bundle, searched long lists on every draw call, and scanned all
+  live textures whenever a new streamed texture was created. That work is now much smaller, roughly halving the
+  frame spikes in a race and lowering the CPU time of the game's command recording threads.
+
 ## v1.4.1 — FM6 tuning setup name fix
 
 ### Fixes
