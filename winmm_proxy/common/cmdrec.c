@@ -81,7 +81,8 @@ static SRWLOCK rc_lock = SRWLOCK_INIT;
 static rc_list *rc_free;
 static LONG rc_nfree;
 static volatile LONG rc_live, rc_opens, rc_execs, rc_reals, rc_cmds, rc_slots_total, rc_oom_logged;
-static volatile LONG64 rc_ticks;
+static volatile LONG rc_bounds;
+static volatile LONG64 rc_ticks, rc_bound_ticks, rc_reset_ticks;   /* reproducao total; fronteiras; Reset+Close */
 static LARGE_INTEGER rc_freq;
 
 static int rc_is(const void *p) { return p && *(const void *const *)p == (const void *)&rc_vt; }
@@ -807,7 +808,9 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
     rc_queue *rq = *rqp;
     UINT i = 0, k = 0, j;
     int pred;
-    LARGE_INTEGER t0, t1;
+    LARGE_INTEGER t0, t1, b0, b1;
+    LONG64 bt = 0, rt = 0;
+    LONG nb = 0;
     if (!rq) {
         if (!(rq = calloc(1, sizeof *rq))) return 0;
         if (FAILED(q->lpVtbl->GetDevice(q, &IID_ID3D12Device, (void **)&rq->dev))) { free(rq); return 0; }
@@ -833,13 +836,20 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
             continue;
         }
         g = s->l;
+        QueryPerformanceCounter(&b0);
         g->lpVtbl->Reset(g, s->a, L(l[i])->pso0);
+        QueryPerformanceCounter(&b1);
+        rt += b1.QuadPart - b0.QuadPart;
         for (pred = 0; i < j; i++) {
             rc_list *f = L(l[i]);
             if (k && rq->out[k - 1] == (ID3D12CommandList *)g) {   /* fronteira: estado de lista recem aberta */
+                QueryPerformanceCounter(&b0);
                 if (pred) g->lpVtbl->SetPredication(g, NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
                 g->lpVtbl->ClearState(g, f->pso0);
                 gg_cl_restart(g, f->pso0);
+                QueryPerformanceCounter(&b1);
+                bt += b1.QuadPart - b0.QuadPart;
+                nb++;
             }
             pred = f->pred;
             if (f->open || f->oom) {
@@ -851,7 +861,11 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
             InterlockedIncrement(&rc_execs);
             if (!k || rq->out[k - 1] != (ID3D12CommandList *)g) rq->out[k++] = (ID3D12CommandList *)g;
         }
-        if (FAILED(hr = g->lpVtbl->Close(g))) {
+        QueryPerformanceCounter(&b0);
+        hr = g->lpVtbl->Close(g);
+        QueryPerformanceCounter(&b1);
+        rt += b1.QuadPart - b0.QuadPart;
+        if (FAILED(hr)) {
             static volatile LONG bad;
             LONG c = InterlockedIncrement(&bad);
             if (c <= 8 || (c & (c - 1)) == 0) wlog("d3d: unified lists: Close of real list %p failed hr=%#lx (#%ld)", g, hr, c);
@@ -861,6 +875,9 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
     }
     QueryPerformanceCounter(&t1);
     InterlockedAdd64(&rc_ticks, t1.QuadPart - t0.QuadPart);
+    InterlockedAdd64(&rc_bound_ticks, bt);
+    InterlockedAdd64(&rc_reset_ticks, rt);
+    InterlockedAdd(&rc_bounds, nb);
     {
         static volatile LONG first;
         if (!first && !InterlockedExchange(&first, 1))
@@ -873,14 +890,17 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
 /* " | gravadoras: ..." da linha "vazao 10 s" (common/stutter.c) */
 int rc_format(char *buf, int cap, double frames)
 {
-    double ms;
+    double ms, bms, rms;
     if (!rc_on) return 0;
     if (!rc_freq.QuadPart) QueryPerformanceFrequency(&rc_freq);
     ms = (double)InterlockedExchange64(&rc_ticks, 0) * 1000.0 / (double)rc_freq.QuadPart;
+    bms = (double)InterlockedExchange64(&rc_bound_ticks, 0) * 1000.0 / (double)rc_freq.QuadPart;
+    rms = (double)InterlockedExchange64(&rc_reset_ticks, 0) * 1000.0 / (double)rc_freq.QuadPart;
     return snprintf(buf, cap, " | recorders: opened %.0f/frame, executed %.0f/frame in %.1f real lists/frame (%.0f commands, "
-                    "%.2f ms), %ld alive, %ld real proxy lists", InterlockedExchange(&rc_opens, 0) / frames,
-                    InterlockedExchange(&rc_execs, 0) / frames, InterlockedExchange(&rc_reals, 0) / frames,
-                    InterlockedExchange(&rc_cmds, 0) / frames, ms / frames, rc_live, rc_slots_total);
+                    "%.2f ms; %.0f boundaries %.2f ms, Reset+Close %.2f ms), %ld alive, %ld real proxy lists",
+                    InterlockedExchange(&rc_opens, 0) / frames, InterlockedExchange(&rc_execs, 0) / frames,
+                    InterlockedExchange(&rc_reals, 0) / frames, InterlockedExchange(&rc_cmds, 0) / frames, ms / frames,
+                    InterlockedExchange(&rc_bounds, 0) / frames, bms / frames, rms / frames, rc_live, rc_slots_total);
 }
 
 /* hook do apply_patches (azimuth.c), depois do pool de listas: inner = CreateCommandList por dentro (gpuguard) */
