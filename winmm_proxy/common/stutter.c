@@ -3558,6 +3558,8 @@ static void vz_poll(LONG64 now)
     wlog("%s", buf);
 }
 
+static int st_samples_on = 1;
+
 static DWORD WINAPI st_sampler(void *arg)
 {
     HANDLE timer = CreateWaitableTimerExW(NULL, NULL, 2 /* HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
@@ -3607,7 +3609,7 @@ static DWORD WINAPI st_sampler(void *arg)
             continue;
         }
         limit = st_stall_ms(st_avg_get(&avg));
-        if (ms_of(now - fs) >= limit && nthr) {
+        if (st_samples_on && ms_of(now - fs) >= limit && nthr) {
             uint32_t i;
             stalled = 1;
             stall_frame_start = fs;
@@ -3748,8 +3750,10 @@ void stutter_install(void)
         }
     }
     for (i = 0; i < 7; i++) n += iat_swap(wait_iat[i], wait_names[i], wait_hooks[i], &wait_real[i]);
-    /* o amostrador suspende as threads a cada ~2 ms nos quadros lentos: com quadros sempre lentos o jogo pausa sozinho */
-    if (dbg_int(L"StutterSamples", 1) > 0) CloseHandle(CreateThread(NULL, 0, st_sampler, NULL, 0, NULL));
-    else wlog("stutter: sampler off (StutterSamples=0)");
+    /* o amostrador suspende as threads a cada ~2 ms nos quadros lentos: com quadros sempre lentos o jogo pausa sozinho;
+     * StutterSamples=0 so desliga as amostras (a thread continua: vazao, fila, GPU) */
+    st_samples_on = dbg_int(L"StutterSamples", 1) > 0;
+    if (!st_samples_on) wlog("stutter: frame samples off (StutterSamples=0)");
+    CloseHandle(CreateThread(NULL, 0, st_sampler, NULL, 0, NULL));
     wlog("stutter: on (spikes >= 25 ms and >= 1.8x the average; %d of 7 azimuth.exe waits measured)", n);
 }
