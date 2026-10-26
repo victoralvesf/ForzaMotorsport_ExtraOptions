@@ -1272,8 +1272,10 @@ static volatile LONG fm6_refs_live, fm6_refs_logged;
 
 static void fm6_refs_note(LONG d, const char *why, int chain)
 {
-    LONG v = InterlockedExchangeAdd(&fm6_refs_live, d) + d;
-    if (v >= 64 && (v & (v - 1)) == 0 && InterlockedExchange(&fm6_refs_logged, v) != v)
+    LONG v = InterlockedExchangeAdd(&fm6_refs_live, d) + d, top = fm6_refs_logged;
+    /* so picos novos: oscilar em volta de uma potencia de 2 enchia o log (debug_user_logs, 177 mil linhas) */
+    if (v >= 64 && (v & (v - 1)) == 0 && v > top &&
+        InterlockedCompareExchange(&fm6_refs_logged, v, top) == top)
         wlog("d3d: %ld references of live nested pieces (%s, chain of %d)", v, why, chain);
 }
 

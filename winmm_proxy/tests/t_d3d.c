@@ -1806,3 +1806,22 @@ TEST(fm6_ui_trace_logs_distinct_rects)
     CHECK(strstr(t, "d3d: UiTrace: scissor n=1 10,20 - 300,400") != NULL);
 }
 
+
+TEST(fm6_live_refs_logged_only_at_new_peaks)
+{
+    const char *t, *a;
+    int i;
+    log_capture();
+    fm6_refs_live = 0; fm6_refs_logged = 0;
+    fm6_refs_note(1024, "nested", 1);
+    for (i = 0; i < 50; i++) {                  /* oscila em volta de 1024: uma linha so */
+        fm6_refs_note(-1, "released", 1);
+        fm6_refs_note(1, "nested", 1);
+    }
+    fm6_refs_note(1024, "nested", 2);
+    t = log_text();
+    a = strstr(t, "d3d: 1024 references of live nested pieces (nested, chain of 1)");
+    CHECK(a && !strstr(a + 1, "d3d: 1024 references"));
+    CHECK(strstr(t, "d3d: 2048 references of live nested pieces (nested, chain of 2)") != NULL);
+    fm6_refs_live = 0; fm6_refs_logged = 0;
+}
