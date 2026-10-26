@@ -242,6 +242,8 @@ static long fm6_CreatePlacementTexture2D(void *dev, const UINT *desc, UINT tile,
 /* Azimuth (layout com o slot 7) por estagio do driver (0 VS, 1 HS, 2 DS, 3 GS, 4 PS, 5 CS): CB e SRV */
 static const uint8_t fm6_stage_cb[6] = { 0x08, 0x3e, 0x42, 0x17, 0x11, 0x47 };
 static const uint8_t fm6_stage_srv[6] = { 0x19, 0x3b, 0x3f, 0x1f, 0x09, 0x43 };
+static const uint8_t fm6_stage_smp[6] = { 0x1a, 0x3d, 0x41, 0x20, 0x0b, 0x46 };
+#define FM6_SMP_SLOTS 16
 typedef struct {
     UINT nrtv, nvp, nsc;
     void *rtv[8], *dsv;
@@ -251,6 +253,11 @@ typedef struct {
     uint8_t ncb[6], nsrv[6];
     void *cb[6][14], *srv[6][128];
     uint64_t cbset[6][1], srvset[6][2];   /* slots gravados (objeto ou NULL): so esses vao para o imediato */
+    /* PASSO 118: samplers (Set*Samplers, SetFast*Sampler, SetFastResources tipo 2); sem eles o bundle desenhava
+       com o sampler padrao (clamp) -> texturas de detalhe do relevo esticadas (pista "low poly") */
+    uint8_t nsmp[6];
+    uint64_t smpset[6][1];
+    void *smp[6][FM6_SMP_SLOTS];
     /* estados de pipeline ligados (FM6_HAS_*: NULL ligado = padrao, tambem herdado) */
     UINT has, stencil_ref, sample_mask;
     void *blend, *depth, *rs;
@@ -540,6 +547,7 @@ static void fm6_om_views(fm6_om *st, int add)
     for (s = 0; s < 6; s++) {
         for (i = 0; i < st->ncb[s]; i++) fm6_obj_ref(st->cb[s][i], add);
         for (i = 0; i < st->nsrv[s]; i++) fm6_obj_ref(st->srv[s][i], add);
+        for (i = 0; i < st->nsmp[s]; i++) fm6_obj_ref(st->smp[s][i], add);
     }
 }
 
@@ -561,6 +569,20 @@ static void fm6_res_note(void *ctx, int srv, UINT stage, UINT start, UINT n, voi
     if (!srv && start + n > d->st.ncb[stage]) d->st.ncb[stage] = (uint8_t)(start + n);
 }
 
+/* samplers ligados num diferido (o bundle aninhado usa os do juntador, como no console) */
+static void fm6_smp_note(void *ctx, UINT stage, UINT start, UINT n, void *const *objs)
+{
+    fm6_dctx_info *d = fm6_dctx_find(ctx);
+    UINT i;
+    if (!d || stage >= 6 || start >= FM6_SMP_SLOTS) return;
+    if (n > FM6_SMP_SLOTS - start) n = FM6_SMP_SLOTS - start;
+    for (i = 0; i < n; i++) {
+        d->st.smp[stage][start + i] = objs ? objs[i] : NULL;
+        d->st.smpset[stage][0] |= 1ull << (start + i);
+    }
+    if (start + n > d->st.nsmp[stage]) d->st.nsmp[stage] = (uint8_t)(start + n);
+}
+
 /* objeto de recurso do Azimuth (os do buffer tambem no UpdateSubresource de placement, abaixo) */
 #define AZ_CTX_DEFERRED   0xc48
 #define AZ_RES_TYPE       0x38
@@ -572,7 +594,7 @@ static int fm6_om_has_res(const fm6_om *st)
 {
     int s;
     for (s = 0; s < 6; s++)
-        if (st->ncb[s] || st->nsrv[s]) return 1;
+        if (st->ncb[s] || st->nsrv[s] || st->nsmp[s]) return 1;
     return 0;
 }
 static void fm6_ver_release(fm6_ver *v)
@@ -688,7 +710,7 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
 {
     void **az = *(void ***)ctx;
     static volatile LONG logged, logged_cb;
-    UINT s, ncb = 0, nsrv = 0;
+    UINT s, ncb = 0, nsrv = 0, nsmp = 0;
     if (o->st.nrtv || o->st.dsv || o->st.nvp)
         ((void (*)(void *, UINT, void *const *, void *))az[AZ_SLOT_OM])(ctx, o->st.nrtv, o->st.rtv, o->st.dsv);
     if (o->st.nvp) ((void (*)(void *, UINT, const float *))az[AZ_SLOT_VIEWPORTS])(ctx, o->st.nvp, &o->st.vp[0][0]);
@@ -704,12 +726,13 @@ static void fm6_om_apply(void *ctx, const fm6_om_item *o)
     for (s = 0; s < 6; s++) {
         ncb += fm6_set_runs(ctx, (set_fn)az[fm6_stage_cb[s]], o->st.cb[s], o->st.cbset[s], o->st.ncb[s]);
         nsrv += fm6_set_runs(ctx, (set_fn)az[fm6_stage_srv[s]], o->st.srv[s], o->st.srvset[s], o->st.nsrv[s]);
+        nsmp += fm6_set_runs(ctx, (set_fn)az[fm6_stage_smp[s]], o->st.smp[s], o->st.smpset[s], o->st.nsmp[s]);
     }
     fm6_upd_apply(ctx, o);
     if (InterlockedIncrement(&logged) <= 4)
         wlog("d3d: inheritance: nested bundle runs with the joiner's OM (%u RTs, DS %p, %u viewports, %u scissors, "
-             "%u CB slots and %u SRV slots parked; blend %s%p, depth %s%p ref %u, rs %s%p)", o->st.nrtv, o->st.dsv,
-             o->st.nvp, o->st.nsc, ncb, nsrv, o->st.has & FM6_HAS_BLEND ? "" : "(not bound) ", o->st.blend,
+             "%u CB slots, %u SRV slots and %u samplers parked; blend %s%p, depth %s%p ref %u, rs %s%p)", o->st.nrtv,
+             o->st.dsv, o->st.nvp, o->st.nsc, ncb, nsrv, nsmp, o->st.has & FM6_HAS_BLEND ? "" : "(not bound) ", o->st.blend,
              o->st.has & FM6_HAS_DEPTH ? "" : "(not bound) ", o->st.depth, o->st.stencil_ref,
              o->st.has & FM6_HAS_RS ? "" : "(not bound) ", o->st.rs);
     if (InterlockedIncrement(&logged_cb) <= 16) {   /* PASSO 49: quais slots de CB a copia liga */
@@ -920,6 +943,12 @@ static void *const fm6_def_cbs[6] = {
     (void *)fm6_def_set_cbs_0, (void *)fm6_def_set_cbs_1, (void *)fm6_def_set_cbs_2,
     (void *)fm6_def_set_cbs_3, (void *)fm6_def_set_cbs_4, (void *)fm6_def_set_cbs_5,
 };
+#define FM6_DEF_SMP(stage)     static void fm6_def_set_smps_##stage(void *ctx, UINT start, UINT n, void *const *smps)     {         fm6_smp_note(ctx, stage, start, n, smps);         ((set_fn)fm6_az_fn(ctx, fm6_stage_smp[stage]))(ctx, start, n, smps);     }
+FM6_DEF_SMP(0) FM6_DEF_SMP(1) FM6_DEF_SMP(2) FM6_DEF_SMP(3) FM6_DEF_SMP(4) FM6_DEF_SMP(5)
+static void *const fm6_def_smps[6] = {
+    (void *)fm6_def_set_smps_0, (void *)fm6_def_set_smps_1, (void *)fm6_def_set_smps_2,
+    (void *)fm6_def_set_smps_3, (void *)fm6_def_set_smps_4, (void *)fm6_def_set_smps_5,
+};
 #define FM6_DEF_FAST(name, srv, stage) \
     static void fm6_def_##name(void *ctx, UINT slot, void *obj) \
     { \
@@ -932,14 +961,18 @@ FM6_DEF_FAST(GSSetFastConstantBuffer, 0, 3) FM6_DEF_FAST(GSSetFastShaderResource
 FM6_DEF_FAST(CSSetFastConstantBuffer, 0, 5) FM6_DEF_FAST(CSSetFastShaderResource, 1, 5)
 FM6_DEF_FAST(HSSetFastConstantBuffer, 0, 1) FM6_DEF_FAST(HSSetFastShaderResource, 1, 1)
 FM6_DEF_FAST(DSSetFastConstantBuffer, 0, 2) FM6_DEF_FAST(DSSetFastShaderResource, 1, 2)
+#define FM6_DEF_FAST_SMP(name, fn, stage)     static void fm6_def_##name(void *ctx, UINT slot, void *obj)     {         fm6_smp_note(ctx, stage, slot, 1, &obj);         fn(ctx, slot, obj);     }
+FM6_DEF_FAST_SMP(PSSetFastSampler, fm6_PSSetFastSampler, 4) FM6_DEF_FAST_SMP(VSSetFastSampler, ctx_VSSetFastSampler, 0)
+FM6_DEF_FAST_SMP(GSSetFastSampler, ctx_GSSetFastSampler, 3) FM6_DEF_FAST_SMP(CSSetFastSampler, ctx_CSSetFastSampler, 5)
+FM6_DEF_FAST_SMP(HSSetFastSampler, ctx_HSSetFastSampler, 1) FM6_DEF_FAST_SMP(DSSetFastSampler, ctx_DSSetFastSampler, 2)
 /* na ordem do fm6_ctx_fast (CB, SRV, sampler por estagio); NULL = sem anotacao */
 static void *const fm6_def_fast[18] = {
-    (void *)fm6_def_PSSetFastConstantBuffer, (void *)fm6_def_PSSetFastShaderResource, NULL,
-    (void *)fm6_def_VSSetFastConstantBuffer, (void *)fm6_def_VSSetFastShaderResource, NULL,
-    (void *)fm6_def_GSSetFastConstantBuffer, (void *)fm6_def_GSSetFastShaderResource, NULL,
-    (void *)fm6_def_CSSetFastConstantBuffer, (void *)fm6_def_CSSetFastShaderResource, NULL,
-    (void *)fm6_def_HSSetFastConstantBuffer, (void *)fm6_def_HSSetFastShaderResource, NULL,
-    (void *)fm6_def_DSSetFastConstantBuffer, (void *)fm6_def_DSSetFastShaderResource, NULL,
+    (void *)fm6_def_PSSetFastConstantBuffer, (void *)fm6_def_PSSetFastShaderResource, (void *)fm6_def_PSSetFastSampler,
+    (void *)fm6_def_VSSetFastConstantBuffer, (void *)fm6_def_VSSetFastShaderResource, (void *)fm6_def_VSSetFastSampler,
+    (void *)fm6_def_GSSetFastConstantBuffer, (void *)fm6_def_GSSetFastShaderResource, (void *)fm6_def_GSSetFastSampler,
+    (void *)fm6_def_CSSetFastConstantBuffer, (void *)fm6_def_CSSetFastShaderResource, (void *)fm6_def_CSSetFastSampler,
+    (void *)fm6_def_HSSetFastConstantBuffer, (void *)fm6_def_HSSetFastShaderResource, (void *)fm6_def_HSSetFastSampler,
+    (void *)fm6_def_DSSetFastConstantBuffer, (void *)fm6_def_DSSetFastShaderResource, (void *)fm6_def_DSSetFastSampler,
 };
 
 /* UpdateSubresource (FM6 0x31 = Azimuth 0x30) de um placement buffer num contexto diferido (game+0x207247): o
@@ -1191,6 +1224,9 @@ static void fm6_SetFastResources(void *ctx, const uint8_t *p, const uint8_t *end
         if (type <= 1 && stage < 6 && (h & 0xff00000) == 0) {
             for (i = 0; i < n; i++) memcpy(&objs[i], q + 4 + i * 16, 8);
             fm6_res_note(ctx, type == 0, stage, slot, n, objs);
+        } else if (type == 2 && stage < 6) {
+            for (i = 0; i < n; i++) memcpy(&objs[i], q + 4 + i * 16, 8);
+            fm6_smp_note(ctx, stage, slot, n, objs);
         }
         q += 4 + (size_t)n * 16;
     }
@@ -1654,7 +1690,10 @@ static int fm6_ctx_table(void **dst, void *const *src, int deferred)
             dst[s] = deferred && i < 18 && fm6_def_fast[i] ? fm6_def_fast[i] : fm6_ctx_fast[i];
     }
     if (deferred)
-        for (i = 0; i < 6; i++) dst[fm6_stage_cb[i] + 1] = fm6_def_cbs[i];   /* Azimuth 8..0x8c = FM6 - 1 */
+        for (i = 0; i < 6; i++) {   /* Azimuth 8..0x8c = FM6 - 1 */
+            dst[fm6_stage_cb[i] + 1] = fm6_def_cbs[i];
+            dst[fm6_stage_smp[i] + 1] = fm6_def_smps[i];
+        }
     if (deferred) dst[0x31] = (void *)fm6_UpdateSubresource;
     /* aliasing da ESRAM (imediato e diferido) e heranca do OM no aninhado (diferido) */
     dst[0x22] = (void *)fm6_def_OMSetRenderTargets;

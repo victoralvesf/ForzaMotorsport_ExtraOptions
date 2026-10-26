@@ -1467,6 +1467,14 @@ static void inh_res_47(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, 
 static void inh_res_43(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x43); }
 static void inh_res_09(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x09); }
 static void inh_res_11(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x11); }
+/* PSSetSamplers do Azimuth (0x0b): samplers herdados do juntador (PASSO 118) */
+static int inh_smp_n;
+static void *inh_smp_ctx, *inh_smp_last;
+static UINT inh_smp_start, inh_smp_cnt;
+static void inh_smp_0b(void *c, UINT s, UINT n, void *const *v)
+{
+    inh_smp_n++; inh_smp_ctx = c; inh_smp_start = s; inh_smp_cnt = n; inh_smp_last = v[n - 1];
+}
 static const uint8_t *fr_p, *fr_end;
 static void *fr_ctx;
 static int fr_n;
@@ -1510,6 +1518,7 @@ TEST(fm6_nested_bundle_inherits_om)
     static inh_view rtv = { inh_view_vt, 1 }, dsv = { inh_view_vt, 1 }, cbv = { inh_view_vt, 1 }, srvv = { inh_view_vt, 1 };
     static inh_view bsv = { inh_view_vt, 1 }, dssv = { inh_view_vt, 1 }, rsv = { inh_view_vt, 1 };
     static inh_view fcb = { inh_view_vt, 1 };
+    static inh_view fsmp = { inh_view_vt, 1 };
     static uint8_t bcb[14 * 20], bsrv[4 * 36];
     fm6_batch bt = { bcb, bsrv, sizeof bcb, sizeof bsrv };
     void *j = NULL, *w = NULL, *out = NULL, *rtvs[1] = { &rtv };
@@ -1586,12 +1595,12 @@ TEST(fm6_nested_bundle_inherits_om)
     ((void (*)(void *, UINT, UINT, UINT, UINT))def[0xa0])(w, 4, 0, 5, 3);
     CHECK_EQ(inh_remap_n, 1);
     CHECK(log_has("RemapShaderResourceInheritance #1 on deferred d"));
-    /* SetFastResources do XDK (FM6 0xd4, PASSO 50): CB do PS slot 4 (tipo 1) e sampler (tipo 2) -> anota so o CB e
-       repassa (inicio, fim) ao Azimuth 0xd1 */
+    /* SetFastResources do XDK (FM6 0xd4, PASSO 50): CB do PS slot 4 (tipo 1) e sampler do PS slot 0 (tipo 2) ->
+       anota o CB e o sampler (PASSO 118) e repassa (inicio, fim) ao Azimuth 0xd1 */
     {
         static uint8_t pk[2 * 20];
         uint32_t h1 = 0x90040401u, h2 = 0xa0040001u;
-        void *fo = &fcb, *smp = (void *)0x5a3;
+        void *fo = &fcb, *smp = &fsmp;
         memset(pk, 0, sizeof pk);
         memcpy(pk, &h1, 4); memcpy(pk + 4, &fo, 8);
         memcpy(pk + 20, &h2, 4); memcpy(pk + 24, &smp, 8);
@@ -1602,6 +1611,10 @@ TEST(fm6_nested_bundle_inherits_om)
         CHECK(fr_n == 1 && fr_ctx == j && fr_p == pk && fr_end == pk + sizeof pk);
         CHECK(fm6_dctx_find(j)->st.cb[4][4] == &fcb && fm6_dctx_find(j)->st.ncb[4] == 5);
         CHECK(fm6_dctx_find(j)->st.cbset[4][0] == 1u << 4 && fm6_dctx_find(j)->st.nsrv[4] == 0);
+        CHECK(fm6_dctx_find(j)->st.smp[4][0] == &fsmp && fm6_dctx_find(j)->st.nsmp[4] == 1);
+        CHECK(fm6_dctx_find(j)->st.smpset[4][0] == 1u);
+        CHECK(def[0x0c] == (void *)fm6_def_set_smps_4 && def[0x1b] == (void *)fm6_def_set_smps_0);   /* Set*Samplers */
+        az_tab[0x0b] = (void *)inh_smp_0b;
     }
     /* bundle do worker (sem estado do D3D12) aninhado: parte + copia do estado + bundle */
     b = new_cl();
@@ -1611,6 +1624,7 @@ TEST(fm6_nested_bundle_inherits_om)
     ((exec_fn)def[0x3b])(j, b, FALSE);
     part = &cl_pool[cl_used - 1];
     CHECK(rtv.ref == 2 && dsv.ref == 2 && cbv.ref == 2 && srvv.ref == 2 && fcb.ref == 2);   /* views seguras */
+    CHECK(fsmp.ref == 2);
     CHECK(bsv.ref == 2 && dssv.ref == 2 && rsv.ref == 2);
     CHECK(log_has("<- bundle"));
     CHECK(fm6_dctx_find(j)->st.nrtv == 1 && fm6_dctx_find(j)->st.nsrv[5] == 4);   /* restore FALSE: juntador mantem */
@@ -1635,7 +1649,8 @@ TEST(fm6_nested_bundle_inherits_om)
        os nao gravados ficam como o imediato tem (PASSO 50) */
     CHECK(inh_res_n == 3 + 4 && inh_res_ctx == inh_ctx[2] && inh_res_slot == 0x43 && inh_res_start == 3);
     CHECK(inh_res_cnt == 1 && inh_res_last == &srvv);
-    CHECK(log_has("1 viewports, 1 scissors, 2 CB slots and 1 SRV slots parked"));
+    CHECK(log_has("1 viewports, 1 scissors, 2 CB slots, 1 SRV slots and 1 samplers parked"));
+    CHECK(inh_smp_n == 2 && inh_smp_ctx == inh_ctx[2] && inh_smp_start == 0 && inh_smp_cnt == 1 && inh_smp_last == &fsmp);
     CHECK(log_has("stage 4:----x stage 5:--x"));
     CHECK_EQ(exec_n, 4);
     CHECK(exec_cl[0] == part && exec_cl[1] == b && exec_cl[2] == b2 && exec_cl[3] == f);
@@ -1649,7 +1664,7 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK(log_has("depth ") && log_has(" ref 3, rs "));
     CHECK(rtv.ref == 3);                                                 /* f ainda segura as copias */
     CHECK_EQ(((ULONG (*)(void *))fake_cl_vt[2])(f), 0);
-    CHECK(rtv.ref == 1 && dsv.ref == 1 && cbv.ref == 1 && srvv.ref == 1 && fcb.ref == 1);
+    CHECK(rtv.ref == 1 && dsv.ref == 1 && cbv.ref == 1 && srvv.ref == 1 && fcb.ref == 1 && fsmp.ref == 1);
     CHECK(bsv.ref == 1 && dssv.ref == 1 && rsv.ref == 1);
     /* ClearState do jogo no juntador zera o acompanhado */
     ((om_fn)def[0x22])(j, 1, rtvs, NULL);
