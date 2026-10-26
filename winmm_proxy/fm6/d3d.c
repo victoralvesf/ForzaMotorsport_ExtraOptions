@@ -253,7 +253,7 @@ typedef struct {
     uint8_t ncb[6], nsrv[6];
     void *cb[6][14], *srv[6][128];
     uint64_t cbset[6][1], srvset[6][2];   /* slots gravados (objeto ou NULL): so esses vao para o imediato */
-    /* PASSO 118: samplers (Set*Samplers, SetFast*Sampler, SetFastResources tipo 2); sem eles o bundle desenhava
+    /* PASSO 122: samplers (Set*Samplers, SetFast*Sampler, SetFastResources tipo 2); sem eles o bundle desenhava
        com o sampler padrao (clamp) -> texturas de detalhe do relevo esticadas (pista "low poly") */
     uint8_t nsmp[6];
     uint64_t smpset[6][1];

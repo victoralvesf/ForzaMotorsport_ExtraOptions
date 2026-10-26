@@ -1467,7 +1467,7 @@ static void inh_res_47(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, 
 static void inh_res_43(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x43); }
 static void inh_res_09(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x09); }
 static void inh_res_11(void *c, UINT s, UINT n, void *const *v) { inh_res(c, s, n, v, 0x11); }
-/* PSSetSamplers do Azimuth (0x0b): samplers herdados do juntador (PASSO 118) */
+/* PSSetSamplers do Azimuth (0x0b): samplers herdados do juntador (PASSO 122) */
 static int inh_smp_n;
 static void *inh_smp_ctx, *inh_smp_last;
 static UINT inh_smp_start, inh_smp_cnt;
@@ -1596,7 +1596,7 @@ TEST(fm6_nested_bundle_inherits_om)
     CHECK_EQ(inh_remap_n, 1);
     CHECK(log_has("RemapShaderResourceInheritance #1 on deferred d"));
     /* SetFastResources do XDK (FM6 0xd4, PASSO 50): CB do PS slot 4 (tipo 1) e sampler do PS slot 0 (tipo 2) ->
-       anota o CB e o sampler (PASSO 118) e repassa (inicio, fim) ao Azimuth 0xd1 */
+       anota o CB e o sampler (PASSO 122) e repassa (inicio, fim) ao Azimuth 0xd1 */
     {
         static uint8_t pk[2 * 20];
         uint32_t h1 = 0x90040401u, h2 = 0xa0040001u;
