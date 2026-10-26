@@ -195,23 +195,33 @@ UINT host_samples(UINT samples)
     return m == 4 ? samples : (m ? m : 1);
 }
 
-/* FMASK emulada: textura WxH (R8_UINT ou R32_UINT) com o mapeamento amostra -> fragmento de cada pixel, uma por
- * (tamanho, amostras, formato), nunca liberada. Bits por amostra: 2x R8 = 1, 4x R32 = 4 (o FM5 le a FMASK 4x como
- * R32_UINT; o Azimuth so emula 4x R8 e 8x R32). Mapeamento igual ao do Azimuth (0x14013dc40): host com as amostras
- * todas -> identidade; host 2x -> amostra i -> fragmento i & 1; host 1x (AA desligado) -> tudo no fragmento 0. */
+/* Valor de cada pixel da FMASK emulada. {2, 2} do XDK = EQAA 2 fragmentos / 4 amostras de cobertura: o resolve do
+ * jogo (imageprocessor_eqaadownsamplecolor_2frag_4samp; FM5 0x6de160, FM6 0x40b62c) le R8 = 4 amostras x 2 bits
+ * (0/1 = fragmento, >= 2 = amostra invalida) e faz a media ponderada pelos fragmentos (o do FM6 com tonemap por
+ * fragmento). O host so tem 2 amostras reais -> amostras pares no fragmento 0, impares no 1 (0x44, pesos 2/2); com
+ * 0x02 (1 bit/amostra) a amostra 0 era invalida e as outras caiam no fragmento 0 -> resolve so com a amostra 0 =
+ * sem AA na tela do FM6 (PASSO 121). 4x R32: 4 bits/amostra (suposicao; o shader de {4, 3} nao foi visto).
+ * host com as amostras todas -> identidade; host 2x -> fragmento i & 1; host 1x (AA desligado) -> tudo no 0. */
+UINT fmask_value(UINT samples, UINT host, UINT fmt)
+{
+    UINT bits = fmt == 42 ? 4 : 2, val = 0, i;
+    for (i = 0; i < 4; i++)
+        val |= (host >= samples ? i % samples : host == 2 ? (i & 1) : 0) << (i * bits);
+    return val;
+}
+
+/* FMASK emulada: textura WxH (R8_UINT ou R32_UINT) com fmask_value em cada pixel, uma por (tamanho, amostras,
+ * formato), nunca liberada (o FM5 le a FMASK 4x como R32_UINT; o Azimuth so emula 4x R8 e 8x R32). */
 void *fmask_emul(void *dev, tex2d_fn create, UINT w, UINT h, UINT samples, UINT fmt)
 {
     UINT d[16] = { 0 };
     struct { const void *mem; UINT pitch, slice; } init;
     void *tex = NULL;
     uint8_t *buf;
-    UINT host = host_samples(samples), bpp = fmt == 42 ? 4 : 1, bits = fmt == 42 ? 4 : (samples == 2 ? 1 : 2);
-    UINT val = 0, i;
+    UINT host = host_samples(samples), bpp = fmt == 42 ? 4 : 1, val = fmask_value(samples, host, fmt);
     SIZE_T k, n = (SIZE_T)w * h;
     long hr;
     int j;
-    for (i = 0; i < samples; i++)
-        val |= (host >= samples ? i : host == 2 ? (i & 1) : 0) << (i * bits);
     AcquireSRWLockExclusive(&fmask_lock);
     for (j = 0; j < nfmasks; j++)
         if (fmasks[j].w == w && fmasks[j].h == h && fmasks[j].samples == samples && fmasks[j].fmt == fmt) {

@@ -367,6 +367,16 @@ TEST(msaa_quality_table_wraps)
     CHECK(!msaa_q_get((void *)(uintptr_t)0xdead0, &q));
 }
 
+TEST(fmask_value_matches_eqaa_layout)
+{
+    /* {2, 2} = EQAA 2frag/4samp lido como R8, 4 amostras x 2 bits (PASSO 121) */
+    CHECK_EQ(fmask_value(2, 2, 62), 0x44);            /* host 2x: s0/s2 -> frag 0, s1/s3 -> frag 1 */
+    CHECK_EQ(fmask_value(2, 1, 62), 0);               /* AA desligado: tudo no fragmento 0 */
+    CHECK_EQ(fmask_value(4, 4, 42), 0x3210);          /* 4x R32: identidade, 4 bits/amostra */
+    CHECK_EQ(fmask_value(4, 2, 42), 0x1010);
+    CHECK_EQ(fmask_value(4, 1, 42), 0);
+}
+
 TEST(host_samples_follows_launcher_msaa)
 {
     uint8_t *az = fake_azimuth(0);

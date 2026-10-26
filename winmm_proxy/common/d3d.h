@@ -71,6 +71,7 @@ void msaa_q_fix(void *tex, UINT *d, const uint8_t *ret, const uint8_t *game, siz
 
 /* FMASK emulada (2x R8_UINT, 4x R32_UINT) */
 UINT host_samples(UINT samples);
+UINT fmask_value(UINT samples, UINT host, UINT fmt);
 void *fmask_emul(void *dev, tex2d_fn create, UINT w, UINT h, UINT samples, UINT fmt);
 long srv_fmask(void *dev, void *res, const UINT *desc, void **out, tex2d_fn create, srv_fn srv);
 
