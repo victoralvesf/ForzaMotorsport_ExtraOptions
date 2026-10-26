@@ -145,35 +145,53 @@ void alias_fm6_leave_scene(void *ctx, UINT n, void *const *rtvs, int clear, alia
  * SampleDesc lido via GetDesc (0x6a5ee0): Quality 0 -> ResolveSubresource; {2,2} / {4,3} -> shader com a FMASK;
  * qualquer outro valor -> sai sem desenhar (thumbnails da garagem/pintura pretos, PASSO 8 cont. 23). */
 static SRWLOCK msaa_q_lock = SRWLOCK_INIT;
-static struct { void *tex; UINT q; } msaa_q[256];
+static struct { void *tex; UINT q, count; } msaa_q[256];
 static unsigned msaa_q_next;
 
-void msaa_q_set(void *tex, UINT q)
+/* count != 0: o host criou a textura com outro numero de amostras (FM6 {2, 2} -> 4x) e o jogo ve {count, q} */
+void msaa_q_set_desc(void *tex, UINT count, UINT q)
 {
     unsigned i;
     AcquireSRWLockExclusive(&msaa_q_lock);
     for (i = 0; i < 256 && msaa_q[i].tex != tex; i++) ;
     if (i == 256) i = msaa_q_next++ & 255;
-    msaa_q[i].tex = tex; msaa_q[i].q = q;
+    msaa_q[i].tex = tex; msaa_q[i].q = q; msaa_q[i].count = count;
     ReleaseSRWLockExclusive(&msaa_q_lock);
 }
 
-int msaa_q_get(void *tex, UINT *q)
+void msaa_q_set(void *tex, UINT q) { msaa_q_set_desc(tex, 0, q); }
+
+static int msaa_q_get_desc(void *tex, UINT *count, UINT *q)
 {
     unsigned i;
     int found = 0;
     AcquireSRWLockShared(&msaa_q_lock);
-    for (i = 0; i < 256; i++) if (msaa_q[i].tex == tex) { *q = msaa_q[i].q; found = 1; break; }
+    for (i = 0; i < 256; i++) if (msaa_q[i].tex == tex) { *q = msaa_q[i].q; *count = msaa_q[i].count; found = 1; break; }
     ReleaseSRWLockShared(&msaa_q_lock);
     return found;
 }
 
-/* devolve o Quality pedido so a chamadas do exe do jogo [game, game + size); Azimuth/proxy veem o do D3D12 */
+int msaa_q_get(void *tex, UINT *q)
+{
+    UINT c;
+    return msaa_q_get_desc(tex, &c, q);
+}
+
+/* amostras que o jogo pediu numa textura que o host criou com outras (0 = iguais / desconhecida) */
+UINT msaa_q_count(void *tex)
+{
+    UINT c = 0, q;
+    return msaa_q_get_desc(tex, &c, &q) ? c : 0;
+}
+
+/* devolve o SampleDesc pedido so a chamadas do exe do jogo [game, game + size); Azimuth/proxy veem o do D3D12 */
 void msaa_q_fix(void *tex, UINT *d, const uint8_t *ret, const uint8_t *game, size_t size)
 {
-    UINT q;
-    if (d && d[5] > 1 && d[6] == 0xffffffff && game && ret >= game && ret < game + size && msaa_q_get(tex, &q))
+    UINT q, c;
+    if (d && d[5] > 1 && d[6] == 0xffffffff && game && ret >= game && ret < game + size && msaa_q_get_desc(tex, &c, &q)) {
         d[6] = q;
+        if (c) d[5] = c;
+    }
 }
 
 /* slot 7 CreateShaderResourceView. View R8_UINT/TEXTURE2D de uma textura MSAA = leitura da FMASK. O Azimuth
@@ -191,8 +209,14 @@ static int nfmasks;
  * repassa as do jogo; senao a configuracao (1 = AA desligado) */
 UINT host_samples(UINT samples)
 {
-    UINT m = *(volatile UINT *)(g_base + 0x318ea0);
+    UINT m = host_msaa_mode();
     return m == 4 ? samples : (m ? m : 1);
+}
+
+/* opcao antialiasing do launcher (DAT_140318ea0): 1 off, 2 = 2x forcado, 4 = msaax4 ("do console") */
+UINT host_msaa_mode(void)
+{
+    return *(volatile UINT *)(g_base + 0x318ea0);
 }
 
 /* Valor de cada pixel da FMASK emulada. {2, 2} do XDK = EQAA 2 fragmentos / 4 amostras de cobertura: o resolve do
@@ -250,7 +274,7 @@ done:
 long srv_fmask(void *dev, void *res, const UINT *desc, void **out, tex2d_fn create, srv_fn srv)
 {
     const uint8_t *r = res;
-    UINT smp = r ? *(const UINT *)(r + 0x84) : 0;
+    UINT smp = r ? (msaa_q_count(res) ? msaa_q_count(res) : *(const UINT *)(r + 0x84)) : 0;   /* amostras do jogo */
     if (desc && r && desc[1] == 4 /* TEXTURE2D */ && *(const UINT *)(r + 0x38) == 0xc && *(const UINT *)(r + 0xe4) == 1 &&
         ((desc[0] == 62 && smp == 2) || (desc[0] == 42 && smp == 4))) {
         void *f = fmask_emul(dev, create, *(const UINT *)(r + 0x70), *(const UINT *)(r + 0x74), smp, desc[0]);

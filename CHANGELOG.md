@@ -33,6 +33,8 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 ## Unreleased
 
 ### Improvements
+- **FM6:** the launcher's anti-aliasing option now picks the race's MSAA: `msaax4` renders the scene with 4 real
+  samples (the console uses 2 samples with 4 coverage samples, EQAA, which PC GPUs can't do), and `2x` keeps 2.
 - **FM6:** the launcher's Reflections preset now works, like on FM5: high and ultra raise the size of the
   cars' reflection cubemap (up to 2048), the mirrors (up to 2304x768, always at full frame rate) and the windshield
   reflection, and update the cubemap more often; low lowers them for more performance.
@@ -42,6 +44,8 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
   frame spikes in a race and lowering the CPU time of the game's command recording threads.
 
 ### Fixes
+- **FM6:** the race had no anti-aliasing at all: the game's EQAA resolve read the emulated FMASK in another layout
+  and kept only one sample per pixel, so car edges were jagged, with white dots flickering along them.
 - **FM6:** the digital dashboards in the cockpit view were drawn out of place at resolutions above 1080p. The UI
   scaling for the launcher resolution also hit the dashboard screens, which the game draws into their own
   smaller textures; it now applies only to the screen itself.

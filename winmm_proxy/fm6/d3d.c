@@ -36,12 +36,17 @@ static const struct { uint8_t slot; long (*fn)(void); } fm6_dev_trivial[] = {
 
 /* CreateTexture2D (slot 5) do FM6: mesmo SampleDesc do console que o FM5 (2x -> {2, 2}; game+0x334f94 cor
    R11G11B10 1920x1080, misc 0x40000) -> E_INVALIDARG no D3D12. O device do FM6 e o do Azimuth sem o proxy do FM5
-   (dev_CreateTexture2D), entao a troca do Quality pelo padrao fica aqui. */
+   (dev_CreateTexture2D), entao a troca do Quality pelo padrao fica aqui.
+   {2, 2} = EQAA 2 fragmentos / 4 amostras de cobertura no console; o PC so tem 2 amostras reais. Com antialiasing
+   msaax4 no launcher ("do console") a cena {2, 2} e criada com 4 amostras no host e o jogo ve {2, 0}: o resolve
+   (game+0x40b62c) com Quality 0 usa ResolveSubresource (as 4 amostras) no lugar do shader da FMASK, que so le as
+   amostras 0 e 1 (PASSO 121). Com 2x forcado o Azimuth ja cria 2x e nada muda. */
 static tex2d_fn orig_fm6_create_tex2d;
 static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, void **out)
 {
     UINT d[16];
     long hr;
+    int up;
     if (!desc || desc[5] <= 1 || desc[6] == 0 || desc[6] == 0xffffffff) {
         hr = orig_fm6_create_tex2d(dev, desc, init, out);
         liv_note_texture(desc, hr);
@@ -54,11 +59,17 @@ static long fm6_CreateTexture2D(void *dev, const UINT *desc, const void *init, v
     }
     memcpy(d, desc, 12 * sizeof(UINT));
     d[6] = 0xffffffff;
+    up = desc[5] == 2 && desc[6] == 2 && host_msaa_mode() == 4;
+    if (up) d[5] = 4;
     hr = orig_fm6_create_tex2d(dev, d, init, out);
     liv_note_texture(desc, hr);
-    if (hr >= 0 && out && *out) msaa_q_set(*out, desc[6]);
-    wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> default, bind=%#x misc=%#x) hr=%#lx tex=%p",
-         d[0], d[1], d[4], d[5], desc[6], d[8], d[10], hr, out ? *out : NULL);
+    if (hr >= 0 && out && *out) {
+        if (up) msaa_q_set_desc(*out, 2, 0);
+        else msaa_q_set(*out, desc[6]);
+    }
+    wlog("d3d: CreateTexture2D(FM6 %ux%u fmt=%u samples=%u quality %#x -> %s, bind=%#x misc=%#x) hr=%#lx tex=%p",
+         d[0], d[1], d[4], desc[5], desc[6], up ? "4x on the host, game sees {2, 0}" : "default", d[8], d[10], hr,
+         out ? *out : NULL);
     if (hr >= 0 && out && *out) alias_track_ex(desc, *out, 0);
     return hr;
 }

@@ -706,6 +706,45 @@ TEST(fm6_create_device_uses_azimuth_device)
         CHECK_HEX((uint8_t *)create_tex_desc, "40000000" "40000000" "01000000" "01000000" "1c000000" "01000000"
                                               "00000000" "00000000" "08000000" "00000000" "00000000" "00000000");
     }
+    {   /* antialiasing msaax4 (DAT_140318ea0 = 4): {2, 2} vira 4x no host e o jogo ve {2, 0} (resolve por
+           ResolveSubresource); {4, 3} e 2x forcado ficam como estao (PASSO 121) */
+        static const UINT tex[12] = { 2560, 1440, 1, 1, 26, 2, 2, 0, 0x28, 0, 0x40000, 0 };
+        static const UINT t4[12] = { 2560, 1440, 1, 1, 26, 4, 3, 0, 0x28, 0, 0x40000, 0 };
+        uint8_t *game = t_rwx(0x10000), *saved = g_game;
+        UINT mode = *(UINT *)(az + 0x318ea0), d[12];
+        void *t = NULL;
+        void (*getdesc)(void *, UINT *) = (void (*)(void *, UINT *))fm6_type_tab[0xc][0xd];
+        static uint8_t res[0x100];
+        static const UINT fmask[4] = { 62, 4, 0, 1 };
+        void *v = NULL;
+        *(UINT *)(az + 0x318ea0) = 4;
+        CHECK_EQ(((long (*)(void *, const UINT *, const void *, void **))fm6_dev_vt[5])(fm6_dev, tex, NULL, &t), 0);
+        CHECK_HEX((uint8_t *)create_tex_desc, "000a0000" "a0050000" "01000000" "01000000" "1a000000" "04000000"
+                                              "ffffffff" "00000000" "28000000" "00000000" "00000400" "00000000");
+        g_game = game;
+        memcpy(d, create_tex_desc, sizeof d);                                  /* GetDesc falso devolve o desc */
+        msaa_q_fix(t, d, game + 0x8000, game, 0x10000);
+        CHECK_EQ(d[5], 2);
+        CHECK_EQ(d[6], 0);
+        memcpy(d, create_tex_desc, sizeof d);
+        msaa_q_fix(t, d, (uint8_t *)0x1, game, 0x10000);                       /* fora do jogo: o do D3D12 */
+        CHECK_EQ(d[5], 4);
+        CHECK_EQ(d[6], 0xffffffff);
+        g_game = saved;
+        (void)getdesc;
+        /* FMASK R8 sobre a cor {2, 2} criada 4x: emulada com as amostras do jogo (2) */
+        *(UINT *)(res + 0x38) = 0xc; *(UINT *)(res + 0x70) = 2560; *(UINT *)(res + 0x74) = 1440;
+        *(UINT *)(res + 0x84) = 4; *(UINT *)(res + 0xe4) = 1;
+        msaa_q_set_desc(res, 2, 0);
+        CHECK_EQ(((long (*)(void *, void *, const UINT *, void **))fm6_dev_vt[7])(fm6_dev, res, fmask, &v), 0);
+        CHECK(srv_res == (void *)0x7e7e);
+        CHECK_EQ(((long (*)(void *, const UINT *, const void *, void **))fm6_dev_vt[5])(fm6_dev, t4, NULL, &t), 0);
+        CHECK_EQ(create_tex_desc[5], 4);
+        *(UINT *)(az + 0x318ea0) = 2;
+        CHECK_EQ(((long (*)(void *, const UINT *, const void *, void **))fm6_dev_vt[5])(fm6_dev, tex, NULL, &t), 0);
+        CHECK_EQ(create_tex_desc[5], 2);
+        *(UINT *)(az + 0x318ea0) = mode;
+    }
     {   /* CreateShaderResourceView: R8_UINT/TEXTURE2D sobre a cor 2x (game+0x216dc7) -> FMASK emulada (R8, 1x, SRV) */
         static uint8_t res[0x100];
         static const UINT fmask[4] = { 62, 4, 0, 1 }, plain[4] = { 26, 4, 0, 1 };
