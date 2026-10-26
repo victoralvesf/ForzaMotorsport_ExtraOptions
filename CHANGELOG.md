@@ -53,6 +53,11 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **FM6:** in Brazilian Portuguese, lap times on the digital dashboards showed boxes in place of the minute and
   second marks (`00□12,977□□`). The game's dashboard fonts have no apostrophe, which the Portuguese time format
   uses; those times are now shown as in English (`00:12,977`), the format the dashboards were laid out for.
+- **FM6:** track scenery looked low poly and flat-colored, most visibly on the rocks and slopes of Bernese Alps
+  (grass and other terrain on every track too). The draw bundles the game records on its worker threads use the
+  texture samplers their parent command list bound, as on the console, but the proxy did not pass the samplers
+  along, so the terrain's tiled detail textures were stretched by the default clamp sampler. The samplers now
+  carry over with the rest of the inherited state.
 
 ## v1.4.1 — FM6 tuning setup name fix
 
