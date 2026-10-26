@@ -3748,6 +3748,8 @@ void stutter_install(void)
         }
     }
     for (i = 0; i < 7; i++) n += iat_swap(wait_iat[i], wait_names[i], wait_hooks[i], &wait_real[i]);
-    CloseHandle(CreateThread(NULL, 0, st_sampler, NULL, 0, NULL));
+    /* o amostrador suspende as threads a cada ~2 ms nos quadros lentos: com quadros sempre lentos o jogo pausa sozinho */
+    if (dbg_int(L"StutterSamples", 1) > 0) CloseHandle(CreateThread(NULL, 0, st_sampler, NULL, 0, NULL));
+    else wlog("stutter: sampler off (StutterSamples=0)");
     wlog("stutter: on (spikes >= 25 ms and >= 1.8x the average; %d of 7 azimuth.exe waits measured)", n);
 }
