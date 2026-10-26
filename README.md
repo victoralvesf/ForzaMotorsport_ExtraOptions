@@ -53,7 +53,7 @@ modified on disk**, and FH2 keeps working as before.
    ```
 
 The launcher's graphics settings (resolution, frame rate, etc.) apply to FM5. On FM6 the
-**resolution**, the **frame rate**, **car detail** and **shadows** are applied for now. The resolution works like on FM5: the game
+**resolution**, the **frame rate**, **car detail**, **shadows** and **reflections** are applied. The resolution works like on FM5: the game
 renders at the chosen size (e.g. 1440p) and the menus, HUD and tuning charts are scaled to fill the screen.
 With the frame rate, menus, pre-race, post-race and replays run at the chosen
 rate instead of dropping to 30, and rates above 60 (120, 144, 180...) work up to your
@@ -61,7 +61,9 @@ monitor's refresh rate, with the game speed unchanged. Car detail changes the ca
 like on FM5: higher levels keep more cars at better LODs, from farther away, and show your own car at
 full detail outside the cockpit; low lowers it for more performance. Shadows also works like on FM5:
 high and ultra raise the shadow map resolution (up to 4096) and give more objects detailed shadows;
-low halves the resolution.
+low halves the resolution. Reflections also works like on FM5: high and ultra raise the size of the cars'
+reflection cubemap, the mirrors and the windshield reflection, keep the mirrors at full frame rate and update the
+cubemap more often; low lowers them.
 
 FM6 also draws smooth edges on car liveries and decals, fences, foliage and the crowd: on PC the graphics
 driver dithers alpha-to-coverage into a 1-pixel checkerboard pattern on those edges, so the mod makes the
@@ -72,8 +74,8 @@ game's shaders compute the coverage themselves, like the console does (`AlphaToC
 
 - **Forza Motorsport 5:** menus, races, garage, DLC and Marketplace work.
 - **Forza Motorsport 6 (initial support):** boots, menus, video, audio and races work, at the
-  launcher's resolution, frame rate (60 or higher), car detail and shadows. Known issues:
-  - the launcher's graphics settings other than resolution, frame rate, car detail and shadows are not applied (see above);
+  launcher's resolution, frame rate (60 or higher), car detail, shadows and reflections. Known issues:
+  - the launcher's particles and motion blur settings are not applied (they have no effect on FH2 either);
   - very heavy scenes (e.g. some pre-race shots) can still drop below the chosen frame rate;
   - turning on the RivaTuner (RTSS) overlay can crash the game ("device removed").
 - Rivals and online modes need Xbox Live and do not work in either game.

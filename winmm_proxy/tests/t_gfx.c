@@ -287,6 +287,78 @@ TEST(fm6_shadows_on_fm6_exe)
     }
 }
 
+/* ------------------------------------------------------------------------ */
+/* FM6: reflections (cubemap, espelhos, para-brisa)                          */
+/* ------------------------------------------------------------------------ */
+TEST(fm6_reflection_getters_per_level)
+{
+    fm6_orig_windshield = fake_get_int; fm6_orig_envmap = fake_get_float; fm6_orig_half_rate = fake_get_bool;
+    fm6_refl_level = 0; fake_int = 512;  CHECK_EQ(fm6_get_windshield(NULL, 0), 256);
+    fake_int = 200;  CHECK_EQ(fm6_get_windshield(NULL, 0), 128);
+    fm6_refl_level = 2; fake_int = 512;  CHECK_EQ(fm6_get_windshield(NULL, 0), 1024);
+    fm6_refl_level = 3; fake_int = 512;  CHECK_EQ(fm6_get_windshield(NULL, 0), 2048);
+    fake_int = 1024; CHECK_EQ(fm6_get_windshield(NULL, 0), 2048);
+    fm6_refl_level = 2; fake_float = 0.5f; CHECK(fm6_get_envmap(NULL, 0) == 1.0f);   /* PhotoMode */
+    fm6_refl_level = 3; fake_float = 1.0f; CHECK(fm6_get_envmap(NULL, 0) == 6.0f);   /* Global */
+    fake_float = 0.0f; CHECK(fm6_get_envmap(NULL, 0) == 0.0f);                       /* cubo estatico */
+    CHECK_EQ(fm6_get_half_rate(NULL, 0), 0);
+}
+
+TEST(fm6_reflections_on_fm6_exe)
+{
+    static const uint32_t cube[] = { 256, 512, 1024, 2048 }, mw[] = { 384, 768, 1536, 2304 }, mh[] = { 128, 256, 512, 768 };
+    int level;
+    for (level = 0; level < 4; level++) {
+        uint8_t *g = pe_map(FM6_EXE, NULL);
+        if (!g) { test_skip(FM6_EXE " ausente"); return; }
+        /* bytes originais do exe */
+        CHECK_HEX(g + 0x36278b, "41bf00020000");
+        CHECK_HEX(g + 0x36283c, "b800010000");
+        CHECK_HEX(g + 0x362849, "b800020000");
+        CHECK_HEX(g + 0x362ac3, "bb00020000");
+        CHECK_HEX(g + 0x98f9aa, "ba00020000");
+        CHECK_HEX(g + 0x32dc0f, "c7873016000000020000");
+        CHECK_HEX(g + 0x3362ea, "be00030000");
+        CHECK_HEX(g + 0x3363ed, "c70600030000");
+        CHECK_HEX(g + 0x3363f3, "48c7460400010000");
+        CHECK_HEX(g + 0x3362e3, "418d5e01448bc3");
+        CHECK_HEX(g + 0x7491, "c3cccccccccccccccccccccccccc");
+        CHECK_HEX(g + 0x4fcef0, "40574883ec4048c7442420feffffff48895c2458");
+        CHECK_HEX(g + 0x3fdf60, "40574883ec4048c7442420feffffff48895c2458");
+        CHECK_HEX(g + 0x3e64ac, "40574883ec5048c7442420feffffff48895c2468");
+        log_capture();
+        fm6_reflections(g, level);
+        CHECK(!log_has("does not match"));
+        if (level == 1) {
+            CHECK(log_has("FM6: reflections 1 (default): original reflections"));
+            CHECK_HEX(g + 0x36278b, "41bf00020000");
+            CHECK_HEX(g + 0x3362e3, "418d5e01448bc3");
+            CHECK_HEX(g + 0x4fcef0, "40574883ec40");
+        } else {
+            CHECK_EQ(imm32(g + 0x36278b + 2), cube[level]);
+            CHECK_EQ(imm32(g + 0x36283c + 1), cube[level] / 2);    /* mips: laco a partir de tamanho/2 */
+            CHECK_EQ(imm32(g + 0x362849 + 1), cube[level]);
+            CHECK_EQ(imm32(g + 0x362ac3 + 1), cube[level]);
+            CHECK_EQ(imm32(g + 0x98f9aa + 1), cube[level]);
+            CHECK_EQ(imm32(g + 0x32dc0f + 6), cube[level]);
+            CHECK_EQ(imm32(g + 0x3362ea + 1), mw[level]);
+            CHECK_EQ(imm32(g + 0x3363ed + 2), mw[level]);
+            CHECK_EQ(imm32(g + 0x3363f3 + 4), mh[level]);
+            /* altura: call rel32 para 0x7492 + nop de 2 bytes; trecho = mov ebx, h ; mov r8d, ebx ; ret */
+            CHECK(g[0x3362e3] == 0xe8 && (int32_t)imm32(g + 0x3362e4) == 0x7492 - (0x3362e3 + 5));
+            CHECK(g[0x3362e8] == 0x66 && g[0x3362e9] == 0x90 && g[0x3362ea] == 0xbe);
+            CHECK(g[0x7492] == 0xbb && imm32(g + 0x7493) == mh[level]);
+            CHECK_HEX(g + 0x7497, "448bc3c3cc");
+            CHECK(hooked_to(g + 0x4fcef0, (void *)fm6_get_windshield));
+            CHECK_EQ(level >= 2, hooked_to(g + 0x3fdf60, (void *)fm6_get_half_rate));
+            CHECK_EQ(level >= 2, hooked_to(g + 0x3e64ac, (void *)fm6_get_envmap));
+            CHECK_HEX((uint8_t *)fm6_orig_windshield, "40574883ec4048c7442420feffffff48895c2458");
+            CHECK(*(uint8_t **)((uint8_t *)fm6_orig_windshield + 20 + 6) == g + 0x4fcef0 + 20);
+        }
+        pe_unmap(g);
+    }
+}
+
 /* ---- fm6/font.c: apostrofos do tempo (pt-BR) nas fontes dos paineis sem o glifo ---- */
 static const char *fake_font_cps;       /* codigos que a fonte falsa tem */
 static int fake_font_find(void *map, uint32_t cp)

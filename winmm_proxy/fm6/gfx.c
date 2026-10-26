@@ -206,3 +206,154 @@ void fm6_shadows(uint8_t *game, int level)
                 (void **)&fm6_orig_hidef);
     wlog("FM6: shadows %d (%s): shadow getters hooked", level, gfx_level_name(level));
 }
+
+/*
+ * reflections do FM6 (docs\contexto\fm6\07_opcoes_graficas.txt, PASSO 120). Mesmo esquema do FM5 (cont. 6):
+ *   Cubemap (CubemapRenderer11@Presentation11, ctor 0x3626b4): cubo 512 com mips (0x3629ac), [+0x2a0] = 512,
+ *       contagem de mips (laco a partir de 256), tabela de angulo solido 512 (0x362849) preenchida em 0x362a58 com
+ *       512 >> mip; cubo por sonda (trecho frio 0x98f9a2) e o do carro ([+0x1630] = 512 em 0x32dc0f, lido em
+ *       0xe6871f; o difuso [+0x162c] = 32 fica). Todos os 512 trocados juntos.
+ *   EnvMapFrequencyScale (id 0x32, getter 0x3e64ac -> float; uso 0xda6f2a = min(N * escala, faces)). Global 1,
+ *       1-Car 3, PhotoMode 0.5, FrontEnd/CarSelect/Pre/PostRace 0 (cubo estatico, fica 0).
+ *   Espelhos (MirrorRenderer11 vtable 0x19f57f8 slot 1 = 0x33627c): 768x256 fixo; largura em esi (0x3362ea), altura
+ *       em ebx = lea ebx,[r14+1] com r14 = 0xff (0x3362e3) para as 4 texturas (e as 4 do trecho frio 0x988f2a com
+ *       MSAA); viewport {768, 256} em 0x3363ed/0x3363f3. A altura nao e imediato: os 7 bytes de lea ebx / mov r8d,ebx
+ *       viram call rel32 para um trecho no padding cc (0x7492): mov ebx, altura ; mov r8d, ebx ; ret.
+ *   HalfRateMirror (id 0x35, getter 0x3fdf60 -> bool): 8/12/16/24-Car = 1 (espelho a 30 fps).
+ *   WindshieldReflectionResolution (id 0x3d, getter 0x4fcef0 -> int, chamador 0x4fcb08): altura (Global 512),
+ *       largura = altura * 16 / 9.
+ * Niveis (como no FM5): low = cubo 256, espelho 384x128, para-brisa /2; high = cubo 1024, espelho 1536x512,
+ *   para-brisa x2, espelho sempre a 60, frequencia x2; ultra = cubo 2048, espelho 2304x768, para-brisa x4 (max 2048),
+ *   espelho a 60, frequencia x6.
+ */
+#define FM6_GET_ENVMAP_FREQ      0x3e64ac
+#define FM6_GET_HALF_RATE_MIRROR 0x3fdf60
+#define FM6_GET_WINDSHIELD_RES   0x4fcef0
+/* push rdi; sub rsp,0x50; mov qword [rsp+0x20],-2; mov [rsp+0x68],rbx */
+#define FM6_ENVMAP_PROLOGUE "40574883ec5048c7442420feffffff48895c2468"
+#define FM6_MIRROR_HEIGHT   0x3362e3   /* lea ebx,[r14+1] ; mov r8d,ebx */
+#define FM6_MIRROR_CAVE     0x7492     /* 14 bytes cc depois de um ret */
+
+typedef struct { uint32_t rva; uint8_t off; const char *orig; uint8_t len; uint32_t base; } Fm6ImmSite;
+
+/* imediatos de 32 bits: rva da instrucao, offset do imediato, bytes originais, valor base (escalado) */
+static const Fm6ImmSite fm6_cube_sites[] = {
+    { 0x36278b, 2, "41bf00020000", 6, 512 },             /* ctor: cubo e [+0x2a0] */
+    { 0x36283c, 1, "b800010000", 5, 256 },               /* contagem de mips (laco a partir de tamanho/2) */
+    { 0x362849, 1, "b800020000", 5, 512 },               /* tabela de angulo solido: largura = altura */
+    { 0x362ac3, 1, "bb00020000", 5, 512 },               /* 0x362a58: tamanho do mip 0 da tabela */
+    { 0x98f9aa, 1, "ba00020000", 5, 512 },               /* cubo por sonda */
+    { 0x32dc0f, 6, "c7873016000000020000", 10, 512 },    /* cubo do carro [+0x1630] */
+};
+static const Fm6ImmSite fm6_mirror_sites[] = {
+    { 0x3362ea, 1, "be00030000", 5, 768 },               /* largura das texturas */
+    { 0x3363ed, 2, "c70600030000", 6, 768 },             /* viewport dos espelhos: largura */
+    { 0x3363f3, 4, "48c7460400010000", 8, 256 },         /*                         altura  */
+};
+
+static int fm6_patch_imm_sites(uint8_t *game, const Fm6ImmSite *s, size_t n, uint32_t num, uint32_t den,
+                               const char *what)
+{
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (!bytes_match(game + s[i].rva, s[i].orig, s[i].len)) {
+            wlog("FM6: reflections: %s: site %#x does not match, ignored", what, s[i].rva);
+            return 0;
+        }
+    for (i = 0; i < n; i++) {
+        uint32_t v = s[i].base * num / den;
+        write_mem(game + s[i].rva + s[i].off, &v, 4);
+    }
+    return 1;
+}
+
+static int fm6_mirror_height_ok(const uint8_t *game)
+{
+    if (bytes_match(game + FM6_MIRROR_HEIGHT, "418d5e01448bc3", 7) &&
+        bytes_match(game + FM6_MIRROR_CAVE - 1, "c3cccccccccccccccccccc", 11))
+        return 1;
+    wlog("FM6: reflections: mirror height site does not match, ignored");
+    return 0;
+}
+
+/* altura dos espelhos: call para o trecho no padding (mov ebx, h ; mov r8d, ebx ; ret) */
+static void fm6_mirror_height(uint8_t *game, uint32_t h)
+{
+    uint8_t cave[9] = { 0xbb, 0, 0, 0, 0, 0x44, 0x8b, 0xc3, 0xc3 };
+    uint8_t call[7] = { 0xe8, 0, 0, 0, 0, 0x66, 0x90 };
+    int32_t rel = (int32_t)(FM6_MIRROR_CAVE - (FM6_MIRROR_HEIGHT + 5));
+    memcpy(cave + 1, &h, 4);
+    memcpy(call + 1, &rel, 4);
+    write_mem(game + FM6_MIRROR_CAVE, cave, sizeof cave);
+    write_mem(game + FM6_MIRROR_HEIGHT, call, sizeof call);
+}
+
+typedef float (*getter_float_fn)(void *mgr, int idx);
+typedef uint8_t (*getter_bool_fn)(void *mgr, int idx);
+static getter_float_fn fm6_orig_envmap;
+static getter_bool_fn fm6_orig_half_rate;
+static getter_int_fn fm6_orig_windshield;
+static int fm6_refl_level;
+
+static float fm6_get_envmap(void *mgr, int idx)
+{
+    static float last = -99.0f;
+    float o = fm6_orig_envmap(mgr, idx), v = o > 0.0f ? o * (fm6_refl_level == 2 ? 2.0f : 6.0f) : o;
+    if (o != last) { last = o; wlog("FM6: reflections: EnvMapFrequencyScale %g -> %g", o, v); }
+    return v;
+}
+
+static uint8_t fm6_get_half_rate(void *mgr, int idx)
+{
+    static int last = -99;
+    uint8_t o = fm6_orig_half_rate(mgr, idx);
+    if (o != last) { last = o; wlog("FM6: reflections: HalfRateMirror %d -> 0", o); }
+    return 0;
+}
+
+static int fm6_get_windshield(void *mgr, int idx)
+{
+    static int last = -99;
+    int o = fm6_orig_windshield(mgr, idx), v = o;
+    if (fm6_refl_level == 0) v = o / 2 < 128 ? 128 : o / 2;
+    else if (o < 2048) { v = o * (fm6_refl_level == 2 ? 2 : 4); if (v > 2048) v = 2048; }
+    if (o != last) { last = o; wlog("FM6: reflections: WindshieldReflectionResolution %d -> %d", o, v); }
+    return v;
+}
+
+void fm6_reflections(uint8_t *game, int level)
+{
+    static const uint32_t cube[] = { 256, 512, 1024, 2048 };
+    static const uint32_t mirror_num[] = { 1, 1, 2, 3 }, mirror_den[] = { 2, 1, 1, 1 };
+    if (level == 1 || level < 0 || level > 3) {
+        wlog("FM6: reflections %d (%s): original reflections", level, gfx_level_name(level));
+        return;
+    }
+    fm6_refl_level = level;
+    if (fm6_patch_imm_sites(game, fm6_cube_sites, sizeof fm6_cube_sites / sizeof *fm6_cube_sites, cube[level], 512,
+                            "cubemap"))
+        wlog("FM6: reflections: cubemap 512 -> %u", cube[level]);
+    /* largura e altura juntas: o site da altura e conferido antes de escrever a largura */
+    if (fm6_mirror_height_ok(game) &&
+        fm6_patch_imm_sites(game, fm6_mirror_sites, sizeof fm6_mirror_sites / sizeof *fm6_mirror_sites,
+                            mirror_num[level], mirror_den[level], "mirrors")) {
+        fm6_mirror_height(game, 256 * mirror_num[level] / mirror_den[level]);
+        wlog("FM6: reflections: mirrors 768x256 -> %ux%u", 768 * mirror_num[level] / mirror_den[level],
+             256 * mirror_num[level] / mirror_den[level]);
+    }
+    if (bytes_match(game + FM6_GET_WINDSHIELD_RES, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN))
+        hook_at(game + FM6_GET_WINDSHIELD_RES, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN, (void *)fm6_get_windshield,
+                (void **)&fm6_orig_windshield);
+    else wlog("FM6: reflections: WindshieldReflectionResolution getter does not match, ignored");
+    if (level >= 2) {
+        if (bytes_match(game + FM6_GET_HALF_RATE_MIRROR, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN))
+            hook_at(game + FM6_GET_HALF_RATE_MIRROR, FM6_GETTER_PROLOGUE, FM6_GETTER_STOLEN, (void *)fm6_get_half_rate,
+                    (void **)&fm6_orig_half_rate);
+        else wlog("FM6: reflections: HalfRateMirror getter does not match, ignored");
+        if (bytes_match(game + FM6_GET_ENVMAP_FREQ, FM6_ENVMAP_PROLOGUE, FM6_GETTER_STOLEN))
+            hook_at(game + FM6_GET_ENVMAP_FREQ, FM6_ENVMAP_PROLOGUE, FM6_GETTER_STOLEN, (void *)fm6_get_envmap,
+                    (void **)&fm6_orig_envmap);
+        else wlog("FM6: reflections: EnvMapFrequencyScale getter does not match, ignored");
+    }
+    wlog("FM6: reflections %d (%s): applied", level, gfx_level_name(level));
+}

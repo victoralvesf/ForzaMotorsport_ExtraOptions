@@ -487,6 +487,7 @@ static void fm6_apply_patches(uint8_t *game, const uint8_t *options)
     fm6_frame_rate(game, *(const uint32_t *)(options + 0xc));
     fm6_car_detail(game, ((const int32_t *)(options + 0x14))[2]);
     fm6_shadows(game, ((const int32_t *)(options + 0x14))[0]);
+    fm6_reflections(game, ((const int32_t *)(options + 0x14))[1]);
     tls_slot0_sites(game, fm6_tls_slot0, FM6_TLS_SLOT0_N);
 }
 

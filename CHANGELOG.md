@@ -13,7 +13,7 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 
 ### FM6
 - Boot, menus, videos, audio and races, with sessions of an hour or more without crashes.
-- Launcher resolution, frame rate (up to 180 fps), Car Detail and Shadows presets.
+- Launcher resolution, frame rate (up to 180 fps), Car Detail, Shadows and Reflections presets.
 - `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `AlphaToCoverageNoDither`.
 
 ### FM5
@@ -24,7 +24,7 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - `azimuth_fm5.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`.
 
 ### Known limitations
-- **FM6:** launcher graphics settings other than resolution, frame rate, Car Detail and Shadows aren't applied yet.
+- **FM6:** the Particles and Motion Blur presets have no effect.
 - **FM6:** very heavy scenes can drop below the chosen frame rate.
 - **FM6:** the RivaTuner (RTSS) overlay can crash the game.
 - **FM5:** the Particles and Motion Blur presets have no effect.
@@ -33,6 +33,9 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 ## Unreleased
 
 ### Improvements
+- **FM6:** the launcher's Reflections preset now works, like on FM5: high and ultra raise the size of the
+  cars' reflection cubemap (up to 2048), the mirrors (up to 2304x768, always at full frame rate) and the windshield
+  reflection, and update the cubemap more often; low lowers them for more performance.
 - **FM6:** fewer stutters while racing. The proxy did extra CPU work on the game's own threads: it copied large
   blocks of render state for every nested draw bundle, searched long lists on every draw call, and scanned all
   live textures whenever a new streamed texture was created. That work is now much smaller, roughly halving the
