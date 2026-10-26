@@ -13,7 +13,8 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 
 ### FM6
 - Boot, menus, videos, audio and races, with sessions of an hour or more without crashes.
-- Launcher resolution, frame rate (up to 180 fps), Car Detail, Shadows and Reflections presets.
+- Launcher resolution, frame rate (up to 180 fps), anti-aliasing (2x / 4x MSAA), Car Detail, Shadows and
+  Reflections presets.
 - `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `AlphaToCoverageNoDither`.
 
 ### FM5
