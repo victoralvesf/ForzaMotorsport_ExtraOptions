@@ -31,7 +31,7 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **FM5:** the Particles and Motion Blur presets have no effect.
 - No Xbox Live features (Rivals, online play, leaderboards).
 
-## Unreleased
+## v1.5.0 — FM6 anti-aliasing, reflections, terrain and stutter fixes
 
 ### Improvements
 - **FM6:** the launcher's anti-aliasing option now picks the race's MSAA: `msaax4` renders the scene with 4 real
