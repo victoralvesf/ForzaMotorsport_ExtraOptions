@@ -418,21 +418,23 @@ int dr_hold_ms;                          /* PASSO 77: idade minima na fila antes
 static IUnknown *dr_q[DR_QUEUE];
 static LONG64 dr_t[DR_QUEUE];            /* qpc da entrada na fila */
 static volatile LONG dr_head, dr_tail, dr_deferred, dr_released, dr_full;
-static __thread int dr_is_reaper = -1;
+static volatile LONG dr_reaper_tls;      /* por thread (tls_get): NULL = nao sabe, 1 = nao, 2 = reaper */
 
 static int dr_thread_is_reaper(void)
 {
     typedef HRESULT (WINAPI *gtd_fn2)(HANDLE, PWSTR *);
     static gtd_fn2 gtd;
     PWSTR desc = NULL;
-    if (dr_is_reaper >= 0) return dr_is_reaper;
+    intptr_t v = (intptr_t)tls_get(&dr_reaper_tls);
+    int r = 0;
+    if (v) return v == 2;
     if (!gtd) gtd = (gtd_fn2)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
-    dr_is_reaper = 0;
     if (gtd && SUCCEEDED(gtd(GetCurrentThread(), &desc)) && desc) {
-        dr_is_reaper = wcscmp(desc, L"Azimuth reaper") == 0;
+        r = wcscmp(desc, L"Azimuth reaper") == 0;
         LocalFree(desc);
     }
-    return dr_is_reaper;
+    tls_set(&dr_reaper_tls, (void *)(intptr_t)(r ? 2 : 1));
+    return r;
 }
 
 /* devolve 1 se guardou o objeto (a referencia do chamador passa a ser da fila) */
@@ -2295,12 +2297,14 @@ void st_list_open(void)
 }
 
 /* gpuguard (draws e ExecuteIndirect): contador local da thread, somado de 64 em 64 (sem disputa por draw) */
+static volatile LONG st_draw_tls;
 void st_draw(void)
 {
-    static __thread LONG local;
-    if (!st_on || ++local < 64) return;
-    InterlockedAdd(&vz_draws, local);
-    local = 0;
+    intptr_t local;
+    if (!st_on) return;
+    if ((local = (intptr_t)tls_get(&st_draw_tls) + 1) < 64) { tls_set(&st_draw_tls, (void *)local); return; }
+    InterlockedAdd(&vz_draws, (LONG)local);
+    tls_set(&st_draw_tls, NULL);
 }
 
 static void (STDMETHODCALLTYPE *real_tiles)(ID3D12CommandQueue *, ID3D12Resource *, UINT, const D3D12_TILED_RESOURCE_COORDINATE *,

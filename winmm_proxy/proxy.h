@@ -14,6 +14,36 @@
 #define PROXY_H
 #include <windows.h>
 #include <stdint.h>
+#include <intrin.h>
+
+/* ---- valor por thread nos caminhos quentes ----
+ * O __thread deste mingw e TLS emulada: todo acesso chama __emutls_get_address -> pthread_getspecific ->
+ * pthread_once -> TlsGetValue (aparecia no perfil da chuva do FM6 em todo Set*, Release e draw). Aqui um indice do
+ * TlsAlloc lido/escrito direto no TEB (TlsSlots, gs:0x1480, indices < 64; acima disso Tls*Value). *slot = indice + 1
+ * (0 = ainda nao alocado, alocado na 1a chamada); o valor comeca NULL em toda thread. */
+static inline DWORD tls_index(volatile LONG *slot)
+{
+    LONG s = *slot;
+    if (!s) {
+        DWORD i = TlsAlloc();
+        if (i == TLS_OUT_OF_INDEXES) return i;
+        if ((s = InterlockedCompareExchange(slot, (LONG)i + 1, 0)) == 0) return i;
+        TlsFree(i);                                   /* outra thread alocou primeiro */
+    }
+    return (DWORD)s - 1;
+}
+static inline void *tls_get(volatile LONG *slot)
+{
+    DWORD i = tls_index(slot);
+    if (i < 64) return (void *)__readgsqword(0x1480 + i * 8);
+    return i == TLS_OUT_OF_INDEXES ? NULL : TlsGetValue(i);
+}
+static inline void tls_set(volatile LONG *slot, void *v)
+{
+    DWORD i = tls_index(slot);
+    if (i < 64) __writegsqword(0x1480 + i * 8, (DWORD64)(uintptr_t)v);
+    else if (i != TLS_OUT_OF_INDEXES) TlsSetValue(i, v);
+}
 
 /* ---- main.c ---- */
 extern uint8_t *g_base;   /* azimuth.exe */

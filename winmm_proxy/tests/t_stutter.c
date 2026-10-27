@@ -262,7 +262,7 @@ TEST(stutter_defer_release)
     LONG d0 = dr_deferred;
     rk_hook_release(&o);
     dr_on = 1;
-    dr_is_reaper = 1;
+    tls_set(&dr_reaper_tls, (void *)(intptr_t)2);   /* esta thread = reaper */
     CHECK_EQ(((IUnknown *)&o)->lpVtbl->Release((IUnknown *)&o), 1);   /* nao era a ultima: solta direto */
     CHECK_EQ(o.refs, 1);
     CHECK_EQ(((IUnknown *)&o)->lpVtbl->Release((IUnknown *)&o), 0);   /* ultima: adiada */
@@ -272,10 +272,10 @@ TEST(stutter_defer_release)
     rk_call_orig((IUnknown *)&o);                                     /* o que a thread de drenagem faz */
     CHECK_EQ(o.refs, 0);
     dr_tail = dr_head;
-    dr_is_reaper = 0;
+    tls_set(&dr_reaper_tls, (void *)(intptr_t)1);
     CHECK_EQ(((IUnknown *)&o)->lpVtbl->Release((IUnknown *)&o), (ULONG)-1);   /* fora do reaper: direto */
     dr_on = 0;
-    dr_is_reaper = -1;
+    tls_set(&dr_reaper_tls, NULL);
 }
 
 /* AllocatorMaxAgeMs: troca o imediato de 4000 ms so com os bytes originais; 0 nao mexe; -1 = 0x7fffffff */

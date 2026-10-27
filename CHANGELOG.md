@@ -33,6 +33,11 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 
 ## Unreleased
 
+### Improvements
+- **FM6 and FM5:** slightly lower CPU cost per draw call. The proxy kept per-thread state in thread-local variables,
+  which this compiler emulates with a chain of library calls on every access; the hot paths (deferred context
+  state changes, object releases, draws) now read the thread's slot directly.
+
 ### Fixes
 - **FM6:** races in the rain no longer drop below 30 fps (e.g. Sebring's main straight). The rain uses more than
   8192 pipeline states, which filled the proxy's pipeline table, and every draw then searched the whole table on

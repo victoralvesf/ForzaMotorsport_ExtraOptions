@@ -33,24 +33,24 @@ static __thread int liv_depth;
 static __thread long liv_pso, liv_pso_null, liv_skips, liv_resolves, liv_dispatches, liv_textures;
 static volatile LONG liv_renders;
 
-int liv_in_window(void) { return liv_depth > 0; }
+int liv_in_window(void) { return liv_log && liv_depth > 0; }   /* liv_log antes: __thread = TLS emulada (caro) */
 
 void liv_note_pso(void *pso, int wait, int ctx)
 {
-    if (!liv_depth) return;
+    if (!liv_log || !liv_depth) return;
     liv_pso++;
     if (!pso && ++liv_pso_null <= 8) wlog("livery: null pipeline on c%d (wait=%d) inside the livery render", ctx, wait);
 }
 
 void liv_note_skip(int ctx)
 {
-    if (!liv_depth) return;
+    if (!liv_log || !liv_depth) return;
     if (++liv_skips <= 8) wlog("livery: draw skipped on c%d inside the livery render", ctx);
 }
 
 void liv_note_resolve(int ctx, UINT sw, UINT sh, UINT sfmt, UINT ss, UINT dw, UINT dh, UINT dfmt, UINT ds, UINT fmt)
 {
-    if (!liv_depth) return;
+    if (!liv_log || !liv_depth) return;
     if (++liv_resolves <= 12)
         wlog("livery: ResolveSubresource c%d %ux%u fmt %u samples %u -> %ux%u fmt %u samples %u (view fmt %u)", ctx,
              sw, sh, sfmt, ss, dw, dh, dfmt, ds, fmt);
@@ -58,7 +58,7 @@ void liv_note_resolve(int ctx, UINT sw, UINT sh, UINT sfmt, UINT ss, UINT dw, UI
 
 void liv_note_dispatch(UINT x, UINT y, UINT z)
 {
-    if (!liv_depth) return;
+    if (!liv_log || !liv_depth) return;
     if (++liv_dispatches <= 4) wlog("livery: Dispatch %ux%ux%u inside the livery render", x, y, z);
 }
 

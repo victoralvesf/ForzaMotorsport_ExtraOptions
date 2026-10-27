@@ -1595,3 +1595,32 @@ TEST(fm5_frame_limit_waits_step)
     CHECK(fake_clock >= 1.0 + 1.0 / 120);
     CHECK(*(double *)(frame + 0x440) == fake_clock);
 }
+
+static volatile LONG t_tls_slot;
+static DWORD WINAPI t_tls_other(void *p)
+{
+    void *seen = tls_get(&t_tls_slot);
+    tls_set(&t_tls_slot, (void *)(uintptr_t)0x5678);
+    *(void **)p = seen;
+    return tls_get(&t_tls_slot) == (void *)(uintptr_t)0x5678;
+}
+
+TEST(tls_get_set_per_thread)
+{
+    void *seen = (void *)1;
+    HANDLE h;
+    DWORD ok = 0;
+    CHECK(tls_get(&t_tls_slot) == NULL);
+    REQUIRE(t_tls_slot != 0);
+    tls_set(&t_tls_slot, (void *)(uintptr_t)0x1234);
+    CHECK(tls_get(&t_tls_slot) == (void *)(uintptr_t)0x1234);
+    CHECK(TlsGetValue(t_tls_slot - 1) == (void *)(uintptr_t)0x1234);   /* mesmo slot que o Tls*Value */
+    REQUIRE((h = CreateThread(NULL, 0, t_tls_other, &seen, 0, NULL)) != NULL);
+    WaitForSingleObject(h, INFINITE);
+    GetExitCodeThread(h, &ok);
+    CloseHandle(h);
+    CHECK(seen == NULL);                       /* thread nova comeca em NULL */
+    CHECK(ok);
+    CHECK(tls_get(&t_tls_slot) == (void *)(uintptr_t)0x1234);   /* a outra thread nao mexe no desta */
+    tls_set(&t_tls_slot, NULL);
+}

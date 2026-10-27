@@ -283,17 +283,17 @@ static struct { void *ctx; void *const *src; } fm6_ctx_src[256];   /* diferido -
 static volatile LONG fm6_ctx_src_n;
 
 /* PASSO 117: chamado em todo Set* dos diferidos; a busca linear passava por ate 128 entradas de ~8 KB (falta de cache
-   em cada uma) -> ultima resposta por thread, valida enquanto nenhum diferido novo entrou (o mais novo ganha) */
+   em cada uma) -> ultima resposta por thread, valida enquanto nenhum diferido novo entrou (o mais novo ganha).
+   Guardada num valor so (tls_get; o __thread daqui era TLS emulada): (n << 8) | (indice + 1) */
+static volatile LONG fm6_dctx_tls;
 static fm6_dctx_info *fm6_dctx_find(const void *ctx)
 {
-    static __thread const void *last_ctx;
-    static __thread fm6_dctx_info *last_d;
-    static __thread LONG last_n;
+    uintptr_t last = (uintptr_t)tls_get(&fm6_dctx_tls);
     LONG i, n = fm6_dctx_n < 128 ? fm6_dctx_n : 128;
-    if (ctx && ctx == last_ctx && n == last_n && last_d->ctx == ctx) return last_d;
+    if (ctx && last && (LONG)(last >> 8) == n && fm6_dctx[(last & 0xff) - 1].ctx == ctx) return &fm6_dctx[(last & 0xff) - 1];
     for (i = n - 1; i >= 0; i--)
         if (fm6_dctx[i].ctx == ctx) {
-            last_ctx = ctx; last_d = &fm6_dctx[i]; last_n = n;
+            if (ctx) tls_set(&fm6_dctx_tls, (void *)(((uintptr_t)n << 8) | (uintptr_t)(i + 1)));
             return &fm6_dctx[i];
         }
     return NULL;
