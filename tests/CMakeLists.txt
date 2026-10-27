@@ -4,6 +4,9 @@ add_executable(unit_tests
     test_core.cpp
     test_games.cpp
     test_fm6_font.cpp
+    test_options.cpp
+    test_real_exes.cpp
+    image.cpp
     test_proxy.cpp
 )
 target_include_directories(unit_tests SYSTEM PRIVATE doctest)

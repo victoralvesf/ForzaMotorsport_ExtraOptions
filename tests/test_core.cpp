@@ -97,6 +97,31 @@ TEST_CASE("patch: an option is written only when every site matches")
     CHECK(mi.Protect == PAGE_EXECUTE_READ); // protection restored
 }
 
+TEST_CASE("patch: a site at the end of a section is compared up to the end of its region")
+{
+    // two pages with different protections (Azimuth protects each section): a short site in the last bytes of
+    // the first one is checked and written, a longer form than what is left there does not match
+    auto *p = static_cast<uint8_t *>(VirtualAlloc(nullptr, 0x2000, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READ));
+    REQUIRE(p);
+    DWORD old;
+    VirtualProtect(p + 0x1000, 0x1000, PAGE_READONLY, &old);
+    const uint8_t b[] = { 0x85, 0xc0, 0x75, 0x19 };
+    core::patch::write_code(p + 0xffc, b, sizeof b);
+    CHECK(core::pe::readable_size(p + 0xffc, 32) == 4);
+    CHECK(core::pe::readable_size(p + 0x1000, 32) == 32);
+    CHECK(core::pe::readable_size(p + 0x10, 8) == 8);
+
+    const Site longer[] = { { 0xffc, "85 c0 75 19 00", 2, "66 90" } };
+    CHECK(core::patch::apply(p, 0x2000, Option{ "Longer", longer }, "TEST") == Result::mismatch);
+    const Site end[] = { { 0xffc, "85 c0 75 19", 2, "66 90" } };
+    CHECK(core::patch::apply(p, 0x2000, Option{ "End", end }, "TEST") == Result::applied);
+    CHECK(p[0xffe] == 0x66);
+    CHECK(p[0xfff] == 0x90);
+    VirtualFree(p, 0, MEM_RELEASE);
+
+    CHECK(core::pe::readable_size(reinterpret_cast<void *>(0x10), 8) == 0); // not mapped
+}
+
 namespace {
 
 int (*g_add_tramp)(int, int);
