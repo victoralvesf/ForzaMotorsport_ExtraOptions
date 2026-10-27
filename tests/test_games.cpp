@@ -33,7 +33,16 @@ TEST_CASE("games: every module is complete and unique")
         const game::Module *g = all[i];
         CHECK(g->tag);
         CHECK(g->ini_file);
-        CHECK(g->apply);
+        CHECK(!g->options.empty());
+        for (const core::patch::Option &o : g->options) {
+            CAPTURE(o.key);
+            CHECK(!o.sites.empty());
+            for (const core::patch::Site &s : o.sites) {
+                CAPTURE(s.rva);
+                CHECK(core::patch::valid(s));
+                CHECK(s.rva < g->size_of_image);
+            }
+        }
         for (size_t j = i + 1; j < all.size(); j++) {
             CHECK(strcmp(g->tag, all[j]->tag) != 0);
             CHECK(!(g->time_date_stamp == all[j]->time_date_stamp && g->size_of_image == all[j]->size_of_image));

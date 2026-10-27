@@ -18,7 +18,16 @@ add_link_options(-static -static-libgcc -static-libstdc++)
 # Includes with "../" are rejected by tests/check_includes.cmake.
 
 # core: generic code for every game (log, ini, patch engine, hooks, game interface)
-add_library(core STATIC src/core/log.cpp)
+add_library(core STATIC
+    src/core/log.cpp
+    src/core/pe.cpp
+    src/core/version.cpp
+    src/core/ini.cpp
+    src/core/patch.cpp
+    src/core/hook.cpp
+    src/core/loader_watch.cpp
+    src/core/options.cpp
+)
 target_include_directories(core PUBLIC src/core)
 
 # one library per game, reached only through its game::Module
@@ -26,7 +35,7 @@ add_library(fm5 STATIC src/games/fm5/fm5.cpp)
 target_include_directories(fm5 PUBLIC src/games/fm5)
 target_link_libraries(fm5 PUBLIC core)
 
-add_library(fm6 STATIC src/games/fm6/fm6.cpp)
+add_library(fm6 STATIC src/games/fm6/fm6.cpp src/games/fm6/font.cpp)
 target_include_directories(fm6 PUBLIC src/games/fm6)
 target_link_libraries(fm6 PUBLIC core)
 

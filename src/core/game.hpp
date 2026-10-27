@@ -1,7 +1,10 @@
 // Interface of a supported game. Each game lives in its own library (src/games/<id>/) and exposes only its Module.
 #pragma once
 
+#include "patch.hpp"
+
 #include <cstdint>
+#include <span>
 
 namespace game {
 
@@ -11,9 +14,10 @@ struct Module {
     // identification of the exe Azimuth mapped (PE header at the base)
     uint32_t time_date_stamp;
     uint32_t size_of_image;
-    // Applies the enabled extra options to the mapped image. Called once, after Azimuth's own patches and
-    // before the game runs.
-    void (*apply)(uint8_t *base);
+    // options of the ini (off when the key is missing), applied all or nothing
+    std::span<const core::patch::Option> options;
+    // fixes that need code (hooks) and are always on; null if the game has none
+    void (*apply_fixes)(uint8_t *base);
 };
 
 } // namespace game

@@ -1,8 +1,11 @@
 // winmm.dll proxy: azimuth.exe imports winmm statically, so this DLL loads before Azimuth's WinMain. It forwards
 // every winmm export to System32 and, inside azimuth.exe, applies the extra options of the game Azimuth loads.
 #include "forward.hpp"
+#include "loader_watch.hpp"
 #include "log.hpp"
+#include "options.hpp"
 #include "registry.hpp"
+#include "version.hpp"
 
 #include <windows.h>
 #include <cwchar>
@@ -16,6 +19,30 @@ void replace_file_name(wchar_t *path, const wchar_t *name)
     wchar_t *dst = slash ? slash + 1 : path;
     size_t room = MAX_PATH - static_cast<size_t>(dst - path);
     if (wcslen(name) < room) wcscpy(dst, name);
+}
+
+wchar_t g_dir[MAX_PATH]; // folder of winmm.dll (= azimuth.exe), with the trailing backslash
+volatile LONG g_applied;
+
+// Azimuth flushes the mapped game image just before running it: the first known game gets its options, once.
+void on_image(uint8_t *base, const IMAGE_NT_HEADERS64 *nt)
+{
+    uint32_t ts = nt->FileHeader.TimeDateStamp, size = nt->OptionalHeader.SizeOfImage;
+    const game::Module *g = games::find(ts, size);
+    if (!g) {
+        core::log::write("image at %p (TimeDateStamp %#x, SizeOfImage %#x): not a supported game",
+                         static_cast<void *>(base), ts, size);
+        return;
+    }
+    if (InterlockedCompareExchange(&g_applied, 1, 0) != 0) {
+        core::log::write("%s at %p again: options already applied, ignored", g->tag, static_cast<void *>(base));
+        return;
+    }
+    wchar_t ini[MAX_PATH];
+    if (wcslen(g_dir) + wcslen(g->ini_file) >= MAX_PATH) return;
+    wcscpy(ini, g_dir);
+    wcscat(ini, g->ini_file);
+    core::options::apply(*g, base, ini);
 }
 
 bool process_is_azimuth()
@@ -43,9 +70,16 @@ void attach(HINSTANCE self)
         core::log::write("process is not azimuth.exe: forwarding only");
         return;
     }
-    for (const game::Module *g : games::all())
-        core::log::write("game %s: TimeDateStamp %#x SizeOfImage %#x", g->tag, g->time_date_stamp, g->size_of_image);
-    // The loader watch (IAT hook on FlushInstructionCache) comes with the core; until then nothing is applied.
+    if (GetModuleFileNameW(self, g_dir, MAX_PATH)) replace_file_name(g_dir, L"");
+
+    HMODULE exe = GetModuleHandleW(nullptr);
+    core::version::Version v;
+    if (!core::version::of_module(exe, v))
+        core::log::write("azimuth.exe: no version information");
+    else
+        core::log::write("azimuth.exe %u.%u.%u.%u%s", v.major, v.minor, v.build, v.revision,
+                         core::version::at_least(v, 1, 0, 2) ? "" : ": OLDER THAN 1.0.2, update Azimuth");
+    core::loader_watch::install(exe, on_image);
 }
 
 } // namespace
