@@ -604,15 +604,23 @@ static const ID3D12GraphicsCommandList2Vtbl rc_vt = {
 };
 
 /* ---- reproducao numa lista real ---- */
+/* com StutterLog: tempo e contagem por operacao reproduzida (linha de vazao: as mais caras) */
+#define RC_OPS 64
+extern int st_on;
+static LONG64 rc_op_ticks[RC_OPS];
+static LONG rc_op_n[RC_OPS];
+
 static void rc_play(GCL2 *g, const rc_list *l)
 {
     const ID3D12GraphicsCommandList2Vtbl *v = g->lpVtbl;
     uint32_t pos = 0;
+    LARGE_INTEGER o0, o1;
     while (pos + sizeof(rc_hdr) <= l->len) {
         const rc_hdr *h = (const rc_hdr *)(l->buf + pos);
         const void *p = h + 1;
         if (h->size < sizeof *h || pos + h->size > l->len) break;
         pos += h->size;
+        if (st_on) QueryPerformanceCounter(&o0);
         switch (h->op) {
         case RC_ClearState: v->ClearState(g, ((const rc_a_ptr *)p)->p); break;
         case RC_DrawInstanced: { const rc_a_draw *a = p; v->DrawInstanced(g, a->a, a->b, a->c, a->d); break; }
@@ -710,6 +718,11 @@ static void rc_play(GCL2 *g, const rc_list *l)
             break;
         }
         default: break;
+        }
+        if (st_on && h->op < RC_OPS) {
+            QueryPerformanceCounter(&o1);
+            rc_op_ticks[h->op] += o1.QuadPart - o0.QuadPart;   /* so a thread da fila reproduz (sob a trava dela) */
+            rc_op_n[h->op]++;
         }
     }
 }
@@ -891,16 +904,33 @@ UINT rc_merge(void **rqp, ID3D12CommandQueue *q, UINT n, ID3D12CommandList *cons
 int rc_format(char *buf, int cap, double frames)
 {
     double ms, bms, rms;
+    int len;
     if (!rc_on) return 0;
     if (!rc_freq.QuadPart) QueryPerformanceFrequency(&rc_freq);
     ms = (double)InterlockedExchange64(&rc_ticks, 0) * 1000.0 / (double)rc_freq.QuadPart;
     bms = (double)InterlockedExchange64(&rc_bound_ticks, 0) * 1000.0 / (double)rc_freq.QuadPart;
     rms = (double)InterlockedExchange64(&rc_reset_ticks, 0) * 1000.0 / (double)rc_freq.QuadPart;
-    return snprintf(buf, cap, " | recorders: opened %.0f/frame, executed %.0f/frame in %.1f real lists/frame (%.0f commands, "
+    len = snprintf(buf, cap, " | recorders: opened %.0f/frame, executed %.0f/frame in %.1f real lists/frame (%.0f commands, "
                     "%.2f ms; %.0f boundaries %.2f ms, Reset+Close %.2f ms), %ld alive, %ld real proxy lists",
                     InterlockedExchange(&rc_opens, 0) / frames, InterlockedExchange(&rc_execs, 0) / frames,
                     InterlockedExchange(&rc_reals, 0) / frames, InterlockedExchange(&rc_cmds, 0) / frames, ms / frames,
                     InterlockedExchange(&rc_bounds, 0) / frames, bms / frames, rms / frames, rc_live, rc_slots_total);
+    if (len < 0 || len >= cap) return len;
+    {   /* as 8 operacoes mais caras: "op N count/quadro ms/quadro" (N = indice na vtable da lista) */
+        int k, i, best;
+        len += snprintf(buf + len, cap - len, " | replay by op:");
+        for (k = 0; k < 8; k++) {
+            best = -1;
+            for (i = 0; i < RC_OPS; i++) if (rc_op_n[i] && (best < 0 || rc_op_ticks[i] > rc_op_ticks[best])) best = i;
+            if (best < 0 || len >= cap) break;
+            len += snprintf(buf + len, cap - len, " [op %d %.0f %.2f ms]", best, rc_op_n[best] / frames,
+                            (double)rc_op_ticks[best] * 1000.0 / (double)rc_freq.QuadPart / frames);
+            rc_op_n[best] = 0;
+            rc_op_ticks[best] = 0;
+        }
+        for (i = 0; i < RC_OPS; i++) { rc_op_n[i] = 0; rc_op_ticks[i] = 0; }
+    }
+    return len;
 }
 
 /* hook do apply_patches (azimuth.c), depois do pool de listas: inner = CreateCommandList por dentro (gpuguard) */
