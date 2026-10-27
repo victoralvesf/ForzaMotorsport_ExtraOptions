@@ -1,29 +1,29 @@
-# Azimuth Motorsport + Extra Options mod
+# Forza Motorsport Extra Options
 
 **Author:** Victor Alves (L0rdDarkside)
 
-A mod that lets **Forza Motorsport 5** (Xbox One, title ID `7B35D917`) and
-**Forza Motorsport 6** (title ID `64F9397E`) run on Azimuth (Almost There Games), which
-officially supports only Forza Horizon 2 and FH2 Fast & Furious. It also adds some extra
-options for each game.
+Extra options for **Forza Motorsport 5** (Xbox One, title ID `7B35D917`) and **Forza Motorsport 6** (title ID
+`64F9397E`) running on the official Azimuth (Almost There Games): skip the intro and presentation videos, unlock
+the DLC cars already included in the game, and enable the Marketplace in FM5. It also fixes the lap times on FM6's
+digital dashboards in Brazilian Portuguese.
 
-The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`. All of its changes are
-made in memory when Azimuth starts. `azimuth.exe` and the other Azimuth files are **not
-modified on disk**, and FH2 keeps working as before.
+The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`, plus one `.ini` per game. All of its changes
+are made in memory when Azimuth loads the game. `azimuth.exe`, the game and the other Azimuth files are **not
+modified on disk**.
+
+> Versions 1.x of this project (then called Azimuth Motorsport) made FM5 and FM6 run on an older Azimuth. Azimuth
+> 1.0.2 supports both games officially, so 2.0 keeps only the extra options. Remove any 1.x `winmm.dll` before
+> updating Azimuth.
 
 ## Requirements
 
-- A clean Azimuth install. The mod expects this exact `azimuth.exe`:
-  `SHA-256 579ed8d8b0b16cbf7890380cb7b925c972b837631ede367eada55eae4afc39bc`.
-  If your `azimuth.exe` is different, the mod changes nothing and shows a warning
-  ("azimuth.exe is not the expected version..."). Details go to `azimuth_motorsport.log`.
-- Your own dump of at least one of the games:
+- **Azimuth 1.0.2 or later.**
+- Your own dump of at least one of the games, as supported by Azimuth:
   - **Forza Motorsport 5, package version 1.0.0.20**
   - **Forza Motorsport 6, package version 1.0.0.44**
 
-  Each one is a game folder containing `Mount\` (with `Mount\AppxManifest.xml`) and
-  `EmbeddedXvd\`, the same layout Azimuth uses for FH2. The folder name does not matter
-  (an FM6 dump is often named `Monument_1.0.0.44_x64__8wekyb3d8bbwe`).
+Each option checks the exact bytes it changes in the game before writing anything. If a game or Azimuth version
+does not match, that option is simply left off and the log says why.
 
 ## Installation
 
@@ -44,71 +44,67 @@ modified on disk**, and FH2 keeps working as before.
    ```
 
 2. (Optional) Edit `azimuth_fm5.ini` / `azimuth_fm6.ini` to suit your preferences.
-3. Start `azimuth.exe` as usual and select the FM5 or FM6 game folder in the launcher. To
-   skip the launcher, run this from a command prompt (with your own game folder):
+3. Start `azimuth.exe` as usual and pick FM5 or FM6.
 
-   ```
-   azimuth.exe "--game=C:\YourGamesFolder\Forza Motorsport 5" --skip-launcher
-   azimuth.exe "--game=C:\YourGamesFolder\Forza Motorsport 6" --skip-launcher
-   ```
+## Options
 
-The launcher's graphics settings (resolution, frame rate, etc.) apply to FM5. On FM6 the
-**resolution**, the **frame rate**, **car detail**, **shadows** and **reflections** are applied. The resolution works like on FM5: the game
-renders at the chosen size (e.g. 1440p) and the menus, HUD and tuning charts are scaled to fill the screen.
-With the frame rate, menus, pre-race, post-race and replays run at the chosen
-rate instead of dropping to 30, and rates above 60 (120, 144, 180...) work up to your
-monitor's refresh rate, with the game speed unchanged. Car detail changes the cars' level of detail
-like on FM5: higher levels keep more cars at better LODs, from farther away, and show your own car at
-full detail outside the cockpit; low lowers it for more performance. Shadows also works like on FM5:
-high and ultra raise the shadow map resolution (up to 4096) and give more objects detailed shadows;
-low halves the resolution. Reflections also works like on FM5: high and ultra raise the size of the cars'
-reflection cubemap, the mirrors and the windshield reflection, keep the mirrors at full frame rate and update the
-cubemap more often; low lowers them.
+`1` turns an option on, `0` turns it off. An option missing from the `.ini` (or a missing `.ini`) is off.
 
-FM6 also draws smooth edges on car liveries and decals, fences, foliage and the crowd: on PC the graphics
-driver dithers alpha-to-coverage into a 1-pixel checkerboard pattern on those edges, so the mod makes the
-game's shaders compute the coverage themselves, like the console does (`AlphaToCoverageNoDither` in
-`azimuth_fm6.ini`, on by default).
+### Forza Motorsport 5 (`azimuth_fm5.ini`, section `[FM5]`)
 
-## Status and known issues
+| Option | Default | What it does |
+|---|---|---|
+| `SkipIntro` | 1 | Skips the opening videos (Turn 10 / Microsoft Studios) and goes straight to the title screen. |
+| `SkipPresentationVideo` | 0 | Skips the presentation video that plays after the brightness screen and goes straight to the first race. |
+| `UnlockDLC` | 1 | The DLC cars and packs already included in the game (Car Pass, car packs, VIP...) count as purchased; the cars show up to buy with in-game credits. |
+| `EnableMarketplace` | 1 | Enables the Marketplace option in the menu without Xbox Live (shows the game's DLC packs). |
 
-- **Forza Motorsport 5:** menus, races, garage, DLC and Marketplace work.
-- **Forza Motorsport 6 (initial support):** boots, menus, video, audio and races work, at the
-  launcher's resolution, frame rate (60 or higher), car detail, shadows and reflections. Known issues:
-  - the launcher's particles and motion blur settings are not applied (they have no effect on FH2 either);
-  - very heavy scenes (e.g. some pre-race shots) can still drop below the chosen frame rate;
-  - turning on the RivaTuner (RTSS) overlay can crash the game ("device removed").
-- Rivals and online modes need Xbox Live and do not work in either game.
+### Forza Motorsport 6 (`azimuth_fm6.ini`, section `[FM6]`)
+
+| Option | Default | What it does |
+|---|---|---|
+| `SkipIntro` | 1 | Skips the opening videos and goes straight to loading. |
+| `SkipPresentationVideo` | 1 | Skips the presentation video before the first race of a new profile and the intro videos of the Porsche/NASCAR expansions. |
+| `UnlockDLC` | 1 | The DLC cars and packs already included in the game (Car Pass, car packs, VIP, Porsche/NASCAR expansions...) count as purchased; the cars show up to buy with in-game credits. |
+
+Always on, no option: in Brazilian Portuguese, lap times on FM6's digital dashboards showed boxes in place of the
+minute and second marks (`00□12,977□□`), because the dashboard fonts have no apostrophe. Those times are shown as in
+English (`00:12,977`).
+
+Azimuth 1.0.2 has its own DLC support for the content packages in the game folder. With `UnlockDLC=0` that support
+works as usual; with `UnlockDLC=1` every DLC included in the game counts as purchased.
 
 ## Logs and troubleshooting
 
-- `azimuth_motorsport.log` (next to `azimuth.exe`) is the mod's log. It is recreated on every run.
-- `data\logs\azimuth.log` is Azimuth's own log. Errors show up as `STOPPED ...` lines.
+- `fm_extra_options.log` (next to `azimuth.exe`) is the mod's log, recreated on every run. It shows the Azimuth
+  version, the game found and, for each option, whether it was applied, off, or ignored because the game's bytes
+  did not match.
+- `data\logs\azimuth.log` is Azimuth's own log.
 
 Include both files when you report a problem.
 
 ## Uninstall
 
-Delete `winmm.dll` (and `azimuth_fm5.ini` / `azimuth_fm6.ini` if you like) from the Azimuth folder. That restores
-the original Azimuth. Nothing else was changed.
+Delete `winmm.dll` (and `azimuth_fm5.ini` / `azimuth_fm6.ini` if you like) from the Azimuth folder. That restores the
+plain Azimuth. Nothing else was changed.
 
 ## Building from source
 
-See `ARCHITECTURE.md` for how the mod works.
-
-The source is in `winmm_proxy\`. Build it with mingw-w64 gcc:
+See `ARCHITECTURE.md` for how the mod works. It is C++20, built with CMake + Ninja and the mingw-w64 g++
+(`C:\mingw64\bin`):
 
 ```
-sh winmm_proxy/build.sh
+cmake --preset default
+cmake --build --preset default
+ctest --preset default
 ```
 
-The output is `winmm_proxy\build\winmm.dll`.
+The output is `build\winmm.dll`.
 
-GitHub Actions (`.github/workflows/ci.yml`) runs the tests on every pull request and, on a
-`v*` tag push, runs the tests, builds and publishes a release with `winmm.dll` + `azimuth_fm5.ini` + `azimuth_fm6.ini` + `README.txt`
-(this file as plain text, made by `tools\md2txt.py`).
+GitHub Actions (`.github/workflows/ci.yml`) runs the tests on every pull request and, on a `v*` tag push, runs the
+tests, builds and publishes a release with `winmm.dll` + `azimuth_fm5.ini` + `azimuth_fm6.ini` + `README.txt`.
 
 ## License
 
-MIT, see `LICENSE`. It covers only the code in this repository. Azimuth, Forza Motorsport 5,
-Forza Motorsport 6 and Forza Horizon 2 belong to their respective owners and are not included.
+MIT, see `LICENSE`. It covers only the code in this repository. Azimuth, Forza Motorsport 5 and Forza Motorsport 6
+belong to their respective owners and are not included.

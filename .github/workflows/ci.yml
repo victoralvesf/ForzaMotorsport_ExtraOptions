@@ -1,6 +1,6 @@
-# Testes do proxy em todo pull request; release (winmm.dll + azimuth_fm5.ini + azimuth_fm6.ini + README.txt) no push de tag v*.
-# debug.ini (diagnostico) fica so no repositorio, fora do zip.
-# No GitHub os testes que precisam do azimuth.exe/game_binaries sao pulados (ficam fora do git).
+# Tests (cmake/ctest) on every pull request; on a v* tag push, tests + build + release
+# (ForzaMotorsport_ExtraOptions-<tag>.zip: winmm.dll + azimuth_fm5.ini + azimuth_fm6.ini + README.txt).
+# The tests that need the game exes (game_binaries\, not in git) are skipped on GitHub.
 name: CI
 
 on:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  build:
     runs-on: windows-2025
     defaults:
       run:
@@ -20,53 +20,50 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Conferir mingw
+      - name: Toolchain
         run: |
-          [ -x /c/mingw64/bin/gcc.exe ] || { echo "::error::C:\\mingw64\\bin\\gcc.exe ausente no runner"; exit 1; }
-          /c/mingw64/bin/gcc --version | head -1
+          [ -x /c/mingw64/bin/g++.exe ] || { echo "::error::C:\\mingw64\\bin\\g++.exe missing on the runner"; exit 1; }
+          command -v ninja >/dev/null || choco install ninja -y --no-progress
+          echo "/c/mingw64/bin" >> "$GITHUB_PATH"
 
-      - name: Testes
-        run: sh winmm_proxy/tests/run_tests.sh
-
-  release:
-    needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-2025
-    permissions:
-      contents: write
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset default
 
       - name: Build
-        env:
-          SKIP_TESTS: 1
-        run: sh winmm_proxy/build.sh
+        run: cmake --build --preset default
 
-      # o build regera os exports a partir do winmm.dll do System32 do runner
-      - name: Conferir arquivos gerados
-        run: |
-          git diff --quiet -- winmm_proxy/winmm_exports.def winmm_proxy/winmm_stubs.S winmm_proxy/fm5/d3d_thunks.S ||
-            { echo "::warning::arquivos gerados diferem do git (exports do winmm.dll do runner)"; git diff --stat; }
+      # includes winmm_imports: winmm.dll ships alone, so it may only import system DLLs
+      - name: Test
+        run: ctest --preset default
 
-      # o winmm.dll vai sozinho no zip: so pode importar DLLs do sistema (sem runtime do mingw)
-      - name: Conferir imports do winmm.dll
-        run: |
-          deps=$(/c/mingw64/bin/objdump -p winmm_proxy/build/winmm.dll | sed -n 's/^\s*DLL Name: //p')
-          echo "$deps"
-          bad=$(echo "$deps" | grep -viE '^(kernel32|user32|api-ms-win-crt-[a-z0-9-]+)\.dll$' || true)
-          [ -z "$bad" ] || { echo "::error::winmm.dll depende de DLLs fora do sistema: $bad"; exit 1; }
-
-      - name: Empacotar
+      - name: Package
+        if: startsWith(github.ref, 'refs/tags/v')
         run: |
           mkdir -p dist
-          cp winmm_proxy/build/winmm.dll azimuth_fm5.ini azimuth_fm6.ini dist/
-          python tools/md2txt.py README.md dist/README.txt
-          cd dist && 7z a "../azimuth-motorsport-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini azimuth_fm6.ini README.txt
+          cp build/winmm.dll azimuth_fm5.ini azimuth_fm6.ini dist/
+          cp README.md dist/README.txt
+          cd dist && 7z a "../ForzaMotorsport_ExtraOptions-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini azimuth_fm6.ini README.txt
 
-      - name: Publicar release
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: release-zip
+          path: ForzaMotorsport_ExtraOptions-${{ github.ref_name }}.zip
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-zip
+
+      - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "azimuth-motorsport-$GITHUB_REF_NAME.zip" --title "$GITHUB_REF_NAME" --generate-notes
+        run: >
+          gh release create "$GITHUB_REF_NAME" "ForzaMotorsport_ExtraOptions-$GITHUB_REF_NAME.zip"
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

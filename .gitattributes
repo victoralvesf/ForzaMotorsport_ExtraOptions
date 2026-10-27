@@ -1,5 +1,4 @@
-# Build scripts used by bash/gcc: keep LF
+# Shell scripts used by bash: keep LF
 *.sh text eol=lf
-*.S  text eol=lf
 # Binaries
 *.pkl binary

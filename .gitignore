@@ -1,14 +1,13 @@
-# Ghidra project (binary, ~1.7 GB) - back it up separately
+# Ghidra projects (binary, large) - back them up separately
 ghidra/
 
-# Original game executables
+# Original game and Azimuth executables
 game_binaries/
-
-# Emulator and build artifacts
 /azimuth.exe
+
+# Build output (CMake) and the installed proxy
+/build/
 /winmm.dll
-/winmm.prev.dll
-winmm_proxy/build/
 *.bak
 
 # Azimuth's folder: runtime data (cache, saves, dumps, pipelines) and launcher config (azimuth.ini, per user)
@@ -19,33 +18,16 @@ winmm_proxy/build/
 *.dmp
 *.err
 
-# Decompilations/dumps derived from the binaries (Azimuth, FH2, FM5): local only, kept out of the public repository
+# Decompilations/dumps derived from the binaries: local only, kept out of the public repository
 tools/sessoes_antigas/
 *.pkl
 
 # Accumulated knowledge/RE notes (whole docs folder) and internal research: local only
 /docs/
 /car_model_report/
-
-# Python
-__pycache__/
-*.pyc
-captures/
 screenshots/
 debug_user_logs/
+fm6_gs_dump/
 
 # Claude Code local settings (per user)
 .claude/settings.local.json
-fm6_gs_dump/
-
-# gravacao do audio do FM6 (debug.ini AudioDump)
-audio_fm6_out.wav
-audio_fm6_shape.bin
-audio_dump_wav/
-audio_dump_xma/
-
-# probe builds (tools\xg_layout_probe.c; contem copias do xg_x.dll dos jogos)
-/build/
-
-# probe build (MIGRATION.md phase 0)
-probe/build/

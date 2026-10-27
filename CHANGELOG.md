@@ -1,48 +1,41 @@
 # Changelog
 
-Azimuth Motorsport lets Forza Motorsport 5 (1.0.0.20) and Forza Motorsport 6 (1.0.0.44) run on Azimuth, which
-officially supports only Forza Horizon 2 and FH2 Fast & Furious. It ships as a proxy `winmm.dll` plus the optional
-`azimuth_fm5.ini` / `azimuth_fm6.ini`. Everything happens in memory: `azimuth.exe` is never modified on disk and
-FH2 keeps working as before.
+Forza Motorsport Extra Options adds optional extras to Forza Motorsport 5 (1.0.0.20) and Forza Motorsport 6
+(1.0.0.44) running on the official Azimuth. It ships as a proxy `winmm.dll` plus `azimuth_fm5.ini` /
+`azimuth_fm6.ini`. Everything happens in memory: `azimuth.exe` and the games are never modified on disk.
 
-Requirements: Azimuth 0.9.9 and your own dump of FM5 1.0.0.20 and/or FM6 1.0.0.44.
+Requirements: Azimuth 1.0.2 or later and your own dump of FM5 1.0.0.20 and/or FM6 1.0.0.44.
 
-When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.exe`) and `data\logs\azimuth.log`.
+When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe`) and `data\logs\azimuth.log`.
 
 ## Current support
 
-### FM6
-- Boot, menus, videos, audio and races, with sessions of an hour or more without crashes.
-- Launcher resolution, frame rate (up to 180 fps), anti-aliasing (2x / 4x MSAA), Car Detail, Shadows and
-  Reflections presets.
-- `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `AlphaToCoverageNoDither`.
-
 ### FM5
-- MSAA and 16x anisotropic filtering.
-- Launcher resolution, with the UI scaled correctly.
-- 60, 120 and 180 fps, with the launcher frame rate kept in the menus as well.
-- Car Detail, Shadows and Reflections presets.
 - `azimuth_fm5.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`.
 
-### Known limitations
-- **FM6:** the Particles and Motion Blur presets have no effect.
-- **FM6:** very heavy scenes can drop below the chosen frame rate.
-- **FM6:** the RivaTuner (RTSS) overlay can crash the game.
-- **FM5:** the Particles and Motion Blur presets have no effect.
-- No Xbox Live features (Rivals, online play, leaderboards).
+### FM6
+- `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`.
+- Lap times on the digital dashboards in Brazilian Portuguese (always on).
 
 ## Unreleased
 
-### Improvements
-- **FM6 and FM5:** slightly lower CPU cost per draw call. The proxy kept per-thread state in thread-local variables,
-  which this compiler emulates with a chain of library calls on every access; the hot paths (deferred context
-  state changes, object releases, draws) now read the thread's slot directly.
+### Changes
+- **Only the extra options; requires the official Azimuth 1.0.2 or later.** Azimuth now runs FM5 and FM6 by itself,
+  so the compatibility layer of 1.x (game unlock, Direct3D/XG/audio/WinRT bridges, launcher resolution, frame rate
+  and graphics presets, FM6 rendering and stability fixes) is gone. Remove any 1.x `winmm.dll` before updating
+  Azimuth.
+- The mod no longer requires one exact `azimuth.exe`: it works with any Azimuth from 1.0.2 on. Every option still
+  checks the game's bytes before writing and is left off, with the reason in the log, when they don't match.
+- The mod's log is now `fm_extra_options.log` (it was `azimuth_motorsport.log`).
+- Rewritten in C++, built with CMake.
 
-### Fixes
-- **FM6:** races in the rain no longer drop below 30 fps (e.g. Sebring's main straight). The rain uses more than
-  8192 pipeline states, which filled the proxy's pipeline table, and every draw then searched the whole table on
-  Azimuth's render thread (~20 ms per frame). The table now holds 65536, and rain races run at the chosen frame rate
-  almost everywhere.
+### Improvements
+- **FM5 and FM6:** `UnlockDLC` works together with Azimuth's own DLC support: with it on, every DLC included in the
+  game counts as purchased; with it off, Azimuth's support works as usual.
+
+### Removed
+- **FM6:** `AlphaToCoverageNoDither`. Azimuth 1.0.2 draws the edges of liveries, decals, fences and foliage
+  correctly by itself.
 
 ## v1.5.0 — FM6 anti-aliasing, reflections, terrain and stutter fixes
 

@@ -1,6 +1,6 @@
 ---
 name: release
-description: Release a new version of Azimuth Motorsport - bump the last published tag (major, minor or fix), move the CHANGELOG's unreleased items into the new version, commit, tag and push (CI builds and publishes the GitHub release).
+description: Release a new version of Forza Motorsport Extra Options - bump the last published tag (major, minor or fix), move the CHANGELOG's unreleased items into the new version, commit, tag and push (CI builds and publishes the GitHub release).
 argument-hint: "[major|minor|fix]"
 disable-model-invocation: true
 ---
@@ -41,7 +41,7 @@ at the first failure; never force anything (`--force`, amend, deleting/moving ta
   whether to release anyway (if yes, add a short section for the version based on the commits since the last
   tag, following the style of the previous entries) or abort.
 - Rename that heading to `## vNEW — <short title>`, following the style of the previous releases
-  (e.g. `## v1.4.1 — FM6 tuning setup name fix`, `## v1.3.0 — FM6 shadows, smooth edges and stability fixes`):
+  (e.g. `## v1.4.1 — FM6 tuning setup name fix`, `## v2.0.0 — Extra options for the official Azimuth`):
   a few words summarizing the main changes, game prefixed where it helps. Keep the section's content
   (`### Improvements`, `### Fixes`, ...) exactly as it is; drop empty subsections.
 - Do not leave a new empty `Unreleased` section behind (the previous releases don't keep one).
@@ -68,10 +68,10 @@ git push origin vNEW
 ```
 
 The tag push triggers `.github/workflows/ci.yml`, which runs the tests, builds `winmm.dll` and publishes the
-GitHub release with `azimuth-motorsport-vNEW.zip`. Only `main` and the tag are pushed (never `historico-local`).
+GitHub release with `ForzaMotorsport_ExtraOptions-vNEW.zip`. Only `main` and the tag are pushed (never `historico-local`).
 
 ## 6. Report
 
 Tell the user: previous -> new version, the changelog heading, the commit hash, and that the release workflow
 started (`gh run list --workflow ci.yml --limit 1` shows it; the release appears at
-https://github.com/victoralvesf/azimuth-motorsport/releases/tag/vNEW once CI finishes).
+`<repo url>/releases/tag/vNEW` once CI finishes, with `<repo url>` from `gh repo view --json url -q .url`).
