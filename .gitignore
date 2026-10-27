@@ -46,3 +46,6 @@ audio_dump_xma/
 
 # probe builds (tools\xg_layout_probe.c; contem copias do xg_x.dll dos jogos)
 /build/
+
+# probe build (MIGRATION.md phase 0)
+probe/build/
