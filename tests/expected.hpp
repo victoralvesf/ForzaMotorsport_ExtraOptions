@@ -35,6 +35,8 @@ constexpr Change k_fm5[] = {
       "b8 01 00 00 00 c3 89 6c 24 18 56 57 41 56 48 83" },
     { "UnlockDLC", 0x19e6a0, "48 8b 0d c1 59 43 02 48 83 c2 08 e8 a0 49 06 00", k_lambda_unlocked },
     { "EnableMarketplace", 0x180c2a, "c7 83 bc 30 00 00 00 00 00 01", "c7 83 bc 30 00 00 00 00 01 01" },
+    { "UnlockMenuFrameRate", 0x7146f7, "8b 89 a0 00 00 00 48 89 5c 24 78 85 c9 74 0f ff c9 74 04 33 db eb 0c bb 02 00 00 00",
+      "8b 89 a0 00 00 00 48 89 5c 24 78 85 c9 74 0f ff c9 74 04 33 db eb 0c bb 01 00 00 00" },
 };
 constexpr uint32_t k_fm5_lambda = 0x19e6a0;
 
@@ -48,6 +50,8 @@ constexpr Change k_fm6[] = {
     { "UnlockDLC", 0xa8ad80, "48 89 5c 24 10 56 57 41 56 48 83 ec 20 48 8d b9",
       "b8 01 00 00 00 c3 57 41 56 48 83 ec 20 48 8d b9" },
     { "UnlockDLC", 0xa40f50, "48 8b 0d d9 dd 39 01 48 83 c2 08 e8 20 9e 04 00", k_lambda_unlocked },
+    { "UnlockMenuFrameRate", 0x207883, "8b 89 a0 00 00 00 85 c9 0f 84 cc 00 00 00 ff c9 0f 85 ce 00 00 00 8d 59 02",
+      "8b 89 a0 00 00 00 85 c9 0f 84 cc 00 00 00 ff c9 0f 85 ce 00 00 00 8d 59 01" },
 };
 constexpr uint32_t k_fm6_lambda = 0xa40f50;
 

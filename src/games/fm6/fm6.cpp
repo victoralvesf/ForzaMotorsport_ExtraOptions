@@ -36,10 +36,17 @@ constexpr Site k_unlock_dlc[] = {
       0, "b0 01 0f 1f 84 00 00 00 00 00 66 0f 1f 44 00 00" }, // mov al,1; nop8; nop6
 };
 
+// Same as FM5: in the Present of Frame11, present mode 1 (menus and transitions) takes sync interval 1 like mode 0
+// (lea ebx,[rcx+2] -> lea ebx,[rcx+1], ecx = 0 there).
+constexpr Site k_unlock_menu_frame_rate[] = {
+    { 0x207883, "8b 89 a0 00 00 00 85 c9 0f 84 ?? ?? ?? ?? ff c9 0f 85 ?? ?? ?? ?? 8d 59 02", 24, "01" },
+};
+
 constexpr Option k_options[] = {
     { "SkipIntro", k_skip_intro },
     { "SkipPresentationVideo", k_skip_presentation_video },
     { "UnlockDLC", k_unlock_dlc },
+    { "UnlockMenuFrameRate", k_unlock_menu_frame_rate },
 };
 
 } // namespace

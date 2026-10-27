@@ -11,10 +11,10 @@ When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe
 ## Current support
 
 ### FM5
-- `azimuth_fm5.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`.
+- `azimuth_fm5.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`, `UnlockMenuFrameRate`.
 
 ### FM6
-- `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`.
+- `azimuth_fm6.ini`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `UnlockMenuFrameRate`.
 - Lap times on the digital dashboards in Brazilian Portuguese (always on).
 
 ## Unreleased
@@ -28,6 +28,10 @@ When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe
   checks the game's bytes before writing and is left off, with the reason in the log, when they don't match.
 - The mod's log is now `fm_extra_options.log` (it was `azimuth_motorsport.log`).
 - Rewritten in C++, built with CMake.
+
+### New
+- **FM5 and FM6:** `UnlockMenuFrameRate`: menus and transitions run at the frame rate chosen in Azimuth instead of
+  half of it (the game asks for half there).
 
 ### Improvements
 - **FM5 and FM6:** `UnlockDLC` works together with Azimuth's own DLC support: with it on, every DLC included in the

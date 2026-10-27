@@ -36,8 +36,9 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
   folder only.
 - `tests/` (doctest): `expected.hpp` = hand-written bytes per option (never copied from the tables), fake image
   tests, real exe tests (skipped without `game_binaries\`), `check_imports.cmake`, `check_includes.cmake`.
-- `azimuth_fm5.ini` `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`),
-  `azimuth_fm6.ini` `[FM6]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`); a missing key = off.
+- `azimuth_fm5.ini` `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`,
+  `UnlockMenuFrameRate`), `azimuth_fm6.ini` `[FM6]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`,
+  `UnlockMenuFrameRate`); a missing key = off.
   Log: `fm_extra_options.log` next to `azimuth.exe` (recreated each run).
 - `azimuth.exe` (root, local), `data\` (Azimuth's folder: `data\logs\azimuth.log`).
 - `game_binaries\FM5\`, `FM6\`, `AZIMUTH\` — copied exes per game. Game folders: `E:\Xbox One Games\Forza Motorsport 5`,

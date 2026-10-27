@@ -4,7 +4,8 @@
 
 Extra options for **Forza Motorsport 5** (Xbox One, title ID `7B35D917`) and **Forza Motorsport 6** (title ID
 `64F9397E`) running on the official Azimuth (Almost There Games): skip the intro and presentation videos, unlock
-the DLC cars already included in the game, and enable the Marketplace in FM5. It also fixes the lap times on FM6's
+the DLC cars already included in the game, keep Azimuth's frame rate in menus and transitions, and enable the
+Marketplace in FM5. It also fixes the lap times on FM6's
 digital dashboards in Brazilian Portuguese.
 
 The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`, plus one `.ini` per game. All of its changes
@@ -58,6 +59,7 @@ does not match, that option is simply left off and the log says why.
 | `SkipPresentationVideo` | 0 | Skips the presentation video that plays after the brightness screen and goes straight to the first race. |
 | `UnlockDLC` | 1 | The DLC cars and packs already included in the game (Car Pass, car packs, VIP...) count as purchased; the cars show up to buy with in-game credits. |
 | `EnableMarketplace` | 1 | Enables the Marketplace option in the menu without Xbox Live (shows the game's DLC packs). |
+| `UnlockMenuFrameRate` | 1 | Keeps the frame rate chosen in Azimuth in menus and transitions too (the game itself halves it there; races already run at the chosen rate). |
 
 ### Forza Motorsport 6 (`azimuth_fm6.ini`, section `[FM6]`)
 
@@ -66,6 +68,7 @@ does not match, that option is simply left off and the log says why.
 | `SkipIntro` | 1 | Skips the opening videos and goes straight to loading. |
 | `SkipPresentationVideo` | 1 | Skips the presentation video before the first race of a new profile and the intro videos of the Porsche/NASCAR expansions. |
 | `UnlockDLC` | 1 | The DLC cars and packs already included in the game (Car Pass, car packs, VIP, Porsche/NASCAR expansions...) count as purchased; the cars show up to buy with in-game credits. |
+| `UnlockMenuFrameRate` | 1 | Keeps the frame rate chosen in Azimuth in menus and transitions too (the game itself halves it there; races already run at the chosen rate). |
 
 Always on, no option: in Brazilian Portuguese, lap times on FM6's digital dashboards showed boxes in place of the
 minute and second marks (`00□12,977□□`), because the dashboard fonts have no apostrophe. Those times are shown as in
