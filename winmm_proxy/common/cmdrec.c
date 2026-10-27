@@ -605,8 +605,13 @@ static const ID3D12GraphicsCommandList2Vtbl rc_vt = {
 
 /* ---- reproducao numa lista real ---- */
 /* com StutterLog: tempo e contagem por operacao reproduzida (linha de vazao: as mais caras) */
-#define RC_OPS 64
+#define RC_OPS 80
+#define RC_P_AFTER_RT  70   /* DrawIndexedInstanced: 1o depois de OMSetRenderTargets */
+#define RC_P_AFTER_PSO 71   /* 1o depois de SetPipelineState (sem troca de RT) */
+#define RC_P_PLAIN     72   /* os demais */
+#define RC_P_HOOK      73   /* parte do gpuguard (hook_draw_indexed_uav antes do draw real) */
 extern int st_on;
+extern LONG64 gg_drawidx_hook_ticks;
 static LONG64 rc_op_ticks[RC_OPS];
 static LONG rc_op_n[RC_OPS];
 
@@ -615,6 +620,7 @@ static void rc_play(GCL2 *g, const rc_list *l)
     const ID3D12GraphicsCommandList2Vtbl *v = g->lpVtbl;
     uint32_t pos = 0;
     LARGE_INTEGER o0, o1;
+    int dirty = 0;   /* 1 = RT trocado, 2 = PSO trocado desde o ultimo DrawIndexedInstanced */
     while (pos + sizeof(rc_hdr) <= l->len) {
         const rc_hdr *h = (const rc_hdr *)(l->buf + pos);
         const void *p = h + 1;
@@ -723,6 +729,14 @@ static void rc_play(GCL2 *g, const rc_list *l)
             QueryPerformanceCounter(&o1);
             rc_op_ticks[h->op] += o1.QuadPart - o0.QuadPart;   /* so a thread da fila reproduz (sob a trava dela) */
             rc_op_n[h->op]++;
+            if (h->op == RC_OMSetRenderTargets) dirty = 1;
+            else if (h->op == RC_SetPipelineState && !dirty) dirty = 2;
+            else if (h->op == RC_DrawIndexedInstanced) {
+                int b = dirty == 1 ? RC_P_AFTER_RT : dirty == 2 ? RC_P_AFTER_PSO : RC_P_PLAIN;
+                rc_op_ticks[b] += o1.QuadPart - o0.QuadPart;
+                rc_op_n[b]++;
+                dirty = 0;
+            }
         }
     }
 }
@@ -918,8 +932,11 @@ int rc_format(char *buf, int cap, double frames)
     if (len < 0 || len >= cap) return len;
     {   /* as 8 operacoes mais caras: "op N count/quadro ms/quadro" (N = indice na vtable da lista) */
         int k, i, best;
-        len += snprintf(buf + len, cap - len, " | replay by op:");
-        for (k = 0; k < 8; k++) {
+        rc_op_ticks[RC_P_HOOK] = gg_drawidx_hook_ticks;
+        rc_op_n[RC_P_HOOK] = rc_op_n[RC_DrawIndexedInstanced];
+        gg_drawidx_hook_ticks = 0;
+        len += snprintf(buf + len, cap - len, " | replay by op (70-72 = DrawIndexed after RT/after PSO/plain, 73 = its hook):");
+        for (k = 0; k < 12; k++) {
             best = -1;
             for (i = 0; i < RC_OPS; i++) if (rc_op_n[i] && (best < 0 || rc_op_ticks[i] > rc_op_ticks[best])) best = i;
             if (best < 0 || len >= cap) break;

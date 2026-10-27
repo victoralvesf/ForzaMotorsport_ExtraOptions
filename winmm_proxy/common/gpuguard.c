@@ -2095,12 +2095,18 @@ static void STDMETHODCALLTYPE hook_draw_uav(ID3D12GraphicsCommandList *l, UINT v
     bind_null_uavs(l);
     real_draw(l, vc, ic, sv, si);
 }
+/* com StutterLog: tempo do proprio hook (antes do draw real) nos DrawIndexedInstanced (linha de vazao, cmdrec.c) */
+extern int st_on;
+LONG64 gg_drawidx_hook_ticks;
 static void STDMETHODCALLTYPE hook_draw_indexed_uav(ID3D12GraphicsCommandList *l, UINT idx, UINT ic, UINT si, INT bv, UINT sinst)
 {
     uint32_t arg[3] = { idx, ic, si };
+    LARGE_INTEGER t0, t1;
+    if (st_on) QueryPerformanceCounter(&t0);
     check_odd(l, GG_OP_DRAW_INDEXED, arg);
     st_draw();
     bind_null_uavs(l);
+    if (st_on) { QueryPerformanceCounter(&t1); gg_drawidx_hook_ticks += t1.QuadPart - t0.QuadPart; }
     real_draw_indexed(l, idx, ic, si, bv, sinst);
 }
 static void STDMETHODCALLTYPE hook_exec_indirect_uav(ID3D12GraphicsCommandList *l, ID3D12CommandSignature *sig, UINT max,
