@@ -1,5 +1,5 @@
 // winmm.dll probe for the migration (MIGRATION.md, phase 0): forwards every winmm export to System32 and only logs.
-// It changes nothing in the game. Log: azimuth_probe.log next to azimuth.exe.
+// It changes nothing in the game. Log: azimuth_probe.log next to azimuth.exe (appended, one block per run).
 //  - Azimuth version (VERSIONINFO) and the IAT hooks on kernel32!FlushInstructionCache / RtlAddFunctionTable;
 //  - every FlushInstructionCache call: PE header at the base, game identified by TimeDateStamp + SizeOfImage;
 //  - for FM5 / FM6: the bytes at each extra option site (original or not) and the protection of the code.
@@ -59,14 +59,16 @@ static bool readable(const void *p, size_t n)
 
 static uint8_t *g_az;   // azimuth.exe
 
-static const char *az_rva(const void *p)
+struct Addr { char s[40]; };
+
+static Addr az_rva(const void *p)
 {
-    static thread_local char buf[32];
-    uintptr_t a = (uintptr_t)p, b = (uintptr_t)g_az;
+    Addr r;
     MEMORY_BASIC_INFORMATION mi;
-    if (VirtualQuery(p, &mi, sizeof mi) && mi.AllocationBase == g_az) snprintf(buf, sizeof buf, "azimuth+%#llx", (unsigned long long)(a - b));
-    else snprintf(buf, sizeof buf, "%p", p);
-    return buf;
+    if (VirtualQuery(p, &mi, sizeof mi) && mi.AllocationBase == g_az)
+        snprintf(r.s, sizeof r.s, "azimuth+%#llx", (unsigned long long)((uintptr_t)p - (uintptr_t)g_az));
+    else snprintf(r.s, sizeof r.s, "%p", p);
+    return r;
 }
 
 // ---- Azimuth version (VS_FIXEDFILEINFO of the exe, no version.dll) ----
@@ -118,7 +120,7 @@ static bool iat_hook(const char *dll, const char *func, void *hook, void **orig)
     *orig = *slot;
     *slot = hook;
     VirtualProtect(slot, sizeof *slot, old, &old);
-    wlog("IAT hook %s!%s: slot %s (was %p)", dll, func, az_rva(slot), *orig);
+    wlog("IAT hook %s!%s: slot %s (was %p)", dll, func, az_rva(slot).s, *orig);
     return true;
 }
 
@@ -212,11 +214,11 @@ static BOOL WINAPI hook_flush(HANDLE process, LPCVOID base, SIZE_T size)
     const uint8_t *b = (const uint8_t *)base;
     const IMAGE_NT_HEADERS64 *nt = b ? pe_at(b) : nullptr;
     if (!nt) {
-        wlog("FlushInstructionCache(%p, %#zx) from %s: no PE at the base", base, (size_t)size, az_rva(caller));
+        wlog("FlushInstructionCache(%p, %#zx) from %s: no PE at the base", base, (size_t)size, az_rva(caller).s);
     } else {
         DWORD ts = nt->FileHeader.TimeDateStamp, soi = nt->OptionalHeader.SizeOfImage;
         wlog("FlushInstructionCache(%p, %#zx) from %s: PE TimeDateStamp=%#lx SizeOfImage=%#lx CheckSum=%#lx%s", base,
-             (size_t)size, az_rva(caller), ts, soi, nt->OptionalHeader.CheckSum, soi == size ? " (whole image)" : "");
+             (size_t)size, az_rva(caller).s, ts, soi, nt->OptionalHeader.CheckSum, soi == size ? " (whole image)" : "");
         for (const Game &g : k_games) {
             if (g.timestamp != ts || g.size_of_image != soi || size != soi) continue;
             LONG n = InterlockedIncrement(&g_identified);
@@ -231,7 +233,7 @@ static BOOLEAN WINAPI hook_add_ft(PRUNTIME_FUNCTION table, DWORD count, DWORD64 
 {
     const IMAGE_NT_HEADERS64 *nt = pe_at((const uint8_t *)base);
     wlog("RtlAddFunctionTable(%p, %lu, base %#llx) from %s%s", (void *)table, count, (unsigned long long)base,
-         az_rva(__builtin_return_address(0)), nt ? " (PE at the base)" : "");
+         az_rva(__builtin_return_address(0)).s, nt ? " (PE at the base)" : "");
     return g_add_ft(table, count, base);
 }
 
@@ -245,8 +247,8 @@ static HANDLE WINAPI hook_create_thread(LPSECURITY_ATTRIBUTES sa, SIZE_T stack, 
 {
     HANDLE h = g_create_thread(sa, stack, start, arg, flags, id);
     if (InterlockedIncrement(&g_threads) <= 64)
-        wlog("CreateThread start %s arg %p from %s (identified games so far: %ld)", az_rva((void *)start), arg,
-             az_rva(__builtin_return_address(0)), g_identified);
+        wlog("CreateThread start %s arg %p from %s (identified games so far: %ld)", az_rva((void *)start).s, arg,
+             az_rva(__builtin_return_address(0)).s, g_identified);
     return h;
 }
 
@@ -272,7 +274,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID)
     GetModuleFileNameW(inst, path, MAX_PATH);
     wchar_t *slash = wcsrchr(path, L'\\');
     wcscpy(slash ? slash + 1 : path, L"azimuth_probe.log");
-    g_log = _wfopen(path, L"w");
+    g_log = _wfopen(path, L"a");
+    if (g_log) fprintf(g_log, "\n==== run pid %lu ====\n", GetCurrentProcessId());
     wlog("winmm probe (logs only, changes nothing)");
     load_real_winmm();
 
