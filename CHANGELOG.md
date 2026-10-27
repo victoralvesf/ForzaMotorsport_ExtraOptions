@@ -31,6 +31,14 @@ When reporting a bug, please attach `azimuth_motorsport.log` (next to `azimuth.e
 - **FM5:** the Particles and Motion Blur presets have no effect.
 - No Xbox Live features (Rivals, online play, leaderboards).
 
+## Unreleased
+
+### Fixes
+- **FM6:** races in the rain no longer drop below 30 fps (e.g. Sebring's main straight). The rain uses more than
+  8192 pipeline states, which filled the proxy's pipeline table, and every draw then searched the whole table on
+  Azimuth's render thread (~20 ms per frame). The table now holds 65536, and rain races run at the chosen frame rate
+  almost everywhere.
+
 ## v1.5.0 — FM6 anti-aliasing, reflections, terrain and stutter fixes
 
 ### Improvements
