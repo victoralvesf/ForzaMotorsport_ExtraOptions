@@ -13,6 +13,16 @@ bool readable(const void *p, size_t n)
     return static_cast<const uint8_t *>(p) + n <= static_cast<const uint8_t *>(mi.BaseAddress) + mi.RegionSize;
 }
 
+size_t readable_size(const void *p, size_t max)
+{
+    MEMORY_BASIC_INFORMATION mi;
+    if (!VirtualQuery(p, &mi, sizeof mi) || mi.State != MEM_COMMIT) return 0;
+    if (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return 0;
+    size_t left = static_cast<size_t>(static_cast<const uint8_t *>(mi.BaseAddress) + mi.RegionSize -
+                                      static_cast<const uint8_t *>(p));
+    return left < max ? left : max;
+}
+
 const IMAGE_NT_HEADERS64 *headers(const void *base)
 {
     auto *b = static_cast<const uint8_t *>(base);

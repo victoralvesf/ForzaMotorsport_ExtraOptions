@@ -120,8 +120,10 @@ Result apply(uint8_t *base, size_t image_size, const Option &opt, const char *ga
         }
         uint8_t *p = base + s.rva;
         size_t avail = s.rva < image_size ? image_size - s.rva : 0;
+        // a section ends its region (Azimuth protects each one): only what is readable there is compared
         if (avail > k_max_bytes) avail = k_max_bytes;
-        if (!avail || !pe::readable(p, avail)) {
+        avail = avail ? pe::readable_size(p, avail) : 0;
+        if (!avail) {
             log::write("%s: %s: site %#x is outside the image or unreadable, option ignored", game, opt.key, s.rva);
             return Result::mismatch;
         }
