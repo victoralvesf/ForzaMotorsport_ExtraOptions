@@ -868,3 +868,14 @@ TEST(gpuguard_heap_forget)
     CHECK_EQ(gg_written(a), 0);
     gg_heap_reset();
 }
+
+TEST(gpuguard_pso_table_holds_fm6_rain)
+{
+    /* FM6 em Sebring na chuva: mais de 8192 PSOs vivos; todos precisam caber (consulta curta, nao varredura) */
+    static uint8_t psos[12000 * 16];
+    static int rs;
+    int i, ok = 1;
+    for (i = 0; i < 12000; i++) gg_pso_add(psos + i * 16, NULL, 0, 0, &rs);
+    for (i = 0; i < 12000 && ok; i++) ok = gg_pso_rs(psos + i * 16) == &rs;
+    CHECK(ok);
+}

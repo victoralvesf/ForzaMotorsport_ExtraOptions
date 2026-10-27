@@ -1185,7 +1185,9 @@ static void STDMETHODCALLTYPE hook_guav(ID3D12GraphicsCommandList *l, UINT i, D3
  * AMD poe 0xdeadbeef.. como endereco de slot de vertex buffer sem buffer. Guarda, por PSO, os slots que o input
  * layout le e, por lista, os slots com buffer e se ha index buffer; o draw que le slot vazio vira relatorio. ---- */
 
-#define GG_PSO_SLOTS 8192
+/* FM6 na chuva passa de 8192 PSOs: com a tabela cheia cada consulta de PSO fora dela (todo draw, bind_null_uavs)
+   varria a tabela inteira (~4 us por draw, 20+ ms por quadro na 'Azimuth queue'). 65536 = 2 MiB */
+#define GG_PSO_SLOTS 65536
 typedef struct { void *pso, *rs; uint32_t slots, nelem, hash, info; } gg_pso;   /* hash: gg_shader_hash (estavel entre boots);
                                                                            rs: root signature da criacao */
 #define GG_PSO_SO 0x20u
