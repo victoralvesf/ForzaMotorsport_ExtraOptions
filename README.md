@@ -102,7 +102,8 @@ ctest --preset default
 The output is `build\winmm.dll`.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the tests on every pull request and, on a `v*` tag push, runs the
-tests, builds and publishes a release with `winmm.dll` + `azimuth_fm5.ini` + `azimuth_fm6.ini` + `README.txt`.
+tests, builds and publishes a release with `winmm.dll` + `azimuth_fm5.ini` + `azimuth_fm6.ini` + `README.txt`
+(this file as plain text, made by `tools/md2txt`).
 
 ## License
 

@@ -119,7 +119,8 @@ bytes written by hand in `tests/expected.hpp`. When the real game exes are prese
 Azimuth does and every option is applied to them, in the original form and after Azimuth's DLC patch. Two CMake
 checks make sure `winmm.dll` imports only system DLLs and that no source uses a relative include.
 
-GitHub Actions runs the tests on every pull request and, on a `v*` tag, builds and publishes the release zip.
+GitHub Actions runs the tests on every pull request and, on a `v*` tag, builds and publishes the release zip. The
+zip's `README.txt` is `README.md` as plain text, made by `tools/md2txt` (built with the rest, not shipped).
 
 ## What is not in this repository
 

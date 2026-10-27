@@ -41,7 +41,7 @@ jobs:
         run: |
           mkdir -p dist
           cp build/winmm.dll azimuth_fm5.ini azimuth_fm6.ini dist/
-          cp README.md dist/README.txt
+          build/md2txt.exe README.md dist/README.txt
           cd dist && 7z a "../ForzaMotorsport_ExtraOptions-$GITHUB_REF_NAME.zip" winmm.dll azimuth_fm5.ini azimuth_fm6.ini README.txt
 
       - uses: actions/upload-artifact@v4

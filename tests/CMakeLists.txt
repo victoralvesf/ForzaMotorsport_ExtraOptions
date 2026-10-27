@@ -8,11 +8,12 @@ add_executable(unit_tests
     test_real_exes.cpp
     image.cpp
     test_proxy.cpp
+    test_md2txt.cpp
 )
 target_include_directories(unit_tests SYSTEM PRIVATE doctest)
 # the test runner is not shipped: doctest REQUIRE needs exceptions
 target_compile_options(unit_tests PRIVATE -fexceptions)
-target_link_libraries(unit_tests PRIVATE games)
+target_link_libraries(unit_tests PRIVATE games md2txt_lib)
 target_compile_definitions(unit_tests PRIVATE
     TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
     TEST_OUT_DIR="${CMAKE_CURRENT_BINARY_DIR}"

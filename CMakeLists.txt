@@ -51,6 +51,12 @@ target_link_libraries(winmm PRIVATE games)
 target_link_options(winmm PRIVATE -Wl,--enable-stdcall-fixup)
 set_target_properties(winmm PROPERTIES PREFIX "" OUTPUT_NAME winmm)
 
+# ---- md2txt (release tool, not shipped): README.md -> README.txt of the zip ----
+add_library(md2txt_lib STATIC tools/md2txt/convert.cpp)
+target_include_directories(md2txt_lib PUBLIC tools/md2txt)
+add_executable(md2txt tools/md2txt/md2txt.cpp)
+target_link_libraries(md2txt PRIVATE md2txt_lib)
+
 # ---- tests ----
 include(CTest)
 if(BUILD_TESTING)
