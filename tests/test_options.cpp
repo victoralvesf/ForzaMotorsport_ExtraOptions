@@ -133,6 +133,27 @@ TEST_CASE("options: FM5 jump of SkipPresentationVideo lands on the checked callb
     CHECK(expected::k_fm5[3].rva + 5 + rel == expected::k_fm5[4].rva);
 }
 
+TEST_CASE("options: FM6 UnlockMenuFrameRate stub jumps back to the setter and the vtables point to the stub")
+{
+    const Change *setter = nullptr;
+    for (const Change &c : expected::k_fm6)
+        if (strcmp(c.option, "UnlockMenuFrameRate") == 0 && c.rva == 0x849940) setter = &c;
+    REQUIRE(setter);
+    std::vector<uint8_t> a = hex(setter->after);
+    // jne rel8 at +10 and jmp rel8 at +14 both land on the setter at +0
+    CHECK(a[10] == 0x75);
+    CHECK(12 + static_cast<int8_t>(a[11]) == 0);
+    CHECK(a[14] == 0xeb);
+    CHECK(16 + static_cast<int8_t>(a[15]) == 0);
+    for (const Change &c : expected::k_fm6)
+        if (strcmp(c.option, "UnlockMenuFrameRate") == 0 && c.rva != setter->rva) {
+            std::vector<uint8_t> v = hex(c.after);
+            uint64_t to;
+            memcpy(&to, v.data(), 8);
+            CHECK(to == 0x140000000 + setter->rva + 7);
+        }
+}
+
 TEST_CASE("options: each option alone, all on and all off")
 {
     for (const char *tag : { "FM5", "FM6" }) {

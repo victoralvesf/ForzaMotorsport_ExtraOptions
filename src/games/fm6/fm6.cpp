@@ -36,10 +36,14 @@ constexpr Site k_unlock_dlc[] = {
       0, "b0 01 0f 1f 84 00 00 00 00 00 66 0f 1f 44 00 00" }, // mov al,1; nop8; nop6
 };
 
-// Same as FM5: in the Present of Frame11, present mode 1 (menus and transitions) takes sync interval 1 like mode 0
-// (lea ebx,[rcx+2] -> lea ebx,[rcx+1], ecx = 0 there).
+// Same as FM5 (present mode 1 -> 0 when the game stores it), but the setter (mov [rcx+0xa0],edx; ret) is shared
+// with other classes (CPresentationView...). A stub goes in the setter's padding (cmp edx,1; jne setter;
+// xor edx,edx; jmp setter) and only the setter slots (+0x1a0) of the Frame11 and Frame vtables point to it: the low
+// byte of the pointer 0x...849940 becomes 0x47 (the low 16 bits do not change if the image is relocated).
 constexpr Site k_unlock_menu_frame_rate[] = {
-    { 0x207883, "8b 89 a0 00 00 00 85 c9 0f 84 ?? ?? ?? ?? ff c9 0f 85 ?? ?? ?? ?? 8d 59 02", 24, "01" },
+    { 0x849940, "89 91 a0 00 00 00 c3 cc cc cc cc cc cc cc cc cc", 7, "83 fa 01 75 f4 31 d2 eb f0" },
+    { 0x19f3a88, "40 99 ?? ?? ?? ?? ?? ??", 0, "47" }, // Frame11
+    { 0x19f41a8, "40 99 ?? ?? ?? ?? ?? ??", 0, "47" }, // Frame
 };
 
 constexpr Option k_options[] = {

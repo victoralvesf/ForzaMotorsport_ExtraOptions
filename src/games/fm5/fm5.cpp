@@ -39,11 +39,12 @@ constexpr Site k_enable_marketplace[] = {
     { 0x180c2a, "c7 83 bc 30 00 00 00 00 00 01", 8, "01" },
 };
 
-// Present of Frame11: the game asks for present mode 1 (sync interval 2, half the frame rate) in menus and
-// transitions and mode 0 (interval 1) in races. Mode 1 also takes interval 1 (mov ebx,2 -> mov ebx,1), so Azimuth's
-// frame rate holds everywhere.
+// Present mode of Frame11/Frame ([frame+0xa0]): the game asks for mode 1 (sync interval 2, half the frame rate) in
+// menus and transitions and mode 0 (interval 1) in races, and also reads the mode back to pace its frames. The
+// setter (used only by the Frame11 and Frame vtables) stores 0 when it is asked for 1, in its own padding:
+// cmp edx,1; jne +2; xor edx,edx; mov [rcx+0xa0],edx; ret.
 constexpr Site k_unlock_menu_frame_rate[] = {
-    { 0x7146f7, "8b 89 a0 00 00 00 48 89 5c 24 78 85 c9 74 0f ff c9 74 04 33 db eb 0c bb 02 00 00 00", 24, "01" },
+    { 0x711620, "89 91 a0 00 00 00 c3 cc cc cc cc cc cc cc cc cc", 0, "83 fa 01 75 02 31 d2 89 91 a0 00 00 00 c3" },
 };
 
 constexpr Option k_options[] = {
