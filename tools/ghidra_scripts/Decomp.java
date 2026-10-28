@@ -14,8 +14,10 @@ public class Decomp extends GhidraScript {
         DecompInterface di = new DecompInterface();
         di.openProgram(currentProgram);
         FunctionManager fm = currentProgram.getFunctionManager();
+        int timeout = 180;
         for (int i = 1; i < args.length; i++) {
             String a = args[i];
+            if (a.startsWith("t:")) { timeout = Integer.parseInt(a.substring(2)); continue; } // decompile timeout in seconds
             if (a.startsWith("x:")) { // xrefs to address
                 Address ad = toAddr(a.substring(2));
                 out.println("==== XREFS to " + ad);
@@ -33,7 +35,7 @@ public class Decomp extends GhidraScript {
             }
             if (f == null) { out.println("==== no function at " + ad); continue; }
             out.println("==== FUNCTION " + f.getName() + " @ " + f.getEntryPoint() + " (query " + ad + ")");
-            DecompileResults r = di.decompileFunction(f, 180, monitor);
+            DecompileResults r = di.decompileFunction(f, timeout, monitor);
             if (r.decompileCompleted()) out.println(r.getDecompiledFunction().getC());
             else out.println("decompile failed: " + r.getErrorMessage());
         }
