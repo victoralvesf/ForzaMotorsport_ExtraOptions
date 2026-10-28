@@ -9,4 +9,7 @@ namespace core::options {
 // applied all or nothing; then g.apply_fixes. Returns the number of options applied.
 int apply(const game::Module &g, uint8_t *base, const wchar_t *ini_path);
 
+// [GLOBAL] DisableLog=1 in the options ini: no fm_extra_options.log (missing = 0, the log is written).
+bool log_disabled(const wchar_t *ini_path);
+
 } // namespace core::options

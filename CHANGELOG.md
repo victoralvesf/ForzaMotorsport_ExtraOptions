@@ -2,14 +2,17 @@
 
 Forza Motorsport Extra Options adds optional extras to Forza Motorsport 5 (1.0.0.20) and Forza Motorsport 6
 (1.0.0.44) running on the official Azimuth. It ships as a proxy `winmm.dll` plus `motorsport_extraoptions.ini`
-(sections `[FM5]` and `[FM6]`). Everything happens in memory: `azimuth.exe` and the games are never modified on
-disk.
+(sections `[GLOBAL]`, `[FM5]` and `[FM6]`). Everything happens in memory: `azimuth.exe` and the games are never
+modified on disk.
 
 Requirements: Azimuth 1.0.2 or later and your own dump of FM5 1.0.0.20 and/or FM6 1.0.0.44.
 
 When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe`) and `data\logs\azimuth.log`.
 
 ## Current support
+
+### Both games
+- `[GLOBAL]`: `DisableLog` (ini only, not in the launcher).
 
 ### FM5
 - `[FM5]`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`, `UnlockMenuFrameRate`.
@@ -30,6 +33,8 @@ First release of Forza Motorsport Extra Options.
   is not added and the ini still works.
 - Works with any Azimuth from 1.0.2 on. Every option checks the game's bytes before writing and is left off, with
   the reason in `fm_extra_options.log`, when they don't match.
+- **`[GLOBAL]` `DisableLog`:** `1` turns `fm_extra_options.log` off (default `0`, log on). Only in the ini, not in
+  the launcher.
 - **FM5 and FM6:** `SkipIntro`: skips the opening videos.
 - **FM5 and FM6:** `SkipPresentationVideo`: skips the presentation video before the first race (on FM6 also the
   intros of the Porsche and NASCAR expansions, if you have the DLC files).

@@ -24,7 +24,7 @@ bool replace_file_name(wchar_t *path, const wchar_t *name)
     return true;
 }
 
-wchar_t g_ini[MAX_PATH]; // motorsport_extraoptions.ini next to winmm.dll (= azimuth.exe): one ini, a section per game
+wchar_t g_ini[MAX_PATH]; // motorsport_extraoptions.ini next to winmm.dll (= azimuth.exe): [GLOBAL] + a section per game
 volatile LONG g_applied;
 
 // Azimuth flushes the mapped game image just before running it: the first known game gets its options, once.
@@ -54,10 +54,12 @@ bool process_is_azimuth()
 
 void attach(HINSTANCE self)
 {
+    bool have_ini =
+        GetModuleFileNameW(self, g_ini, MAX_PATH) && replace_file_name(g_ini, L"motorsport_extraoptions.ini");
     wchar_t path[MAX_PATH];
-    if (GetModuleFileNameW(self, path, MAX_PATH)) {
-        replace_file_name(path, L"fm_extra_options.log");
-        core::log::open(path);
+    if (GetModuleFileNameW(self, path, MAX_PATH) && replace_file_name(path, L"fm_extra_options.log")) {
+        if (have_ini && core::options::log_disabled(g_ini)) DeleteFileW(path); // no stale log of an earlier run
+        else core::log::open(path);
     }
     core::log::write("Forza Motorsport Extra Options (winmm.dll)");
 
@@ -69,7 +71,7 @@ void attach(HINSTANCE self)
         core::log::write("process is not azimuth.exe: forwarding only");
         return;
     }
-    if (!GetModuleFileNameW(self, g_ini, MAX_PATH) || !replace_file_name(g_ini, L"motorsport_extraoptions.ini")) {
+    if (!have_ini) {
         core::log::write("path of motorsport_extraoptions.ini too long: options off");
         return;
     }

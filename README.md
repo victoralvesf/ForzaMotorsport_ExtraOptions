@@ -9,7 +9,8 @@ Marketplace in FM5. It also fixes the lap times on FM6's
 digital dashboards in Brazilian Portuguese.
 
 The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`, plus `motorsport_extraoptions.ini` with a
-section per game (`[FM5]`, `[FM6]`). All of its changes are made in memory when Azimuth loads the game.
+section per game (`[FM5]`, `[FM6]`) and a `[GLOBAL]` section. All of its changes are made in memory when Azimuth
+loads the game.
 `azimuth.exe`, the game and the other Azimuth files are **not modified on disk**.
 
 > Versions 1.x of this project (then called Azimuth Motorsport) made FM5 and FM6 run on an older Azimuth. Azimuth
@@ -59,6 +60,14 @@ away and applies the next time the game starts. The other games in Azimuth are n
 The section is added only when the launcher code the mod relies on matches what it expects (Azimuth 1.0.2). With a
 version where it does not, the launcher stays as it is (the log says why) and the options still work from the ini.
 
+### Global (section `[GLOBAL]`)
+
+Only in `motorsport_extraoptions.ini` (not in Azimuth's launcher):
+
+| Option | Default | What it does |
+|---|---|---|
+| `DisableLog` | 0 | `1` stops writing `fm_extra_options.log` (and deletes the one of an earlier run). |
+
 ### Forza Motorsport 5 (section `[FM5]`)
 
 | Option | Default | What it does |
@@ -89,7 +98,8 @@ works as usual; with `UnlockDLC=1` every DLC included in the game counts as purc
 
 - `fm_extra_options.log` (next to `azimuth.exe`) is the mod's log, recreated on every run. It shows the Azimuth
   version, the game found and, for each option, whether it was applied, off, or ignored because the game's bytes
-  did not match.
+  did not match. It is not written with `DisableLog=1` in `[GLOBAL]`; set it back to `0` before reporting a
+  problem.
 - `data\logs\azimuth.log` is Azimuth's own log.
 
 Include both files when you report a problem.

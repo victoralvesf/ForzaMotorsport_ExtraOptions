@@ -184,6 +184,27 @@ TEST_CASE("options: everything is off without the ini")
     }
 }
 
+TEST_CASE("options: [GLOBAL] DisableLog turns the log off only when set")
+{
+    CHECK_FALSE(core::options::log_disabled(L"" TEST_OUT_DIR "/no_such.ini"));
+    const char *path = TEST_OUT_DIR "/test_options_global.ini";
+    const wchar_t *wpath = L"" TEST_OUT_DIR "/test_options_global.ini";
+    for (int value : { 0, 1 }) {
+        CAPTURE(value);
+        FILE *f = fopen(path, "w");
+        REQUIRE(f);
+        fprintf(f, "[GLOBAL]\nDisableLog=%d\n[FM5]\nSkipIntro=1\n", value);
+        fclose(f);
+        CHECK(core::options::log_disabled(wpath) == (value == 1));
+    }
+    FILE *f = fopen(path, "w"); // the key in a game section is not the global one
+    REQUIRE(f);
+    fprintf(f, "[FM5]\nDisableLog=1\n");
+    fclose(f);
+    CHECK_FALSE(core::options::log_disabled(wpath));
+    remove(path);
+}
+
 TEST_CASE("options: UnlockDLC takes the lambda in Azimuth's form, and nothing else")
 {
     struct Lambda {

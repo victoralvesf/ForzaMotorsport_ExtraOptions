@@ -22,4 +22,9 @@ int apply(const game::Module &g, uint8_t *base, const wchar_t *ini_path)
     return applied;
 }
 
+bool log_disabled(const wchar_t *ini_path)
+{
+    return ini::get_int(ini_path, "GLOBAL", "DisableLog", 0) != 0;
+}
+
 } // namespace core::options

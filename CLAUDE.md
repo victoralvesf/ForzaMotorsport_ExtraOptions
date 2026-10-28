@@ -42,7 +42,7 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
   folder only.
 - `tests/` (doctest): `expected.hpp` = hand-written bytes per option (never copied from the tables), fake image
   tests, real exe tests (skipped without `game_binaries\`), `check_imports.cmake`, `check_includes.cmake`.
-- `motorsport_extraoptions.ini` `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`,
+- `motorsport_extraoptions.ini` `[GLOBAL]` (`DisableLog`: 1 = no log; ini only, not in the launcher), `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`,
   `UnlockMenuFrameRate`) and `[FM6]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`,
   `UnlockMenuFrameRate`); a missing key = off.
   Log: `fm_extra_options.log` next to `azimuth.exe` (recreated each run).
