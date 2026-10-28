@@ -5,13 +5,11 @@
 Extra options for **Forza Motorsport 5** (Xbox One, title ID `7B35D917`) and **Forza Motorsport 6** (title ID
 `64F9397E`) running on the official Azimuth (Almost There Games): skip the intro and presentation videos, unlock
 the DLC cars already included in the game, keep Azimuth's frame rate in menus and transitions, and enable the
-Marketplace in FM5. It also fixes the lap times on FM6's
-digital dashboards in Brazilian Portuguese.
+Marketplace in FM5. It also fixes the lap times on FM6's digital dashboards in Brazilian Portuguese.
 
 The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`, plus `motorsport_extraoptions.ini` with a
 section per game (`[FM5]`, `[FM6]`) and a `[GLOBAL]` section. All of its changes are made in memory when Azimuth
-loads the game.
-`azimuth.exe`, the game and the other Azimuth files are **not modified on disk**.
+loads the game. `azimuth.exe`, the game and the other Azimuth files are **not modified on disk**.
 
 > Versions 1.x of this project (then called Azimuth Motorsport) made FM5 and FM6 run on an older Azimuth. Azimuth
 > 1.0.2 supports both games officially, so 2.0 keeps only the extra options. Remove any 1.x `winmm.dll` before
@@ -39,7 +37,7 @@ does not match, that option is simply left off and the log says why.
    <Azimuth folder>\
        azimuth.exe
        winmm.dll                    <- mod
-       motorsport_extraoptions.ini  <- mod options (FM5 and FM6)
+       motorsport_extraoptions.ini  <- mod options (global, FM5 and FM6)
        data\
    ```
 
@@ -83,7 +81,7 @@ Only in `motorsport_extraoptions.ini` (not in Azimuth's launcher):
 | Option | Default | What it does |
 |---|---|---|
 | `SkipIntro` | 1 | Skips the opening videos and goes straight to loading. |
-| `SkipPresentationVideo` | 1 | Skips the presentation video before the first race of a new profile and the intro videos of the Porsche/NASCAR expansions. |
+| `SkipPresentationVideo` | 0 | Skips the presentation video before the first race of a new profile and the intro videos of the Porsche/NASCAR expansions. |
 | `UnlockDLC` | 1 | The DLC cars and packs already included in the game (Car Pass, car packs, VIP, Porsche/NASCAR expansions...) count as purchased; the cars show up to buy with in-game credits. |
 | `UnlockMenuFrameRate` | 1 | Keeps the frame rate chosen in Azimuth in menus and transitions too (the game itself halves it there; races already run at the chosen rate). |
 

@@ -24,6 +24,10 @@ The proxy forwards every `winmm.dll` export to the system copy in `System32` (`s
 exports, committed together with the matching `.def`), so Azimuth's own use of `winmm` keeps working. Deleting
 `winmm.dll` restores the plain Azimuth.
 
+The proxy first reads `[GLOBAL] DisableLog` from `motorsport_extraoptions.ini`: `0` or missing opens
+`fm_extra_options.log` (recreated on every run), `1` writes no log and deletes the one of an earlier run. The key is
+ini only; the launcher section shows just the options of each game.
+
 ## Injection point
 
 The options have to be written after Azimuth has mapped the game and applied its own patches, and before the game's
