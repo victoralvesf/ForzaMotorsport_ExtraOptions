@@ -52,7 +52,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then section=Unreleased; else section=$GITHUB_REF_NAME; fi
-          awk -v s="$section" '/^## /{ if (f) exit; if ($0 == "## " s || index($0, "## " s " ") == 1) f = 1; next } f' \
+          awk -v s="$section" '{ sub(/\r$/, "") } /^## /{ if (f) exit; if ($0 == "## " s || index($0, "## " s " ") == 1) f = 1; next } f' \
             CHANGELOG.md > release_notes.md
           grep -q '[^[:space:]]' release_notes.md || { echo "::error::no '## $section' section in CHANGELOG.md"; exit 1; }
           cat release_notes.md
