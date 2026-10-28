@@ -57,7 +57,6 @@ constexpr Option k_options[] = {
 
 const game::Module module = {
     .tag = "FM6",
-    .ini_file = L"azimuth_fm6.ini",
     .time_date_stamp = 0x58afb1cd,
     .size_of_image = 0x1fc8000,
     .options = k_options,

@@ -38,10 +38,12 @@ void on_image(uint8_t *base, const IMAGE_NT_HEADERS64 *nt)
         core::log::write("%s at %p again: options already applied, ignored", g->tag, static_cast<void *>(base));
         return;
     }
+    // one ini for every game, a section per game ([FM5], [FM6])
+    const wchar_t *ini_file = L"motorsport_extraoptions.ini";
     wchar_t ini[MAX_PATH];
-    if (wcslen(g_dir) + wcslen(g->ini_file) >= MAX_PATH) return;
+    if (wcslen(g_dir) + wcslen(ini_file) >= MAX_PATH) return;
     wcscpy(ini, g_dir);
-    wcscat(ini, g->ini_file);
+    wcscat(ini, ini_file);
     core::options::apply(*g, base, ini);
 }
 

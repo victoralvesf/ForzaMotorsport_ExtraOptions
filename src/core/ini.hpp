@@ -1,4 +1,4 @@
-// Reading of the options ini (azimuth_fm5.ini / azimuth_fm6.ini, one section per game).
+// Reading of the options ini (motorsport_extraoptions.ini, one section per game).
 #pragma once
 
 namespace core::ini {

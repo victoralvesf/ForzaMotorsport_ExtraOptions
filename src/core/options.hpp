@@ -5,8 +5,8 @@
 
 namespace core::options {
 
-// ini_path: the game's ini (g.ini_file). Each option is read from [g.tag] (0 when missing) and applied all or
-// nothing; then g.apply_fixes. Returns the number of options applied.
+// ini_path: the options ini (motorsport_extraoptions.ini). Each option is read from [g.tag] (0 when missing) and
+// applied all or nothing; then g.apply_fixes. Returns the number of options applied.
 int apply(const game::Module &g, uint8_t *base, const wchar_t *ini_path);
 
 } // namespace core::options

@@ -47,7 +47,8 @@ below.
 
 ## Verified patches
 
-An option is data, not code: a key in the game's `.ini` and a list of sites. Each site has:
+An option is data, not code: a key in the game's section of `motorsport_extraoptions.ini` and a list of sites.
+Each site has:
 
 - the RVA in the game exe;
 - the bytes expected there, in hex, with `??` for a byte that may vary and `|` between alternative forms (for

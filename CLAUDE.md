@@ -36,8 +36,8 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
   folder only.
 - `tests/` (doctest): `expected.hpp` = hand-written bytes per option (never copied from the tables), fake image
   tests, real exe tests (skipped without `game_binaries\`), `check_imports.cmake`, `check_includes.cmake`.
-- `azimuth_fm5.ini` `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`,
-  `UnlockMenuFrameRate`), `azimuth_fm6.ini` `[FM6]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`,
+- `motorsport_extraoptions.ini` `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`,
+  `UnlockMenuFrameRate`) and `[FM6]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`,
   `UnlockMenuFrameRate`); a missing key = off.
   Log: `fm_extra_options.log` next to `azimuth.exe` (recreated each run).
 - `azimuth.exe` (root, local), `data\` (Azimuth's folder: `data\logs\azimuth.log`).
@@ -46,7 +46,7 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
 - `tools\dec.ps1` + `tools\ghidra_scripts\` (Ghidra headless, to find new options). `ghidra\` — analyzed projects
   (`gproj_az102` = Azimuth 1.0.2).
 - `.github\workflows\ci.yml` — cmake/ctest on pull requests; on a `v*` tag push, tests + build + release
-  (`ForzaMotorsport_ExtraOptions-<tag>.zip` with `winmm.dll`, both `.ini`, `README.txt` made from `README.md` by
+  (`ForzaMotorsport_ExtraOptions-<tag>.zip` with `winmm.dll`, `motorsport_extraoptions.ini`, `README.txt` made from `README.md` by
   `tools\md2txt\`, a small C++ tool built by CMake, never shipped). `.claude\skills\release\`.
 
 ## Build, install and test

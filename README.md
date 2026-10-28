@@ -8,9 +8,9 @@ the DLC cars already included in the game, keep Azimuth's frame rate in menus an
 Marketplace in FM5. It also fixes the lap times on FM6's
 digital dashboards in Brazilian Portuguese.
 
-The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`, plus one `.ini` per game. All of its changes
-are made in memory when Azimuth loads the game. `azimuth.exe`, the game and the other Azimuth files are **not
-modified on disk**.
+The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`, plus `motorsport_extraoptions.ini` with a
+section per game (`[FM5]`, `[FM6]`). All of its changes are made in memory when Azimuth loads the game.
+`azimuth.exe`, the game and the other Azimuth files are **not modified on disk**.
 
 > Versions 1.x of this project (then called Azimuth Motorsport) made FM5 and FM6 run on an older Azimuth. Azimuth
 > 1.0.2 supports both games officially, so 2.0 keeps only the extra options. Remove any 1.x `winmm.dll` before
@@ -30,28 +30,26 @@ does not match, that option is simply left off and the log says why.
 
 1. Copy these files into the Azimuth folder, the one that contains `azimuth.exe`:
    - `winmm.dll`
-   - `azimuth_fm5.ini`
-   - `azimuth_fm6.ini`
+   - `motorsport_extraoptions.ini`
 
    The result should look like this:
 
    ```
    <Azimuth folder>\
        azimuth.exe
-       winmm.dll          <- mod
-       azimuth_fm5.ini    <- mod options (FM5)
-       azimuth_fm6.ini    <- mod options (FM6)
+       winmm.dll                    <- mod
+       motorsport_extraoptions.ini  <- mod options (FM5 and FM6)
        data\
    ```
 
-2. (Optional) Edit `azimuth_fm5.ini` / `azimuth_fm6.ini` to suit your preferences.
+2. (Optional) Edit `motorsport_extraoptions.ini` to suit your preferences.
 3. Start `azimuth.exe` as usual and pick FM5 or FM6.
 
 ## Options
 
-`1` turns an option on, `0` turns it off. An option missing from the `.ini` (or a missing `.ini`) is off.
+`1` turns an option on, `0` turns it off. An option missing from `motorsport_extraoptions.ini` (or a missing file) is off.
 
-### Forza Motorsport 5 (`azimuth_fm5.ini`, section `[FM5]`)
+### Forza Motorsport 5 (section `[FM5]`)
 
 | Option | Default | What it does |
 |---|---|---|
@@ -61,7 +59,7 @@ does not match, that option is simply left off and the log says why.
 | `EnableMarketplace` | 1 | Enables the Marketplace option in the menu without Xbox Live (shows the game's DLC packs). |
 | `UnlockMenuFrameRate` | 1 | Keeps the frame rate chosen in Azimuth in menus and transitions too (the game itself halves it there; races already run at the chosen rate). |
 
-### Forza Motorsport 6 (`azimuth_fm6.ini`, section `[FM6]`)
+### Forza Motorsport 6 (section `[FM6]`)
 
 | Option | Default | What it does |
 |---|---|---|
@@ -88,7 +86,7 @@ Include both files when you report a problem.
 
 ## Uninstall
 
-Delete `winmm.dll` (and `azimuth_fm5.ini` / `azimuth_fm6.ini` if you like) from the Azimuth folder. That restores the
+Delete `winmm.dll` (and `motorsport_extraoptions.ini` if you like) from the Azimuth folder. That restores the
 plain Azimuth. Nothing else was changed.
 
 ## Building from source
@@ -105,7 +103,7 @@ ctest --preset default
 The output is `build\winmm.dll`.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the tests on every pull request and, on a `v*` tag push, runs the
-tests, builds and publishes a release with `winmm.dll` + `azimuth_fm5.ini` + `azimuth_fm6.ini` + `README.txt`
+tests, builds and publishes a release with `winmm.dll` + `motorsport_extraoptions.ini` + `README.txt`
 (this file as plain text, made by `tools/md2txt`).
 
 ## License
