@@ -41,9 +41,11 @@ at the first failure; never force anything (`--force`, amend, deleting/moving ta
   whether to release anyway (if yes, add a short section for the version based on the commits since the last
   tag, following the style of the previous entries) or abort.
 - Rename that heading to `## vNEW — <short title>`, following the style of the previous releases
-  (e.g. `## v1.4.1 — FM6 tuning setup name fix`, `## v2.0.0 — Extra options for the official Azimuth`):
+  (e.g. `## v1.0.0 — Extra options for the official Azimuth`, `## v1.0.1 — FM6 launcher section fix`):
   a few words summarizing the main changes, game prefixed where it helps. Keep the section's content
   (`### Improvements`, `### Fixes`, ...) exactly as it is; drop empty subsections.
+- The heading must start with exactly `## vNEW ` (or be just `## vNEW`): CI takes that section's body as the
+  GitHub release text and fails the release if it is missing.
 - Do not leave a new empty `Unreleased` section behind (the previous releases don't keep one).
 - Keep the section in its place (right after `## Current support` and before the previous version). Change
   nothing else in the file.
@@ -68,7 +70,7 @@ git push origin vNEW
 ```
 
 The tag push triggers `.github/workflows/ci.yml`, which runs the tests, builds `winmm.dll` and publishes the
-GitHub release with `ForzaMotorsport_ExtraOptions-vNEW.zip`. Only `main` and the tag are pushed (never `historico-local`).
+GitHub release with `ForzaMotorsport_ExtraOptions-vNEW.zip` and the `## vNEW` changelog section as its text. Only `main` and the tag are pushed (never `historico-local`).
 
 ## 6. Report
 

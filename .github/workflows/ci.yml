@@ -1,12 +1,15 @@
 # Tests (cmake/ctest) on every pull request; on a v* tag push, tests + build + release
-# (ForzaMotorsport_ExtraOptions-<tag>.zip: winmm.dll + motorsport_extraoptions.ini + README.txt).
+# (ForzaMotorsport_ExtraOptions-<tag>.zip: winmm.dll + motorsport_extraoptions.ini + README.txt; the release
+# text is the CHANGELOG.md section "## <tag> ...").
 # The tests that need the game exes (game_binaries\, not in git) are skipped on GitHub.
+# workflow_dispatch (temporary): tests + package with the "## Unreleased" notes, no release.
 name: CI
 
 on:
   pull_request:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -37,18 +40,30 @@ jobs:
         run: ctest --preset default
 
       - name: Package
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         run: |
           mkdir -p dist
           cp build/winmm.dll motorsport_extraoptions.ini dist/
           build/md2txt.exe README.md dist/README.txt
           cd dist && 7z a "../ForzaMotorsport_ExtraOptions-$GITHUB_REF_NAME.zip" winmm.dll motorsport_extraoptions.ini README.txt
 
+      # body of the "## <tag> — title" section (up to the next "## "); a dispatch run uses "## Unreleased"
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then section=Unreleased; else section=$GITHUB_REF_NAME; fi
+          awk -v s="$section" '/^## /{ if (f) exit; if ($0 == "## " s || index($0, "## " s " ") == 1) f = 1; next } f' \
+            CHANGELOG.md > release_notes.md
+          grep -q '[^[:space:]]' release_notes.md || { echo "::error::no '## $section' section in CHANGELOG.md"; exit 1; }
+          cat release_notes.md
+
       - uses: actions/upload-artifact@v4
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
           name: release-zip
-          path: ForzaMotorsport_ExtraOptions-${{ github.ref_name }}.zip
+          path: |
+            ForzaMotorsport_ExtraOptions-${{ github.ref_name }}.zip
+            release_notes.md
 
   release:
     needs: build
@@ -66,4 +81,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: >
           gh release create "$GITHUB_REF_NAME" "ForzaMotorsport_ExtraOptions-$GITHUB_REF_NAME.zip"
-          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes-file release_notes.md

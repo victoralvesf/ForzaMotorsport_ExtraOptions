@@ -53,7 +53,8 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
   (`gproj_az102` = Azimuth 1.0.2).
 - `.github\workflows\ci.yml` — cmake/ctest on pull requests; on a `v*` tag push, tests + build + release
   (`ForzaMotorsport_ExtraOptions-<tag>.zip` with `winmm.dll`, `motorsport_extraoptions.ini`, `README.txt` made from `README.md` by
-  `tools\md2txt\`, a small C++ tool built by CMake, never shipped). `.claude\skills\release\`.
+  `tools\md2txt\`, a small C++ tool built by CMake, never shipped; release text = the `## <tag>` section of
+  `CHANGELOG.md`). Temporary `workflow_dispatch`: tests + package, no release. `.claude\skills\release\`.
 
 ## Build, install and test
 - Git Bash with `/c/mingw64/bin` in `PATH` (g++ 15.2, cmake, ninja):
