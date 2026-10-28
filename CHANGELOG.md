@@ -21,7 +21,7 @@ When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe
 - `[FM6]`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `UnlockMenuFrameRate`.
 - Lap times on the digital dashboards in Brazilian Portuguese (always on).
 
-## Unreleased
+## v1.0.0 — Extra options for the official Azimuth
 
 First release of Forza Motorsport Extra Options.
 
