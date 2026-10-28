@@ -42,12 +42,22 @@ does not match, that option is simply left off and the log says why.
        data\
    ```
 
-2. (Optional) Edit `motorsport_extraoptions.ini` to suit your preferences.
+2. (Optional) Choose the options: in Azimuth, open the settings of FM5 or FM6 and pick **Extra Options** (see
+   below), or edit `motorsport_extraoptions.ini`.
 3. Start `azimuth.exe` as usual and pick FM5 or FM6.
 
 ## Options
 
 `1` turns an option on, `0` turns it off. An option missing from `motorsport_extraoptions.ini` (or a missing file) is off.
+
+### In Azimuth's launcher
+
+The settings page of FM5 and FM6 gets an **Extra Options** section, next to Display, Graphics, Audio and Content
+packages, with an Off/On switch for each option below. A change is saved to `motorsport_extraoptions.ini` right
+away and applies the next time the game starts. The other games in Azimuth are not affected.
+
+The section is added only when the launcher code the mod relies on matches what it expects (Azimuth 1.0.2). With a
+version where it does not, the launcher stays as it is (the log says why) and the options still work from the ini.
 
 ### Forza Motorsport 5 (section `[FM5]`)
 

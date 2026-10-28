@@ -38,4 +38,34 @@ bool install(uint8_t *at, const char *stolen_hex, void *target, void **tramp)
     return patch::write_code(at, jmp, stolen.size);
 }
 
+bool reachable(const void *from, const void *p, size_t n)
+{
+    auto f = reinterpret_cast<intptr_t>(from), a = reinterpret_cast<intptr_t>(p);
+    intptr_t lo = a - f, hi = a + static_cast<intptr_t>(n ? n - 1 : 0) - f; // the last byte is p + n - 1
+    return lo >= INT32_MIN && hi <= INT32_MAX;
+}
+
+void *alloc_near(const void *close_to, size_t size, unsigned long protect)
+{
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const uintptr_t gran = si.dwAllocationGranularity, n = reinterpret_cast<uintptr_t>(close_to);
+    const uintptr_t min_app = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+    const uintptr_t max_app = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+    const uintptr_t span = 0x7ff00000; // a little under 2 GB on each side
+    uintptr_t lo = n > min_app + span ? n - span : min_app, hi = n < max_app - span ? n + span : max_app;
+
+    for (uintptr_t a = (lo + gran - 1) & ~(gran - 1); a + size <= hi;) {
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery(reinterpret_cast<void *>(a), &mi, sizeof mi)) break;
+        uintptr_t end = reinterpret_cast<uintptr_t>(mi.BaseAddress) + mi.RegionSize;
+        if (mi.State == MEM_FREE && a + size <= end && reachable(close_to, reinterpret_cast<void *>(a), size)) {
+            void *p = VirtualAlloc(reinterpret_cast<void *>(a), size, MEM_RESERVE | MEM_COMMIT, protect);
+            if (p) return p;
+        }
+        a = (end + gran - 1) & ~(gran - 1);
+    }
+    return nullptr;
+}
+
 } // namespace core::hook

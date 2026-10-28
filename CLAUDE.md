@@ -25,11 +25,17 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
   expected bytes in hex (`??` = any byte, `|` = alternative forms, e.g. original | Azimuth's own patch). Every site
   of an option is checked before anything is written (all or nothing); a mismatch leaves the option off and logs
   why. Code only exists for hooks (FM6 dashboard font fix, always on, `apply_fixes`).
+- **Launcher (`src/launcher/`):** adds section 4 "Extra Options" to the settings page of FM5/FM6 in Azimuth's
+  launcher (Off/On row per option with a `label`; a change writes the ini at once). Sites found by byte signatures in
+  `azimuth.exe` (`core::scan`, unique match), all checked before writing; mismatch = no section, ini still works.
+  Rows/strings/vectors use MSVC layouts on the process heap (Azimuth frees them). Analysis:
+  `docs\contexto\09_launcher_extra_options.txt`.
 - Always **check the original bytes** before patching; if they don't match, change nothing.
 
 ## Project layout
-- `src/main.cpp` (DllMain, log, version, installs the loader watch), `src/proxy/` (winmm forwarding),
-  `src/core/` (log, pe, version, ini, patch, hook, loader_watch, options, `game.hpp` = `game::Module`),
+- `src/main.cpp` (DllMain, log, version, installs the loader watch and the launcher section), `src/proxy/` (winmm
+  forwarding), `src/core/` (log, pe, version, ini, patch, scan, hook, loader_watch, options, `game.hpp` =
+  `game::Module`), `src/launcher/` (Extra Options section of Azimuth's launcher),
   `src/games/fm5/`, `src/games/fm6/` (+ `font.cpp`), `src/games/registry.*` (list of games).
 - **Game separation:** each game is its own static library that only links `core`; include paths keep one game
   from seeing the other, and the `include_isolation` test rejects `../` includes. A fix for one game goes in its
@@ -57,8 +63,8 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
 - Install by copying `build\winmm.dll` to `E:\Azimuth For FM5\winmm.dll`, **overwriting freely**: no backup.
 - When changing an option, adjust/add the test with it (bytes written in `tests/expected.hpp`, read from the real
   exe, not copied from the table).
-- **Adding an option:** sites in `src/games/<game>/<game>.cpp` + bytes in `tests/expected.hpp` + key and comment in
-  the `.ini` + `README.md` + `CHANGELOG.md` (`## Unreleased`).
+- **Adding an option:** sites + launcher `label` in `src/games/<game>/<game>.cpp` + bytes in `tests/expected.hpp` +
+  key and comment in the `.ini` + `README.md` + `CHANGELOG.md` (`## Unreleased`).
 - In-game test (**only when the user orders it in the current chat**): `./azimuth.exe "--game=E:\\Xbox One Games\\Forza Motorsport 5" --skip-launcher`.
   Check `fm_extra_options.log` (every site applied/mismatch) and `data\logs\azimuth.log` (`STOPPED ...`).
 - Decompile: `tools\dec.ps1 <gproj> <program> <out.c> 0xVA ...` (see `02_ferramentas` in `docs\contexto\legado\`).

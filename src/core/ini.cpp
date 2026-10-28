@@ -1,6 +1,7 @@
 #include "ini.hpp"
 
 #include <windows.h>
+#include <cwchar>
 
 namespace core::ini {
 
@@ -22,6 +23,16 @@ int get_int(const wchar_t *path, const char *section, const char *key, int def)
     widen(section, s, 64);
     widen(key, k, 64);
     return static_cast<int>(GetPrivateProfileIntW(s, k, def, path));
+}
+
+bool set_int(const wchar_t *path, const char *section, const char *key, int value)
+{
+    wchar_t s[64], k[64], v[16];
+    widen(section, s, 64);
+    widen(key, k, 64);
+    _snwprintf(v, 16, L"%d", value);
+    v[15] = 0;
+    return WritePrivateProfileStringW(s, k, v, path) != 0;
 }
 
 } // namespace core::ini

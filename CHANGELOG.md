@@ -24,6 +24,10 @@ First release of Forza Motorsport Extra Options.
 
 ### New
 - One options file for both games, `motorsport_extraoptions.ini`, with a `[FM5]` and a `[FM6]` section.
+- **Extra Options in Azimuth's launcher:** the settings page of FM5 and FM6 has a new Extra Options section (next to
+  Display, Graphics, Audio and Content packages) with an Off/On switch per option. Changes are saved to
+  `motorsport_extraoptions.ini` at once. If the launcher code does not match (another Azimuth version), the section
+  is not added and the ini still works.
 - Works with any Azimuth from 1.0.2 on. Every option checks the game's bytes before writing and is left off, with
   the reason in `fm_extra_options.log`, when they don't match.
 - **FM5 and FM6:** `SkipIntro`: skips the opening videos.

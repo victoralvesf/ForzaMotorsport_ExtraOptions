@@ -77,6 +77,30 @@ folder. It replaces the entitlement call inside the purchase check with a call t
 accepts both forms of that site (the original call, or Azimuth's replacement) and turns it into "owned" in either
 case; the entitlement function itself is patched too, for its other callers (Marketplace UI, FM6 expansions).
 
+## Extra Options in Azimuth's launcher
+
+Azimuth's launcher draws a game's settings page from a list of sections (an `int` per section: Display 0,
+Graphics 1, Audio 2, Content packages 3), a table of section names indexed by that id, and, for the current
+section, a list of rows (key, label, control, choices, selected choice, disabled flag and a `std::function` called
+when the player picks a choice). The mod adds section 4, Extra Options, for FM5 and FM6:
+
+- the function that lists the sections is hooked at its start (trampoline) and appends 4 when the page's game (the
+  current title id of Azimuth's settings) is FM5 (`7b35d917`) or FM6 (`64f9397e`);
+- the two places that read a section name are pointed at a copy of the table with "Extra Options" at index 4
+  (allocated within 2 GB so the `lea`s reach it);
+- the view builds an empty row list for any section id other than 0..2; those 15 bytes jump to a stub that builds
+  the mod's rows for id 4 (and still calls Azimuth's empty list for the rest).
+
+Each row is an Off/On switch like Azimuth's V-sync row. Its `std::function` holds the mod's own callable (inline
+storage, MSVC layout), which writes `[FM5]`/`[FM6]` `key=0/1` with `WritePrivateProfileStringW` (comments and other
+keys are kept) and returns a setting id above Azimuth's, so Azimuth saves and applies nothing of its own. The rows
+are allocated on the process heap, the heap of Azimuth's CRT, because Azimuth copies and frees them.
+
+Everything is found by byte signatures in `azimuth.exe` (each must match exactly once) and checked together before
+anything is written; the name table must hold Display, Graphics, Audio and Content packages. When something does not
+match, the launcher is left as it is and the log says what was missing. A unit test checks every site on the real
+`azimuth.exe` 1.0.2 when it is present locally.
+
 ## FM6 dashboard font fix
 
 In Brazilian Portuguese, FM6 formats lap times with apostrophes (`00'12,977''`), but the fonts of the digital
@@ -91,10 +115,11 @@ that follows reads the same buffer.
 ## Source layout
 
 ```
-src/main.cpp            DllMain: log, real winmm, Azimuth version, installs the loader watch
+src/main.cpp            DllMain: log, real winmm, Azimuth version, installs the loader watch and the launcher section
 src/proxy/              winmm forwarding (export list + .def)
-src/core/               log, pe, version, ini, patch (checked sites), hook (trampoline),
-                        loader_watch (FlushInstructionCache), options, game.hpp (game::Module)
+src/core/               log, pe, version, ini, patch (checked sites), scan (byte signatures), hook (trampoline,
+                        memory near an address), loader_watch (FlushInstructionCache), options, game.hpp
+src/launcher/           Extra Options section of Azimuth's launcher (sites, rows, MSVC layouts)
 src/games/fm5/          FM5 option table
 src/games/fm6/          FM6 option table + dashboard font fix
 src/games/registry.*    list of supported games, lookup by PE header
@@ -115,7 +140,8 @@ ctest --preset default
 ```
 
 The tests cover the patch engine on fake buffers (match, mismatch, all or nothing, alternative forms, sites at the
-end of a section), the hook and trampoline, the ini parser, the IAT lookup, the font fix, and every option against
+end of a section), the hook and trampoline, the ini parser, the IAT lookup, the font fix, the launcher rows and MSVC layouts, the launcher sites on the
+real `azimuth.exe` 1.0.2 (when present locally), and every option against
 bytes written by hand in `tests/expected.hpp`. When the real game exes are present locally they are mapped like
 Azimuth does and every option is applied to them, in the original form and after Azimuth's DLC patch. Two CMake
 checks make sure `winmm.dll` imports only system DLLs and that no source uses a relative include.

@@ -19,10 +19,12 @@ struct Site {
     const char *write;
 };
 
-// An option of the ini ([game] key=1 turns it on): its sites, applied together.
+// An option of the ini ([game] key=1 turns it on): its sites, applied together. label: its name in Azimuth's
+// launcher (game settings, Extra Options section); null keeps it out of the launcher.
 struct Option {
     const char *key;
     std::span<const Site> sites;
+    const char *label = nullptr;
 };
 
 constexpr size_t k_max_bytes = 32;

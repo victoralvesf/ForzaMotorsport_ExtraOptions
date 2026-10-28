@@ -47,16 +47,17 @@ constexpr Site k_unlock_menu_frame_rate[] = {
 };
 
 constexpr Option k_options[] = {
-    { "SkipIntro", k_skip_intro },
-    { "SkipPresentationVideo", k_skip_presentation_video },
-    { "UnlockDLC", k_unlock_dlc },
-    { "UnlockMenuFrameRate", k_unlock_menu_frame_rate },
+    { "SkipIntro", k_skip_intro, "Skip intro" },
+    { "SkipPresentationVideo", k_skip_presentation_video, "Skip presentation video" },
+    { "UnlockDLC", k_unlock_dlc, "Unlock DLC" },
+    { "UnlockMenuFrameRate", k_unlock_menu_frame_rate, "Unlock menu frame rate" },
 };
 
 } // namespace
 
 const game::Module module = {
     .tag = "FM6",
+    .title_id = "64f9397e",
     .time_date_stamp = 0x58afb1cd,
     .size_of_image = 0x1fc8000,
     .options = k_options,

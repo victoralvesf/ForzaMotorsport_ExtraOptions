@@ -27,7 +27,8 @@ struct Mapped {
     ~Mapped();
 };
 
-// Path of a file under game_binaries\ (local only: the tests that need it are skipped in CI).
+// Path of an exe under game_binaries\ ("FM5", "FM6", "AZIMUTH"; local only: the tests that need it are skipped
+// in CI).
 const char *game_exe(const char *game);
 
 } // namespace test_image

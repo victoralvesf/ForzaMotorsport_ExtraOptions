@@ -14,4 +14,11 @@ constexpr size_t k_jmp_size = 14;
 // match or the trampoline cannot be allocated.
 bool install(uint8_t *at, const char *stolen_hex, void *target, void **tramp);
 
+// size bytes of committed memory (protection protect) whose whole range is within a rel32 (+-2 GB) of close_to, or
+// null.
+void *alloc_near(const void *close_to, size_t size, unsigned long protect);
+
+// Every byte of [p, p + n) can be reached with a rel32 from the end of an instruction at from.
+bool reachable(const void *from, const void *p, size_t n);
+
 } // namespace core::hook

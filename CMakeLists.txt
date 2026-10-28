@@ -24,6 +24,7 @@ add_library(core STATIC
     src/core/version.cpp
     src/core/ini.cpp
     src/core/patch.cpp
+    src/core/scan.cpp
     src/core/hook.cpp
     src/core/loader_watch.cpp
     src/core/options.cpp
@@ -44,10 +45,15 @@ add_library(games STATIC src/games/registry.cpp)
 target_include_directories(games PUBLIC src/games)
 target_link_libraries(games PUBLIC fm5 fm6)
 
+# Azimuth's launcher: the Extra Options section of the game settings page (no game code: games come as Modules)
+add_library(launcher STATIC src/launcher/launcher.cpp src/launcher/rows.cpp src/launcher/msvc.cpp)
+target_include_directories(launcher PUBLIC src/launcher)
+target_link_libraries(launcher PUBLIC core)
+
 # ---- winmm.dll ----
 add_library(winmm SHARED src/main.cpp src/proxy/forward.cpp src/proxy/winmm.def)
 target_include_directories(winmm PRIVATE src/proxy)
-target_link_libraries(winmm PRIVATE games)
+target_link_libraries(winmm PRIVATE games launcher)
 target_link_options(winmm PRIVATE -Wl,--enable-stdcall-fixup)
 set_target_properties(winmm PROPERTIES PREFIX "" OUTPUT_NAME winmm)
 
