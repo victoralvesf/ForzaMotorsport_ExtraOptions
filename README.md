@@ -11,9 +11,9 @@ The mod is a single proxy `winmm.dll` placed next to `azimuth.exe`, plus `motors
 section per game (`[FM5]`, `[FM6]`) and a `[GLOBAL]` section. All of its changes are made in memory when Azimuth
 loads the game. `azimuth.exe`, the game and the other Azimuth files are **not modified on disk**.
 
-> Versions 1.x of this project (then called Azimuth Motorsport) made FM5 and FM6 run on an older Azimuth. Azimuth
-> 1.0.2 supports both games officially, so 2.0 keeps only the extra options. Remove any 1.x `winmm.dll` before
-> updating Azimuth.
+> This project started as Azimuth Motorsport, which made FM5 and FM6 run on an older Azimuth. Azimuth 1.0.2
+> supports both games officially, so Forza Motorsport Extra Options keeps only the extra options. Remove any
+> Azimuth Motorsport `winmm.dll` before updating Azimuth.
 
 ## Requirements
 

@@ -10,9 +10,10 @@ its own process with its own PE loader and resolves the game's imports to its ow
 libraries. Since version 1.0.2 it officially runs Forza Motorsport 5 (package 1.0.0.20) and Forza Motorsport 6
 (package 1.0.0.44).
 
-Versions 1.x of this project made those games run on an older Azimuth that only supported Forza Horizon 2. That
-compatibility layer is gone: the official Azimuth does all of it. What is left are a few quality of life options
-per game (skip the intro videos, unlock the DLC already in the game, ...) and a fix for a bug in the game itself.
+Before this mod, the project (then called Azimuth Motorsport) made those games run on an older Azimuth that only
+supported Forza Horizon 2. That compatibility layer is gone: the official Azimuth does all of it. What is left are
+a few quality of life options per game (skip the intro videos, unlock the DLC already in the game, ...) and a fix
+for a bug in the game itself.
 
 ## Why a `winmm.dll` proxy
 
