@@ -38,6 +38,8 @@ constexpr Change k_fm5[] = {
     { "UnlockMenuFrameRate", 0x711620, "89 91 a0 00 00 00 c3 cc cc cc cc cc cc cc cc cc",
       "83 fa 01 75 02 31 d2 89 91 a0 00 00 00 c3 cc cc" },
     // lea rdx / lea r8 of the SQL fragments: view rims, categories FROM, rim columns, rim joins (test_stock_wheels)
+    // mov r8d, length of the view fragment (counted assign; gets the mod's length)
+    { "StockWheels", 0x1d4cf5, "41 b8 a2 00 00 00", nullptr },
     { "StockWheels", 0x1d4cfb, "48 8d 15 1e ea a9 01", nullptr },
     { "StockWheels", 0x49bc50, "4c 8d 05 39 2c 7f 01", nullptr },
     { "StockWheels", 0x49ce81, "4c 8d 05 08 27 7f 01", nullptr },
@@ -103,7 +105,9 @@ constexpr Text k_fm6_stock_wheels_texts[] = {
     { 0x10db128, "\\" },
 };
 constexpr Text k_fm5_stock_wheels_texts[] = {
-    { 0x1c73720, "SELECT r FROM List_Wheels WHERE p != 0" },
+    // 0xa2 characters, the length in the view's "mov r8d" (the game's fragment is that long too)
+    { 0x1c73720, "SELECT r FROM List_Wheels WHERE p != 0 AND q AND q AND q AND q AND q AND q AND q AND q AND q AND q A"
+                 "ND q AND q AND q AND q AND q AND q AND q AND q AND q AND q    " },
     { 0x1c8e890, "' END AS s FROM WheelCategories LEFT JOIN m ON m.Id = " },
     { 0x1c8f590, "CASE WHEN a THEN b ELSE List_PartManufacturer.PartManufacturer END AS M, CASE WHEN a THEN b "
                  "ELSE List_Wheels.DisplayName END AS N, CASE WHEN List_PartManufacturer.LogoPath IS NULL THEN c "

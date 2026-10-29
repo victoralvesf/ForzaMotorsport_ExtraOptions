@@ -50,10 +50,11 @@ constexpr Site k_unlock_menu_frame_rate[] = {
 };
 
 // A fifth rim category with the stock rims of every car (core::stock_rims builds the SQL from the game's fragments
-// and hooks the rim loader). Sites only checked here: the leas of the SQL fragments, the loader's entry, its read of
+// and hooks the rim loader). Sites only checked here: the leas of the SQL fragments (and the length of the view's), the loader's entry, its read of
 // the file system, the length of its first rims folder string and its leas of the rims folder, of the "\"
 // separator and of the LF model file.
 constexpr Site k_stock_wheels[] = {
+    { stock_wheels::k_view_len_mov, "41 b8 a2 00 00 00", 0, "" },
     { stock_wheels::k_view_lea, "48 8d 15 1e ea a9 01", 0, "" },
     { stock_wheels::k_cats_lea, "4c 8d 05 39 2c 7f 01", 0, "" },
     { stock_wheels::k_names_lea, "4c 8d 05 08 27 7f 01", 0, "" },

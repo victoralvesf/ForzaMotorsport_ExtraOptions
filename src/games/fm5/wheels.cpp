@@ -21,6 +21,7 @@ constexpr core::stock_rims::Game k_game = {
     .cats_lea = k_cats_lea,
     .names_lea = k_names_lea,
     .joins_lea = k_joins_lea,
+    .view_len_mov = k_view_len_mov,
     .load = k_load,
     .load_entry = k_load_entry,
     .fs_read = k_fs_read,

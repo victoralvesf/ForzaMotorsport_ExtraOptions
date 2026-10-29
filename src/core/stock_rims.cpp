@@ -395,6 +395,19 @@ bool install(const Game &game, uint8_t *base, size_t image)
         }
         used += (strlen(reinterpret_cast<char *>(sql[i])) + 16) & ~size_t(15);
     }
+    uint32_t view_len = static_cast<uint32_t>(strlen(reinterpret_cast<char *>(sql[0])));
+    if (game.view_len_mov) {
+        const uint8_t *p = base + game.view_len_mov;
+        uint32_t len;
+        memcpy(&len, p + 2, 4);
+        const char *orig = reinterpret_cast<const char *>(rip_target(base + game.view_lea, 7));
+        if (p[0] != 0x41 || p[1] != 0xb8 || len != strlen(orig)) {
+            core::log::write("%s: StockWheels: length of the view fragment at %#x is not as expected", tag,
+                             game.view_len_mov);
+            VirtualFree(block, 0, MEM_RELEASE);
+            return false;
+        }
+    }
 
     g.game = &game;
     g.fs = reinterpret_cast<void **>(rip_target(base + game.fs_read, 7));
@@ -437,6 +450,7 @@ bool install(const Game &game, uint8_t *base, size_t image)
 
     bool ok = true;
     for (size_t i = 0; i < 4; i++) ok = point_lea(base + sql_leas[i], sql[i]) && ok;
+    if (game.view_len_mov) ok = core::patch::write_code(base + game.view_len_mov + 2, &view_len, 4) && ok;
     for (uint32_t r : game.prefix_leas)
         ok = add_stub(r, false, rims, cars,
                       game.prefix_len_lea && r == game.prefix_leas[0] ? static_cast<int32_t>(cars_len) : -1) &&

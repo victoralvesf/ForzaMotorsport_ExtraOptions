@@ -14,6 +14,9 @@ struct Game {
     // lea rdx/r8 of the SQL fragments: rims of the car's parts view (aftermarket, priced), "FROM" part of the rim
     // categories query, columns (maker, name, logo, icon) and joins (annotations, categories) of a category's rims
     uint32_t view_lea, cats_lea, names_lea, joins_lea;
+    // 0, or "mov r8d, imm32" (41 b8) with the length of the view fragment when the game copies it as a counted
+    // assign: the length becomes the mod's
+    uint32_t view_len_mov;
     uint32_t load;          // rim loader: (this, const std::string &media_name) -> bool
     const char *load_entry; // its first whole instructions (hook, no RIP-relative)
     uint32_t fs_read;       // mov rcx, [file system] inside the loader

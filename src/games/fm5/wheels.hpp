@@ -10,6 +10,7 @@ namespace fm5::stock_wheels {
 
 // Sites of the option (in fm5.cpp, checked before install).
 constexpr uint32_t k_view_lea = 0x1d4cfb;  // lea rdx, rims of the car's parts view (aftermarket, priced)
+constexpr uint32_t k_view_len_mov = 0x1d4cf5; // mov r8d, its length (the view copies it as a counted assign)
 constexpr uint32_t k_cats_lea = 0x49bc50;  // lea r8, "FROM" part of the rim categories query
 constexpr uint32_t k_names_lea = 0x49ce81; // lea r8, columns (maker, name, logo, icon) of the rims of a category
 constexpr uint32_t k_joins_lea = 0x49ceda; // lea r8, joins (annotations, categories) of the rims of a category

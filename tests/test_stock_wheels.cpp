@@ -35,6 +35,7 @@ namespace {
 struct Rims {
     const char *tag;
     uint32_t view_lea, cats_lea, names_lea, joins_lea, load;
+    uint32_t view_len_mov; // 0 = none
     std::vector<uint32_t> prefix_leas;
     uint32_t prefix_len_lea; // 0 = none
     std::vector<uint32_t> sep_leas, file_leas;
@@ -45,13 +46,13 @@ struct Rims {
 
 const Rims k_fm6 = {
     "FM6", fm6::stock_wheels::k_view_lea, fm6::stock_wheels::k_cats_lea, fm6::stock_wheels::k_names_lea,
-    fm6::stock_wheels::k_joins_lea, fm6::stock_wheels::k_load, { 0xda94b5, 0xda9603, 0xda96a6 }, 0,
+    fm6::stock_wheels::k_joins_lea, fm6::stock_wheels::k_load, 0, { 0xda94b5, 0xda9603, 0xda96a6 }, 0,
     { 0xda94d7, 0xda954d }, {}, expected::k_fm6, expected::k_fm6_stock_wheels_texts, 0x15cdd10,
 };
 
 const Rims k_fm5 = {
     "FM5", fm5::stock_wheels::k_view_lea, fm5::stock_wheels::k_cats_lea, fm5::stock_wheels::k_names_lea,
-    fm5::stock_wheels::k_joins_lea, fm5::stock_wheels::k_load, { 0x6cee5b, 0x6cf0af, 0x6cf1b9 }, 0x6cee57,
+    fm5::stock_wheels::k_joins_lea, fm5::stock_wheels::k_load, fm5::stock_wheels::k_view_len_mov, { 0x6cee5b, 0x6cf0af, 0x6cf1b9 }, 0x6cee57,
     { 0x6cee80, 0x6cef7d }, { 0x6ceea7 }, expected::k_fm5, expected::k_fm5_stock_wheels_texts, 0x1cbb490,
 };
 
@@ -105,6 +106,11 @@ void check_installed(const Rims &r, const uint8_t *base)
     CHECK(has(names, "THEN StockMake.DisplayName ELSE List_PartManufacturer.PartManufacturer"));
     std::string view = reinterpret_cast<const char *>(rip_target(base + r.view_lea, 7));
     CHECK(has(view, " OR List_Wheels.ID IN (SELECT StockWheelID FROM Data_Car"));
+    if (r.view_len_mov) { // the counted copy of the view takes the whole new text
+        uint32_t len;
+        memcpy(&len, base + r.view_len_mov + 2, 4);
+        CHECK(len == view.size());
+    }
 
     const uint8_t *entry = base + r.load;
     CHECK(entry[0] == 0xff);
@@ -243,6 +249,23 @@ TEST_CASE("stock wheels: FM5 off when the counted rims folder has another length
     img.put(k_fm5.rims_rva, std::span(reinterpret_cast<const uint8_t *>(moved), sizeof moved));
     CHECK(core::options::apply(g, img.base, ini_stock_wheels("FM5").c_str()) == 0);
     check_untouched(k_fm5, img.base);
+}
+
+TEST_CASE("stock wheels: FM5 off when the view's counted length is not its fragment's")
+{
+    const game::Module &g = module("FM5");
+    test_image::Fake img(g.size_of_image);
+    put_fake(k_fm5, img);
+    img.put(k_fm5.view_len_mov, expected::hex("41 b8 a1 00 00 00"));
+    CHECK(core::options::apply(g, img.base, ini_stock_wheels("FM5").c_str()) == 0);
+    std::vector<uint8_t> b = expected::hex("41 b8 a1 00 00 00");
+    CHECK(memcmp(img.base + k_fm5.view_len_mov, b.data(), b.size()) == 0);
+    for (const expected::Change &c : k_fm5.changes)
+        if (strcmp(c.option, "StockWheels") == 0 && c.rva != k_fm5.view_len_mov) {
+            CAPTURE(c.rva);
+            std::vector<uint8_t> e = expected::hex(c.before);
+            CHECK(memcmp(img.base + c.rva, e.data(), e.size()) == 0);
+        }
 }
 
 TEST_CASE("stock wheels: on the real exes")
