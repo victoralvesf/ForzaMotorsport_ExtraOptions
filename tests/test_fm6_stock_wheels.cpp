@@ -133,7 +133,7 @@ TEST_CASE("fm6 stock wheels: SQL fragments")
                "THEN StockCar.DisplayName ELSE List_Wheels.DisplayName END AS N, CASE WHEN StockMake.ID IS NOT NULL "
                "THEN StockMake.IconPath WHEN List_PartManufacturer.LogoPath IS NULL THEN c END AS L, CASE WHEN "
                "PartTable.IsStock = 1 THEN List_CarMake.IconPath WHEN StockMake.ID IS NOT NULL THEN "
-               "StockMake.IconPathLarge ELSE d END AS I,");
+               "StockMake.IconPath ELSE d END AS I,");
 
     // joins: stock car and make, then the annotations and categories with the new rows
     std::string j = build(sw::joins_sql, expected::k_fm6_stock_wheels_texts[3].text);

@@ -216,7 +216,7 @@ bool names_sql(const char *game, char *out, size_t cap)
         { "WHEN List_PartManufacturer.LogoPath", "WHEN StockMake.ID IS NOT NULL THEN StockMake.IconPath ", nullptr,
           nullptr },
         { "CASE WHEN PartTable.IsStock = 1 THEN List_CarMake.IconPath", nullptr, nullptr,
-          " WHEN StockMake.ID IS NOT NULL THEN StockMake.IconPathLarge" },
+          " WHEN StockMake.ID IS NOT NULL THEN StockMake.IconPath" },
     };
     return rewrite(game, e, 4, nullptr, out, cap);
 }
