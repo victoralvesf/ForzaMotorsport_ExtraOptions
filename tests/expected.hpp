@@ -12,7 +12,7 @@ struct Change {
     const char *option; // ini key
     uint32_t rva;
     const char *before;
-    const char *after;  // == before: the site is only checked
+    const char *after;  // == before: the site is only checked; null: rewritten by the option's code (own test)
 };
 
 // "48 8b" -> { 0x48, 0x8b }
@@ -54,8 +54,38 @@ constexpr Change k_fm6[] = {
       "89 91 a0 00 00 00 c3 83 fa 01 75 f4 31 d2 eb f0" },
     { "UnlockMenuFrameRate", 0x19f3a88, "40 99 84 40 01 00 00 00", "47 99 84 40 01 00 00 00" },
     { "UnlockMenuFrameRate", 0x19f41a8, "40 99 84 40 01 00 00 00", "47 99 84 40 01 00 00 00" },
+    // lea rdx / lea r8 of the SQL fragments: view rims, categories FROM, rim columns, rim joins (test_fm6_stock_wheels)
+    { "StockWheels", 0x23138b, "48 8d 15 8e ed 07 01", nullptr },
+    { "StockWheels", 0xcb5bc5, "4c 8d 05 b4 16 91 00", nullptr },
+    { "StockWheels", 0xcb626e, "4c 8d 05 2b 19 91 00", nullptr },
+    { "StockWheels", 0xcb62c4, "4c 8d 05 05 17 91 00", nullptr },
+    // rim loader: entry (hooked), read of the file system, lea of the rims folder x3 and of "\" x2 (-> calls)
+    { "StockWheels", 0xda9468, "48 8b c4 55 48 8d a8 68 fe ff ff 48 81 ec 90 02 00 00", nullptr },
+    { "StockWheels", 0xda95b1, "48 8b 0d 40 fa fc 00 48 8b 01", "48 8b 0d 40 fa fc 00 48 8b 01" },
+    { "StockWheels", 0xda94b5, "48 8d 15 54 48 82 00", nullptr },
+    { "StockWheels", 0xda9603, "48 8d 15 06 47 82 00", nullptr },
+    { "StockWheels", 0xda96a6, "48 8d 15 63 46 82 00", nullptr },
+    { "StockWheels", 0xda94d7, "4c 8d 05 4a 1c 33 00", nullptr },
+    { "StockWheels", 0xda954d, "4c 8d 05 d4 1b 33 00", nullptr },
 };
 constexpr uint32_t k_fm6_lambda = 0xa40f50;
+
+// StockWheels on the fake image: the strings its leas point to, written here as small stand-ins holding each token
+// the option edits (the real fragments are only read from the real exe).
+struct Text {
+    uint32_t rva;
+    const char *text;
+};
+constexpr Text k_fm6_stock_wheels_texts[] = {
+    { 0x12b0120, "SELECT r FROM List_Wheels WHERE p != 0" },
+    { 0x15c7280, "' END AS s FROM WheelCategories LEFT JOIN m ON m.Id = " },
+    { 0x15c7ba0, "CASE WHEN a THEN b ELSE List_PartManufacturer.PartManufacturer END AS M, CASE WHEN a THEN b "
+                 "ELSE List_Wheels.DisplayName END AS N, CASE WHEN List_PartManufacturer.LogoPath IS NULL THEN c "
+                 "END AS L, CASE WHEN PartTable.IsStock = 1 THEN List_CarMake.IconPath ELSE d END AS I," },
+    { 0x15c79d0, "v AS t ON x LEFT JOIN List_Wheels ON y JOIN WheelAnnotations ON z JOIN WheelCategories ON w AND " },
+    { 0x15cdd10, "GAME:\\Media\\Cars\\_library\\scene\\wheels\\" },
+    { 0x10db128, "\\" },
+};
 
 // FM6 dash font fix (always on): the text measure gets "jmp [rip+0]; <stub>; int3", the glyph lookup is only read.
 constexpr uint32_t k_fm6_measure = 0x10bf78;

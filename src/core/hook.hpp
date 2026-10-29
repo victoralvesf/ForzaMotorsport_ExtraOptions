@@ -18,6 +18,10 @@ bool install(uint8_t *at, const char *stolen_hex, void *target, void **tramp);
 // null.
 void *alloc_near(const void *close_to, size_t size, unsigned long protect);
 
+// size bytes of committed memory (protection protect) reachable with a rel32 from both a and b (a <= b, e.g. the
+// first and last site of a game that will point into it), searched outward from them; or null.
+void *alloc_reaching(const void *a, const void *b, size_t size, unsigned long protect);
+
 // Every byte of [p, p + n) can be reached with a rel32 from the end of an instruction at from.
 bool reachable(const void *from, const void *p, size_t n);
 

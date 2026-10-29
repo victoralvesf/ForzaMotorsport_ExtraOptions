@@ -18,8 +18,15 @@ When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe
 - `[FM5]`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`, `UnlockMenuFrameRate`.
 
 ### FM6
-- `[FM6]`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `UnlockMenuFrameRate`.
+- `[FM6]`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `UnlockMenuFrameRate`, `StockWheels`.
 - Lap times on the digital dashboards in Brazilian Portuguese (always on).
+
+## Unreleased
+
+### Added
+- FM6 `StockWheels` (off by default): a fifth rim style category, "Stock Rims (All Cars)", with the stock rims of
+  every car in the game, by make in alphabetical order, free, to fit on any car. Each rim is loaded from its own
+  car's package.
 
 ## v1.0.1 — Launcher section on Azimuth 1.0.4
 

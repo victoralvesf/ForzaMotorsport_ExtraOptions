@@ -4,6 +4,7 @@ add_executable(unit_tests
     test_core.cpp
     test_games.cpp
     test_fm6_font.cpp
+    test_fm6_stock_wheels.cpp
     test_options.cpp
     test_real_exes.cpp
     test_launcher.cpp

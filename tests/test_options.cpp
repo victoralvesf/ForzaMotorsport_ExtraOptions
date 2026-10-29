@@ -55,11 +55,15 @@ void put_game(test_image::Fake &img, const char *tag)
     if (strcmp(tag, "FM6") == 0) {
         img.put(expected::k_fm6_measure, hex(expected::k_fm6_measure_before));
         img.put(expected::k_fm6_find, hex(expected::k_fm6_find_before));
+        for (const expected::Text &t : expected::k_fm6_stock_wheels_texts)
+            img.put(t.rva, std::span(reinterpret_cast<const uint8_t *>(t.text), strlen(t.text) + 1));
     }
 }
 
+// want == null: the option's code rewrote the site (checked in its own test)
 void check_bytes(const uint8_t *base, uint32_t rva, const char *want)
 {
+    if (!want) return;
     std::vector<uint8_t> w = hex(want);
     CAPTURE(rva);
     CAPTURE(want);

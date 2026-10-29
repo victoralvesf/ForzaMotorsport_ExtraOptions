@@ -1,6 +1,7 @@
 #include "fm6.hpp"
 
 #include "font.hpp"
+#include "stock_wheels.hpp"
 
 namespace fm6 {
 
@@ -46,11 +47,29 @@ constexpr Site k_unlock_menu_frame_rate[] = {
     { 0x19f41a8, "40 99 ?? ?? ?? ?? ?? ??", 0, "47" }, // Frame
 };
 
+// A fifth rim category with the stock rims of every car (stock_wheels.cpp builds the SQL from the game's fragments
+// and hooks the rim loader). Sites only checked here: the leas of the SQL fragments, the loader's entry, its read of
+// the file system and its leas of the rims folder and of the "\" separator.
+constexpr Site k_stock_wheels[] = {
+    { stock_wheels::k_view_lea, "48 8d 15 8e ed 07 01", 0, "" },
+    { stock_wheels::k_cats_lea, "4c 8d 05 b4 16 91 00", 0, "" },
+    { stock_wheels::k_names_lea, "4c 8d 05 2b 19 91 00", 0, "" },
+    { stock_wheels::k_joins_lea, "4c 8d 05 05 17 91 00", 0, "" },
+    { stock_wheels::k_load, "48 8b c4 55 48 8d a8 68 fe ff ff 48 81 ec 90 02 00 00", 0, "" },
+    { stock_wheels::k_fs_read, "48 8b 0d 40 fa fc 00 48 8b 01", 0, "" },
+    { stock_wheels::k_prefix_leas[0], "48 8d 15 54 48 82 00", 0, "" },
+    { stock_wheels::k_prefix_leas[1], "48 8d 15 06 47 82 00", 0, "" },
+    { stock_wheels::k_prefix_leas[2], "48 8d 15 63 46 82 00", 0, "" },
+    { stock_wheels::k_sep_leas[0], "4c 8d 05 4a 1c 33 00", 0, "" },
+    { stock_wheels::k_sep_leas[1], "4c 8d 05 d4 1b 33 00", 0, "" },
+};
+
 constexpr Option k_options[] = {
     { "SkipIntro", k_skip_intro, "Skip intro" },
     { "SkipPresentationVideo", k_skip_presentation_video, "Skip presentation video" },
     { "UnlockDLC", k_unlock_dlc, "Unlock DLC" },
     { "UnlockMenuFrameRate", k_unlock_menu_frame_rate, "Unlock menu frame rate" },
+    { "StockWheels", k_stock_wheels, "Stock rims of every car", stock_wheels::install },
 };
 
 } // namespace

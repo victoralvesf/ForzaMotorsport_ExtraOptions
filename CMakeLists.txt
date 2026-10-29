@@ -36,7 +36,7 @@ add_library(fm5 STATIC src/games/fm5/fm5.cpp)
 target_include_directories(fm5 PUBLIC src/games/fm5)
 target_link_libraries(fm5 PUBLIC core)
 
-add_library(fm6 STATIC src/games/fm6/fm6.cpp src/games/fm6/font.cpp)
+add_library(fm6 STATIC src/games/fm6/fm6.cpp src/games/fm6/font.cpp src/games/fm6/stock_wheels.cpp)
 target_include_directories(fm6 PUBLIC src/games/fm6)
 target_link_libraries(fm6 PUBLIC core)
 

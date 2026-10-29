@@ -20,11 +20,14 @@ struct Site {
 };
 
 // An option of the ini ([game] key=1 turns it on): its sites, applied together. label: its name in Azimuth's
-// launcher (game settings, Extra Options section); null keeps it out of the launcher.
+// launcher (game settings, Extra Options section); null keeps it out of the launcher. install: code the option
+// needs (hooks, strings built from the game's own), called once every site matched and before any site is
+// written; it writes nothing unless it returns true, and false leaves the whole option off.
 struct Option {
     const char *key;
     std::span<const Site> sites;
     const char *label = nullptr;
+    bool (*install)(uint8_t *base, size_t image_size) = nullptr;
 };
 
 constexpr size_t k_max_bytes = 32;

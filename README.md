@@ -84,6 +84,10 @@ Only in `motorsport_extraoptions.ini` (not in Azimuth's launcher):
 | `SkipPresentationVideo` | 0 | Skips the presentation video before the first race of a new profile and the intro videos of the Porsche/NASCAR expansions. |
 | `UnlockDLC` | 1 | The DLC cars and packs already included in the game (Car Pass, car packs, VIP, Porsche/NASCAR expansions...) count as purchased; the cars show up to buy with in-game credits. |
 | `UnlockMenuFrameRate` | 1 | Keeps the frame rate chosen in Azimuth in menus and transitions too (the game itself halves it there; races already run at the chosen rate). |
+| `StockWheels` | 0 | Adds a fifth rim style category, **Stock Rims (All Cars)**: the stock rims of every car in the game, by make in alphabetical order (Audi before BMW), free, to fit on any car. Each rim is loaded from its own car's package. |
+
+With `StockWheels=1`, a car can wear another car's stock rim. Before turning the option off (or removing the mod),
+put back one of the game's own rims on those cars: without the option the game cannot load that rim.
 
 Always on, no option: in Brazilian Portuguese, lap times on FM6's digital dashboards showed boxes in place of the
 minute and second marks (`00□12,977□□`), because the dashboard fonts have no apostrophe. Those times are shown as in

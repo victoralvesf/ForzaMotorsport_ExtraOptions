@@ -68,4 +68,41 @@ void *alloc_near(const void *close_to, size_t size, unsigned long protect)
     return nullptr;
 }
 
+void *alloc_reaching(const void *a, const void *b, size_t size, unsigned long protect)
+{
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    const uintptr_t gran = si.dwAllocationGranularity;
+    const uintptr_t min_app = reinterpret_cast<uintptr_t>(si.lpMinimumApplicationAddress);
+    const uintptr_t max_app = reinterpret_cast<uintptr_t>(si.lpMaximumApplicationAddress);
+    auto try_at = [&](uintptr_t at) -> void * {
+        auto *p = reinterpret_cast<void *>(at);
+        if (!reachable(a, p, size) || !reachable(b, p, size)) return nullptr;
+        return VirtualAlloc(p, size, MEM_RESERVE | MEM_COMMIT, protect);
+    };
+
+    // upward from b
+    for (uintptr_t at = (reinterpret_cast<uintptr_t>(b) + gran) & ~(gran - 1); at + size <= max_app;) {
+        if (!reachable(a, reinterpret_cast<void *>(at), size)) break;
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery(reinterpret_cast<void *>(at), &mi, sizeof mi)) break;
+        uintptr_t end = reinterpret_cast<uintptr_t>(mi.BaseAddress) + mi.RegionSize;
+        if (mi.State == MEM_FREE && at + size <= end)
+            if (void *p = try_at(at)) return p;
+        at = (end + gran - 1) & ~(gran - 1);
+    }
+    // downward from a
+    for (uintptr_t top = reinterpret_cast<uintptr_t>(a) & ~(gran - 1); top > min_app + size;) {
+        uintptr_t at = (top - size) & ~(gran - 1);
+        if (!reachable(b, reinterpret_cast<void *>(at), size)) break;
+        MEMORY_BASIC_INFORMATION mi;
+        if (!VirtualQuery(reinterpret_cast<void *>(at), &mi, sizeof mi)) break;
+        uintptr_t end = reinterpret_cast<uintptr_t>(mi.BaseAddress) + mi.RegionSize;
+        if (mi.State == MEM_FREE && at + size <= end)
+            if (void *p = try_at(at)) return p;
+        top = reinterpret_cast<uintptr_t>(mi.AllocationBase ? mi.AllocationBase : mi.BaseAddress) & ~(gran - 1);
+    }
+    return nullptr;
+}
+
 } // namespace core::hook

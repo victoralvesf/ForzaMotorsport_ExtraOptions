@@ -137,6 +137,10 @@ Result apply(uint8_t *base, size_t image_size, const Option &opt, const char *ga
         }
         if (form > 0) log::write("%s: %s: site %#x in alternative form %d", game, opt.key, s.rva, form);
     }
+    if (opt.install && !opt.install(base, image_size)) {
+        log::write("%s: %s: its code could not be installed, option ignored", game, opt.key);
+        return Result::mismatch;
+    }
     int written = 0;
     for (const Site &s : opt.sites) {
         if (!*s.write) continue;

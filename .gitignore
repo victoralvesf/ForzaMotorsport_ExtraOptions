@@ -20,6 +20,8 @@ game_binaries/
 
 # Decompilations/dumps derived from the binaries: local only, kept out of the public repository
 tools/sessoes_antigas/
+# RE scripts and simulations that carry the game's SQL/structure (local research)
+tools/re/
 *.pkl
 
 # Accumulated knowledge/RE notes (whole docs folder) and internal research: local only

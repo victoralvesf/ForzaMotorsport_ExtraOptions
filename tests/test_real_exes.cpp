@@ -39,8 +39,10 @@ std::wstring ini_all_on(const game::Module &g)
     return std::wstring(path.begin(), path.end());
 }
 
+// want == null: rewritten by the option's code (checked in its own test)
 bool same(const uint8_t *p, const char *want)
 {
+    if (!want) return true;
     std::vector<uint8_t> w = hex(want);
     return memcmp(p, w.data(), w.size()) == 0;
 }
