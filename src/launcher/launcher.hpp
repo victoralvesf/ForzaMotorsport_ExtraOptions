@@ -1,5 +1,5 @@
 // Integration with Azimuth's launcher: an "Extra Options" section in the settings page of a supported game, next to
-// Display, Graphics, Audio and Content packages (Azimuth 1.0.2). Every piece of the launcher it touches is found by
+// Display, Graphics, Audio and Content packages (Azimuth 1.0.2 to 1.0.4). Every piece of the launcher it touches is found by
 // a byte signature in azimuth.exe and checked before anything is written; when one is missing (another Azimuth
 // version) the launcher is left as it is and the options stay in the ini only.
 #pragma once
@@ -14,8 +14,11 @@ namespace launcher {
 
 // Places in azimuth.exe the section needs (null = not found).
 struct Sites {
+    static constexpr size_t k_layouts = 2; // forms of the settings page view: 1.0.2/1.0.3, 1.0.4
+
     uint8_t *build_sections;   // SettingsPage's list of sections of the current game (vector<int>, by Settings)
     uint8_t *rows_dispatch;    // view: rows of the section that is not Display/Graphics/Audio (empty vector)
+    size_t layout;             // which form of the view (and of the leas below) matched
     uint8_t *names[2];         // lea of the table of section names (index = section id)
     const wchar_t *const *table; // that table: Display, Graphics, Audio, Content packages
     bool current_game;         // Settings + k_current_game is the current game's title id (std::wstring)

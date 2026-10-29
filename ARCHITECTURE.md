@@ -93,18 +93,20 @@ when the player picks a choice). The mod adds section 4, Extra Options, for FM5 
   current title id of Azimuth's settings) is FM5 (`7b35d917`) or FM6 (`64f9397e`);
 - the two places that read a section name are pointed at a copy of the table with "Extra Options" at index 4
   (allocated within 2 GB so the `lea`s reach it);
-- the view builds an empty row list for any section id other than 0..2; those 15 bytes jump to a stub that builds
-  the mod's rows for id 4 (and still calls Azimuth's empty list for the rest).
+- the view builds an empty row list for any section id other than 0..2; that block (15 bytes in 1.0.2/1.0.3, 30 in
+  1.0.4, where the empty list is built inline) jumps to a stub that builds the mod's rows for id 4 and an empty list
+  for the rest.
 
 Each row is an Off/On switch like Azimuth's V-sync row. Its `std::function` holds the mod's own callable (inline
 storage, MSVC layout), which writes `[FM5]`/`[FM6]` `key=0/1` with `WritePrivateProfileStringW` (comments and other
 keys are kept) and returns a setting id above Azimuth's, so Azimuth saves and applies nothing of its own. The rows
 are allocated on the process heap, the heap of Azimuth's CRT, because Azimuth copies and frees them.
 
-Everything is found by byte signatures in `azimuth.exe` (each must match exactly once) and checked together before
+Everything is found by byte signatures in `azimuth.exe` (each must match exactly once; the view and the two name
+reads have one form for 1.0.2/1.0.3 and another for 1.0.4) and checked together before
 anything is written; the name table must hold Display, Graphics, Audio and Content packages. When something does not
 match, the launcher is left as it is and the log says what was missing. A unit test checks every site on the real
-`azimuth.exe` 1.0.2 when it is present locally.
+`azimuth.exe` 1.0.2 and 1.0.4 when they are present locally.
 
 ## FM6 dashboard font fix
 
@@ -146,7 +148,7 @@ ctest --preset default
 
 The tests cover the patch engine on fake buffers (match, mismatch, all or nothing, alternative forms, sites at the
 end of a section), the hook and trampoline, the ini parser, the IAT lookup, the font fix, the launcher rows and MSVC layouts, the launcher sites on the
-real `azimuth.exe` 1.0.2 (when present locally), and every option against
+real `azimuth.exe` 1.0.2 and 1.0.4 (when present locally), and every option against
 bytes written by hand in `tests/expected.hpp`. When the real game exes are present locally they are mapped like
 Azimuth does and every option is applied to them, in the original form and after Azimuth's DLC patch. Two CMake
 checks make sure `winmm.dll` imports only system DLLs and that no source uses a relative include.

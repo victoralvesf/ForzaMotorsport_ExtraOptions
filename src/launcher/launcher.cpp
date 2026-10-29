@@ -14,10 +14,10 @@ namespace launcher {
 
 namespace {
 
-// ---- signatures (Azimuth 1.0.2) ----
+// ---- signatures ----
 
 // Start of the function that lists the sections of the current game: { Display, Graphics, Audio } as a
-// vector<int>, plus Content packages when the game has some.
+// vector<int>, plus Content packages when the game has some (the same in every supported Azimuth).
 constexpr const char *k_build_sections =
     "48 89 5c 24 18 48 89 6c 24 20 56 57 41 54 41 56 41 57 48 83 ec 60 48 8b 05 ?? ?? ?? ?? 48 33 c4 48 89 44 24 50"
     " 48 8b fa 48 8b f1 48 89 4c 24 38 45 33 e4 44 89 64 24 30 44 89 64 24 40 c7 44 24 44 01 00 00 00"
@@ -25,26 +25,50 @@ constexpr const char *k_build_sections =
 // its first whole instructions, moved to the trampoline (nothing relative to RIP)
 constexpr const char *k_build_sections_stolen = "48 89 5c 24 18 48 89 6c 24 20 56 57 41 54";
 
-// SettingsPage's view, from its start: Context in r12 (and [rbp-0x58]), the list of sections, the id of the current
-// one in [rbp-0x38], then the rows: Audio (2), Display (0), Graphics (1) and, for any other id, an empty vector
-// built at [rbp-0x30] (lea rcx; call; mov r14d,8 = its cleanup flag). The mod takes over those 15 bytes.
-constexpr const char *k_rows_dispatch =
-    "4d 8b e0 4c 89 45 a8 48 89 55 28 4c 8b f9 48 89 55 88 45 33 f6 44 89 75 cc 49 8b 58 08 48 89 5d 88"
-    " 48 8b d3 48 8d 4d 10 e8 ?? ?? ?? ?? 90 48 8d 4d 10 e8 ?? ?? ?? ?? 49 8b 57 08 48 3b d0 72 07 4d 89 77 08"
-    " 41 8b d6 48 8d 4d 10 e8 ?? ?? ?? ?? 8b 00 89 45 c8 83 f8 02 75 2b 41 83 7f 38 00 75 09 e8 ?? ?? ?? ??"
-    " 41 89 47 38 45 8b 47 38 49 8b d4 48 8d 8d 28 80 00 00 e8 ?? ?? ?? ?? 41 be 04 00 00 00 eb 48"
-    " 85 c0 75 18 49 8b d4 48 8d 8d 88 81 00 00 e8 ?? ?? ?? ?? 90 41 be 01 00 00 00 eb 4f"
-    " 83 f8 01 75 18 49 8b d4 48 8d 8d e0 80 00 00 e8 ?? ?? ?? ?? 90 41 be 02 00 00 00 eb 1f"
-    " 48 8d 4d d0 e8 ?? ?? ?? ?? 41 be 08 00 00 00";
-constexpr size_t k_rows_other = 0xbe;      // the "lea rcx,[rbp-0x30]; call empty; mov r14d,8" of any other id
-constexpr size_t k_rows_other_size = 15;   // the next instruction (0xcd) is also the Audio branch's jump target
-
-// name of a section: index the table of names with the section id (the tabs; the title of the current one)
-constexpr const char *k_names[2] = {
-    "48 63 10 48 8d 05 ?? ?? ?? ?? 48 8b 14 d0",    // movsxd rdx,[rax]; lea rax,[table]; mov rdx,[rax+rdx*8]
-    "48 63 7d c8 48 8d 05 ?? ?? ?? ?? 48 8b 14 f8", // movsxd rdi,[rbp-0x38]; lea rax,[table]; mov rdx,[rax+rdi*8]
+// SettingsPage's view in one Azimuth build, from the start of its body: the list of sections, the id of the current
+// one, then the rows: Audio (2), Display (0), Graphics (1) and, for any other id, an empty vector (the "other"
+// block, which the mod takes over; the instruction after it is also the Audio branch's jump target). The two leas
+// index the table of section names with the section id (the tabs; the title of the current one).
+struct Layout {
+    const char *version;
+    const char *view;
+    size_t other, other_size;
+    const char *names[2];
+    size_t names_disp[2]; // the lea's rel32 (the lea ends 4 bytes after)
 };
-constexpr size_t k_names_disp[2] = { 6, 7 }; // the lea's rel32 (the lea ends 4 bytes after)
+
+constexpr Layout k_layouts[] = {
+    // Context in r12 (and [rbp-0x58]), the id in [rbp-0x38]; other: lea rcx,[rbp-0x30]; call <empty vector>;
+    // mov r14d,8 (its cleanup flag)
+    { "1.0.2/1.0.3",
+      "4d 8b e0 4c 89 45 a8 48 89 55 28 4c 8b f9 48 89 55 88 45 33 f6 44 89 75 cc 49 8b 58 08 48 89 5d 88"
+      " 48 8b d3 48 8d 4d 10 e8 ?? ?? ?? ?? 90 48 8d 4d 10 e8 ?? ?? ?? ?? 49 8b 57 08 48 3b d0 72 07 4d 89 77 08"
+      " 41 8b d6 48 8d 4d 10 e8 ?? ?? ?? ?? 8b 00 89 45 c8 83 f8 02 75 2b 41 83 7f 38 00 75 09 e8 ?? ?? ?? ??"
+      " 41 89 47 38 45 8b 47 38 49 8b d4 48 8d 8d 28 80 00 00 e8 ?? ?? ?? ?? 41 be 04 00 00 00 eb 48"
+      " 85 c0 75 18 49 8b d4 48 8d 8d 88 81 00 00 e8 ?? ?? ?? ?? 90 41 be 01 00 00 00 eb 4f"
+      " 83 f8 01 75 18 49 8b d4 48 8d 8d e0 80 00 00 e8 ?? ?? ?? ?? 90 41 be 02 00 00 00 eb 1f"
+      " 48 8d 4d d0 e8 ?? ?? ?? ?? 41 be 08 00 00 00",
+      0xbe, 15,
+      { "48 63 10 48 8d 05 ?? ?? ?? ?? 48 8b 14 d0",      // movsxd rdx,[rax]; lea rax,[table]; mov rdx,[rax+rdx*8]
+        "48 63 7d c8 48 8d 05 ?? ?? ?? ?? 48 8b 14 f8" }, // movsxd rdi,[rbp-0x38]; lea rax,[table]; mov rdx,[rax+rdi*8]
+      { 6, 7 } },
+    // Context in r14 (and [rsp+0x60]), the id in r12d; other: the empty vector built inline at [rbp+0x7e0]
+    // (xorps; movdqu; mov qword), lea rax,[rbp+0x7e0]; mov ebx,8 (its cleanup flag)
+    { "1.0.4",
+      "4d 8b f0 4c 89 44 24 60 48 89 55 e8 48 8b f1 48 89 54 24 50 33 ff 89 7d 80 4d 8b 68 08 4c 89 6c 24 50"
+      " 49 8b d5 48 8d 4d d0 e8 ?? ?? ?? ?? 90 4c 8b 66 08 48 8b 45 d8 48 8b 4d d0 48 2b c1 48 c1 f8 02 4c 3b e0"
+      " 72 07 48 89 7e 08 44 8b e7 46 8b 24 a1 44 89 64 24 78 41 83 fc 02 75 25 83 7e 38 00 75 08 e8 ?? ?? ?? ??"
+      " 89 46 38 44 8b 46 38 49 8b d6 48 8d 4d a0 e8 ?? ?? ?? ?? bb 04 00 00 00 eb 57"
+      " 45 85 e4 75 17 49 8b d6 48 8d 8d 40 0b 00 00 e8 ?? ?? ?? ?? 90 bb 01 00 00 00 eb 5f"
+      " 41 83 fc 01 75 17 49 8b d6 48 8d 8d 80 0e 00 00 e8 ?? ?? ?? ?? 90 bb 02 00 00 00 eb 30"
+      " 0f 57 c0 f3 0f 7f 85 e0 07 00 00 48 89 bd f0 07 00 00 48 8d 85 e0 07 00 00 bb 08 00 00 00",
+      0xbb, 30,
+      { "48 63 14 b8 48 8d 05 ?? ?? ?? ?? 48 8b 14 d0",   // movsxd rdx,[rax+rdi*4]; lea rax,[table]; mov rdx,[rax+rdx*8]
+        "49 63 d4 48 8d 05 ?? ?? ?? ?? 48 8b 14 d0" },    // movsxd rdx,r12d; lea rax,[table]; mov rdx,[rax+rdx*8]
+      { 7, 6 } },
+};
+static_assert(sizeof k_layouts / sizeof *k_layouts == Sites::k_layouts);
+
 constexpr const wchar_t *k_table[] = { L"Display", L"Graphics", L"Audio", L"Content packages" };
 static_assert(sizeof k_table / sizeof *k_table == k_section);
 
@@ -106,16 +130,15 @@ msvc::Vector<int32_t> *build_sections(msvc::Vector<int32_t> *out, const uint8_t 
 }
 
 // Called from the stub at the view's "other section" rows, instead of Azimuth's empty vector. ctx: the page's
-// Context (ctx[1] = Settings).
+// Context (ctx[1] = Settings); empty: Azimuth's function that builds it (null where the view builds it inline).
 msvc::Vector<Row> *rows_for(msvc::Vector<Row> *out, const uint8_t *const *ctx, int32_t section, EmptyRows empty)
 {
-    if (section != k_section) return empty(out);
+    if (empty) empty(out);
+    else *out = {};
+    if (section != k_section) return out;
     const game::Module *g = game_of(ctx[1], g_games);
-    if (!g) return empty(out);
-    if (!fill_rows(*out, *g)) {
-        core::log::write("launcher: %s Extra Options: out of memory, rows left empty", g->tag);
-        return empty(out);
-    }
+    if (!g) return out;
+    if (!fill_rows(*out, *g)) core::log::write("launcher: %s Extra Options: out of memory, rows left empty", g->tag);
     return out;
 }
 
@@ -127,13 +150,14 @@ void abs_jmp(uint8_t *out, const void *to)
     memcpy(out + 6, &to, 8);
 }
 
-// The stub that replaces the view's 15 bytes: rows_for(&rows, ctx, section, empty), then the cleanup flag and back.
-uint8_t *make_stub(uint8_t *site)
+// The stub that replaces the view's "other" block: rows_for(&rows, ctx, section, empty), then what the block leaves
+// for the code after it (the cleanup flag; in 1.0.4 also rax = &rows) and back.
+uint8_t *make_stub(uint8_t *site, size_t layout)
 {
     auto *s = static_cast<uint8_t *>(VirtualAlloc(nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
     if (!s) return nullptr;
-    const void *empty = core::scan::rel32(site + 5), *fn = reinterpret_cast<const void *>(rows_for);
-    const void *back = site + k_rows_other_size;
+    const void *fn = reinterpret_cast<const void *>(rows_for);
+    const void *back = site + k_layouts[layout].other_size;
     uint8_t *p = s;
     auto put = [&](std::initializer_list<uint8_t> b) {
         for (uint8_t x : b) *p++ = x;
@@ -142,16 +166,28 @@ uint8_t *make_stub(uint8_t *site)
         memcpy(p, &v, 8);
         p += 8;
     };
-    put({ 0x48, 0x8d, 0x4d, 0xd0 });  // lea rcx,[rbp-0x30]
-    put({ 0x4c, 0x89, 0xe2 });        // mov rdx,r12
-    put({ 0x44, 0x8b, 0x45, 0xc8 });  // mov r8d,[rbp-0x38]
-    put({ 0x49, 0xb9 });              // mov r9,empty
-    put64(empty);
-    put({ 0x48, 0xb8 });              // mov rax,rows_for
+    if (layout == 0) {
+        put({ 0x48, 0x8d, 0x4d, 0xd0 });             // lea rcx,[rbp-0x30]
+        put({ 0x4c, 0x89, 0xe2 });                   // mov rdx,r12
+        put({ 0x44, 0x8b, 0x45, 0xc8 });             // mov r8d,[rbp-0x38]
+        put({ 0x49, 0xb9 });                         // mov r9,empty
+        put64(core::scan::rel32(site + 5));
+    } else {
+        put({ 0x48, 0x8d, 0x8d, 0xe0, 0x07, 0, 0 }); // lea rcx,[rbp+0x7e0]
+        put({ 0x4c, 0x89, 0xf2 });                   // mov rdx,r14
+        put({ 0x45, 0x89, 0xe0 });                   // mov r8d,r12d
+        put({ 0x45, 0x31, 0xc9 });                   // xor r9d,r9d (no empty function)
+    }
+    put({ 0x48, 0xb8 });                             // mov rax,rows_for
     put64(fn);
-    put({ 0xff, 0xd0 });              // call rax
-    put({ 0x41, 0xbe, 8, 0, 0, 0 });  // mov r14d,8
-    abs_jmp(p, back);                 // jmp back
+    put({ 0xff, 0xd0 });                             // call rax
+    if (layout == 0) {
+        put({ 0x41, 0xbe, 8, 0, 0, 0 });             // mov r14d,8
+    } else {
+        put({ 0x48, 0x8d, 0x85, 0xe0, 0x07, 0, 0 }); // lea rax,[rbp+0x7e0]
+        put({ 0xbb, 8, 0, 0, 0 });                   // mov ebx,8
+    }
+    abs_jmp(p, back);                                // jmp back
     DWORD old;
     if (!VirtualProtect(s, 64, PAGE_EXECUTE_READ, &old)) return nullptr;
     FlushInstructionCache(GetCurrentProcess(), s, 64);
@@ -165,11 +201,16 @@ bool locate(uint8_t *base, Sites &s, const char **why)
     s = {};
     auto find = [&](const char *sig) { return const_cast<uint8_t *>(core::scan::find_unique(base, sig)); };
     if (!(s.build_sections = find(k_build_sections))) return *why = "section list not found", false;
-    if (uint8_t *v = find(k_rows_dispatch)) s.rows_dispatch = v + k_rows_other;
-    else return *why = "settings page view not found", false;
+    for (size_t l = 0; l < Sites::k_layouts && !s.rows_dispatch; l++)
+        if (uint8_t *v = find(k_layouts[l].view)) {
+            s.rows_dispatch = v + k_layouts[l].other;
+            s.layout = l;
+        }
+    if (!s.rows_dispatch) return *why = "settings page view not found", false;
+    const Layout &lay = k_layouts[s.layout];
     for (int i = 0; i < 2; i++) {
-        if (!(s.names[i] = find(k_names[i]))) return *why = "section names not found", false;
-        auto *t = reinterpret_cast<const wchar_t *const *>(core::scan::rel32(s.names[i] + k_names_disp[i]));
+        if (!(s.names[i] = find(lay.names[i]))) return *why = "section names not found", false;
+        auto *t = reinterpret_cast<const wchar_t *const *>(core::scan::rel32(s.names[i] + lay.names_disp[i]));
         if (i == 1 && t != s.table) return *why = "section names: two tables", false;
         s.table = t;
     }
@@ -223,16 +264,18 @@ bool install(HMODULE exe, std::span<const game::Module *const> games, const wcha
     VirtualProtect(table, 0x1000, PAGE_READONLY, &old);
 
     // rows first (only used for our id), then the names, then the section itself
-    uint8_t *stub = make_stub(s.rows_dispatch);
-    uint8_t jmp[k_rows_other_size];
+    const Layout &lay = k_layouts[s.layout];
+    uint8_t *stub = make_stub(s.rows_dispatch, s.layout);
+    uint8_t jmp[32];
+    static_assert(sizeof jmp >= k_layouts[0].other_size && sizeof jmp >= k_layouts[1].other_size);
     memset(jmp, 0xcc, sizeof jmp);
     if (stub) abs_jmp(jmp, stub);
-    if (!stub || !core::patch::write_code(s.rows_dispatch, jmp, sizeof jmp)) {
+    if (!stub || !core::patch::write_code(s.rows_dispatch, jmp, lay.other_size)) {
         core::log::write("launcher: settings page view not patched: no Extra Options section");
         return false;
     }
     for (int i = 0; i < 2; i++) {
-        uint8_t *disp = s.names[i] + k_names_disp[i];
+        uint8_t *disp = s.names[i] + lay.names_disp[i];
         auto rel = static_cast<int32_t>(reinterpret_cast<intptr_t>(table) - reinterpret_cast<intptr_t>(disp + 4));
         if (!core::patch::write_code(disp, &rel, 4)) {
             core::log::write("launcher: section names not patched: no Extra Options section");
@@ -247,6 +290,7 @@ bool install(HMODULE exe, std::span<const game::Module *const> games, const wcha
     }
     g_build_sections = reinterpret_cast<BuildSections>(tramp);
 
+    core::log::write("launcher: settings page of Azimuth %s", lay.version);
     for (const game::Module *g : games) {
         int n = 0;
         for (const core::patch::Option &o : g->options) n += o.label != nullptr;

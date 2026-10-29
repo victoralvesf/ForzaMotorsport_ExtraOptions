@@ -55,7 +55,7 @@ The settings page of FM5 and FM6 gets an **Extra Options** section, next to Disp
 packages, with an Off/On switch for each option below. A change is saved to `motorsport_extraoptions.ini` right
 away and applies the next time the game starts. The other games in Azimuth are not affected.
 
-The section is added only when the launcher code the mod relies on matches what it expects (Azimuth 1.0.2). With a
+The section is added only when the launcher code the mod relies on matches what it expects (Azimuth 1.0.2 to 1.0.4). With a
 version where it does not, the launcher stays as it is (the log says why) and the options still work from the ini.
 
 ### Global (section `[GLOBAL]`)

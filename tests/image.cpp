@@ -88,6 +88,7 @@ const char *game_exe(const char *game)
     if (strcmp(game, "FM5") == 0) return TEST_SOURCE_DIR "/game_binaries/FM5/forza_durango_release_final.exe";
     if (strcmp(game, "FM6") == 0) return TEST_SOURCE_DIR "/game_binaries/FM6/forza_durango_release_final.exe";
     if (strcmp(game, "AZIMUTH") == 0) return TEST_SOURCE_DIR "/game_binaries/AZIMUTH/azimuth_1.0.2.exe";
+    if (strcmp(game, "AZIMUTH_104") == 0) return TEST_SOURCE_DIR "/game_binaries/AZIMUTH/azimuth_1.0.4.exe";
     return "";
 }
 

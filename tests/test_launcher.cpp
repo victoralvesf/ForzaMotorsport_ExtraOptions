@@ -1,5 +1,5 @@
 // The Extra Options section of Azimuth's launcher: MSVC layouts, the rows, the game of a Settings, and the sites in
-// the real azimuth.exe 1.0.2 (game_binaries\AZIMUTH\, local only; skipped without it).
+// the real azimuth.exe 1.0.2 and 1.0.4 (game_binaries\AZIMUTH\, local only; skipped without it).
 #include "doctest.h"
 
 #include "expected.hpp"
@@ -186,9 +186,20 @@ TEST_CASE("hook: memory near an address is reachable with a rel32")
     CHECK(core::hook::reachable(self, self + 0x7fffff00ull, 0x100));
 }
 
-TEST_CASE("real azimuth.exe 1.0.2: every launcher site is found, then patched for the Extra Options section")
+namespace {
+
+// RVAs from the analysis of each version (docs, local)
+struct RealAzimuth {
+    const char *exe;
+    size_t layout;
+    uintptr_t build_sections, rows_dispatch, names[2], table;
+    size_t names_disp[2];
+    const char *other; // the view's "other" block before the patch
+};
+
+void check_real_azimuth(const RealAzimuth &a)
 {
-    test_image::Mapped img(test_image::game_exe("AZIMUTH"));
+    test_image::Mapped img(test_image::game_exe(a.exe));
     if (!img.base) {
         MESSAGE("game_binaries\\AZIMUTH missing: test skipped");
         return;
@@ -196,21 +207,21 @@ TEST_CASE("real azimuth.exe 1.0.2: every launcher site is found, then patched fo
     launcher::Sites s;
     const char *why = "";
     REQUIRE_MESSAGE(launcher::locate(img.base, s, &why), why);
-    // RVAs from the analysis of 1.0.2 (docs, local)
-    CHECK(s.build_sections - img.base == 0xfd170);
-    CHECK(s.rows_dispatch - img.base == 0x108d18);
-    CHECK(s.names[0] - img.base == 0x109ef0);
-    CHECK(s.names[1] - img.base == 0x1102da);
-    CHECK(reinterpret_cast<const uint8_t *>(s.table) - img.base == 0x7faa00);
+    CHECK(s.layout == a.layout);
+    CHECK(s.build_sections - img.base == a.build_sections);
+    CHECK(s.rows_dispatch - img.base == a.rows_dispatch);
+    CHECK(s.names[0] - img.base == a.names[0]);
+    CHECK(s.names[1] - img.base == a.names[1]);
+    CHECK(reinterpret_cast<const uint8_t *>(s.table) - img.base == a.table);
     CHECK(s.current_game);
-    // lea rcx,[rbp-0x30]; call <empty vector>; mov r14d,8
-    std::vector<uint8_t> before = expected::hex("48 8d 4d d0 e8 7f 87 f1 ff 41 be 08 00 00 00");
+    std::vector<uint8_t> before = expected::hex(a.other);
     CHECK(memcmp(s.rows_dispatch, before.data(), before.size()) == 0);
 
     REQUIRE(launcher::install(reinterpret_cast<HMODULE>(img.base), games::all(), L"unused.ini"));
     CHECK(memcmp(s.rows_dispatch, "\xff\x25\0\0\0\0", 6) == 0);
+    for (size_t i = 14; i < before.size(); i++) CHECK(s.rows_dispatch[i] == 0xcc);
     CHECK(memcmp(s.build_sections, "\xff\x25\0\0\0\0", 6) == 0);
-    const uint8_t *disp[2] = { s.names[0] + 6, s.names[1] + 7 };
+    const uint8_t *disp[2] = { s.names[0] + a.names_disp[0], s.names[1] + a.names_disp[1] };
     auto *t0 = reinterpret_cast<const wchar_t *const *>(core::scan::rel32(disp[0]));
     auto *t1 = reinterpret_cast<const wchar_t *const *>(core::scan::rel32(disp[1]));
     CHECK(t0 == t1);
@@ -219,4 +230,20 @@ TEST_CASE("real azimuth.exe 1.0.2: every launcher site is found, then patched fo
 
     // once patched, the view no longer matches: a second install changes nothing
     CHECK(!launcher::locate(img.base, s, &why));
+}
+
+} // namespace
+
+TEST_CASE("real azimuth.exe 1.0.2: every launcher site is found, then patched for the Extra Options section")
+{
+    // other: lea rcx,[rbp-0x30]; call <empty vector>; mov r14d,8
+    check_real_azimuth({ "AZIMUTH", 0, 0xfd170, 0x108d18, { 0x109ef0, 0x1102da }, 0x7faa00, { 6, 7 },
+                         "48 8d 4d d0 e8 7f 87 f1 ff 41 be 08 00 00 00" });
+}
+
+TEST_CASE("real azimuth.exe 1.0.4: every launcher site is found, then patched for the Extra Options section")
+{
+    // other: xorps xmm0,xmm0; movdqu [rbp+0x7e0],xmm0; mov [rbp+0x7f0],rdi; lea rax,[rbp+0x7e0]; mov ebx,8
+    check_real_azimuth({ "AZIMUTH_104", 1, 0xfd810, 0x10220a, { 0x1026b8, 0x103032 }, 0x6e66a0, { 7, 6 },
+                         "0f 57 c0 f3 0f 7f 85 e0 07 00 00 48 89 bd f0 07 00 00 48 8d 85 e0 07 00 00 bb 08 00 00 00" });
 }
