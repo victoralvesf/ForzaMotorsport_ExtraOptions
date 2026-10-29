@@ -58,6 +58,9 @@ void put_game(test_image::Fake &img, const char *tag)
         for (const expected::Text &t : expected::k_fm6_stock_wheels_texts)
             img.put(t.rva, std::span(reinterpret_cast<const uint8_t *>(t.text), strlen(t.text) + 1));
     }
+    if (strcmp(tag, "FM5") == 0)
+        for (const expected::Text &t : expected::k_fm5_stock_wheels_texts)
+            img.put(t.rva, std::span(reinterpret_cast<const uint8_t *>(t.text), strlen(t.text) + 1));
 }
 
 // want == null: the option's code rewrote the site (checked in its own test)

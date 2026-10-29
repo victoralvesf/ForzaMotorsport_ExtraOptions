@@ -27,6 +27,12 @@ When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe
 - FM6 `StockWheels` (off by default): a fifth rim style category, "Stock Rims (All Cars)", with the stock rims of
   every car in the game, by make in alphabetical order, free, to fit on any car. Each rim is loaded from its own
   car's package.
+- FM5 `StockWheels` (off by default): the same category in FM5. FM5 car packages keep the rim model in a
+  few different folders and file names; the mod tries each one, and a few special editions without a rim model of
+  their own are listed but do not load.
+
+### Changed
+- The StockWheels engine (SQL and rim loader) moved to the shared core; FM6 only describes its sites.
 
 ## v1.0.1 — Launcher section on Azimuth 1.0.4
 

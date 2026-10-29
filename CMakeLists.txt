@@ -28,11 +28,12 @@ add_library(core STATIC
     src/core/hook.cpp
     src/core/loader_watch.cpp
     src/core/options.cpp
+    src/core/stock_rims.cpp
 )
 target_include_directories(core PUBLIC src/core)
 
 # one library per game, reached only through its game::Module
-add_library(fm5 STATIC src/games/fm5/fm5.cpp)
+add_library(fm5 STATIC src/games/fm5/fm5.cpp src/games/fm5/wheels.cpp)
 target_include_directories(fm5 PUBLIC src/games/fm5)
 target_link_libraries(fm5 PUBLIC core)
 

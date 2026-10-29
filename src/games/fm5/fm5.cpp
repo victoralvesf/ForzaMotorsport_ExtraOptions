@@ -1,5 +1,7 @@
 #include "fm5.hpp"
 
+#include "wheels.hpp"
+
 namespace fm5 {
 
 namespace {
@@ -47,12 +49,33 @@ constexpr Site k_unlock_menu_frame_rate[] = {
     { 0x711620, "89 91 a0 00 00 00 c3 cc cc cc cc cc cc cc cc cc", 0, "83 fa 01 75 02 31 d2 89 91 a0 00 00 00 c3" },
 };
 
+// A fifth rim category with the stock rims of every car (core::stock_rims builds the SQL from the game's fragments
+// and hooks the rim loader). Sites only checked here: the leas of the SQL fragments, the loader's entry, its read of
+// the file system, the length of its first rims folder string and its leas of the rims folder, of the "\"
+// separator and of the LF model file.
+constexpr Site k_stock_wheels[] = {
+    { stock_wheels::k_view_lea, "48 8d 15 1e ea a9 01", 0, "" },
+    { stock_wheels::k_cats_lea, "4c 8d 05 39 2c 7f 01", 0, "" },
+    { stock_wheels::k_names_lea, "4c 8d 05 08 27 7f 01", 0, "" },
+    { stock_wheels::k_joins_lea, "4c 8d 05 df 24 7f 01", 0, "" },
+    { stock_wheels::k_load, stock_wheels::k_load_entry, 0, "" },
+    { stock_wheels::k_fs_read, "48 8b 0d bc 19 da 01 48 8b 01", 0, "" },
+    { stock_wheels::k_prefix_len_lea, "45 8d 47 27", 0, "" },
+    { stock_wheels::k_prefix_leas[0], "48 8d 15 2e c6 5e 01", 0, "" },
+    { stock_wheels::k_prefix_leas[1], "48 8d 15 da c3 5e 01", 0, "" },
+    { stock_wheels::k_prefix_leas[2], "48 8d 15 d0 c2 5e 01", 0, "" },
+    { stock_wheels::k_sep_leas[0], "4c 8d 05 ad 5b a0 00", 0, "" },
+    { stock_wheels::k_sep_leas[1], "4c 8d 05 b0 5a a0 00", 0, "" },
+    { stock_wheels::k_file_leas[0], "4c 8d 05 72 c5 5e 01", 0, "" },
+};
+
 constexpr Option k_options[] = {
     { "SkipIntro", k_skip_intro, "Skip intro" },
     { "SkipPresentationVideo", k_skip_presentation_video, "Skip presentation video" },
     { "UnlockDLC", k_unlock_dlc, "Unlock DLC" },
     { "EnableMarketplace", k_enable_marketplace, "Enable Marketplace" },
     { "UnlockMenuFrameRate", k_unlock_menu_frame_rate, "Unlock menu frame rate" },
+    { "StockWheels", k_stock_wheels, "Stock rims of every car", stock_wheels::install },
 };
 
 } // namespace

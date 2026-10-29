@@ -37,6 +37,22 @@ constexpr Change k_fm5[] = {
     { "EnableMarketplace", 0x180c2a, "c7 83 bc 30 00 00 00 00 00 01", "c7 83 bc 30 00 00 00 00 01 01" },
     { "UnlockMenuFrameRate", 0x711620, "89 91 a0 00 00 00 c3 cc cc cc cc cc cc cc cc cc",
       "83 fa 01 75 02 31 d2 89 91 a0 00 00 00 c3 cc cc" },
+    // lea rdx / lea r8 of the SQL fragments: view rims, categories FROM, rim columns, rim joins (test_stock_wheels)
+    { "StockWheels", 0x1d4cfb, "48 8d 15 1e ea a9 01", nullptr },
+    { "StockWheels", 0x49bc50, "4c 8d 05 39 2c 7f 01", nullptr },
+    { "StockWheels", 0x49ce81, "4c 8d 05 08 27 7f 01", nullptr },
+    { "StockWheels", 0x49ceda, "4c 8d 05 df 24 7f 01", nullptr },
+    // rim loader: entry (hooked), read of the file system, length of the first rims folder (kept), lea of the rims
+    // folder x3, of "\" x2 and of the LF model file (-> calls)
+    { "StockWheels", 0x6cedf0, "48 8b c4 55 41 56 41 57 48 8d a8 98 fd ff ff 48 81 ec 50 03 00 00", nullptr },
+    { "StockWheels", 0x6cf055, "48 8b 0d bc 19 da 01 48 8b 01", "48 8b 0d bc 19 da 01 48 8b 01" },
+    { "StockWheels", 0x6cee57, "45 8d 47 27", "45 8d 47 27" },
+    { "StockWheels", 0x6cee5b, "48 8d 15 2e c6 5e 01", nullptr },
+    { "StockWheels", 0x6cf0af, "48 8d 15 da c3 5e 01", nullptr },
+    { "StockWheels", 0x6cf1b9, "48 8d 15 d0 c2 5e 01", nullptr },
+    { "StockWheels", 0x6cee80, "4c 8d 05 ad 5b a0 00", nullptr },
+    { "StockWheels", 0x6cef7d, "4c 8d 05 b0 5a a0 00", nullptr },
+    { "StockWheels", 0x6ceea7, "4c 8d 05 72 c5 5e 01", nullptr },
 };
 constexpr uint32_t k_fm5_lambda = 0x19e6a0;
 
@@ -54,7 +70,7 @@ constexpr Change k_fm6[] = {
       "89 91 a0 00 00 00 c3 83 fa 01 75 f4 31 d2 eb f0" },
     { "UnlockMenuFrameRate", 0x19f3a88, "40 99 84 40 01 00 00 00", "47 99 84 40 01 00 00 00" },
     { "UnlockMenuFrameRate", 0x19f41a8, "40 99 84 40 01 00 00 00", "47 99 84 40 01 00 00 00" },
-    // lea rdx / lea r8 of the SQL fragments: view rims, categories FROM, rim columns, rim joins (test_fm6_stock_wheels)
+    // lea rdx / lea r8 of the SQL fragments: view rims, categories FROM, rim columns, rim joins (test_stock_wheels)
     { "StockWheels", 0x23138b, "48 8d 15 8e ed 07 01", nullptr },
     { "StockWheels", 0xcb5bc5, "4c 8d 05 b4 16 91 00", nullptr },
     { "StockWheels", 0xcb626e, "4c 8d 05 2b 19 91 00", nullptr },
@@ -85,6 +101,17 @@ constexpr Text k_fm6_stock_wheels_texts[] = {
     { 0x15c79d0, "v AS t ON x LEFT JOIN List_Wheels ON y JOIN WheelAnnotations ON z JOIN WheelCategories ON w AND " },
     { 0x15cdd10, "GAME:\\Media\\Cars\\_library\\scene\\wheels\\" },
     { 0x10db128, "\\" },
+};
+constexpr Text k_fm5_stock_wheels_texts[] = {
+    { 0x1c73720, "SELECT r FROM List_Wheels WHERE p != 0" },
+    { 0x1c8e890, "' END AS s FROM WheelCategories LEFT JOIN m ON m.Id = " },
+    { 0x1c8f590, "CASE WHEN a THEN b ELSE List_PartManufacturer.PartManufacturer END AS M, CASE WHEN a THEN b "
+                 "ELSE List_Wheels.DisplayName END AS N, CASE WHEN List_PartManufacturer.LogoPath IS NULL THEN c "
+                 "END AS L, CASE WHEN PartTable.IsStock = 1 THEN List_CarMake.IconPath ELSE d END AS I," },
+    { 0x1c8f3c0, "v AS t ON x LEFT JOIN List_Wheels ON y JOIN WheelAnnotations ON z JOIN WheelCategories ON w AND " },
+    { 0x1cbb490, "GAME:\\Media\\Cars\\_library\\scene\\wheels\\" },
+    { 0x10d4a34, "\\" },
+    { 0x1cbb420, "_wheelLF.modelbin" },
 };
 
 // FM6 dash font fix (always on): the text measure gets "jmp [rip+0]; <stub>; int3", the glyph lookup is only read.

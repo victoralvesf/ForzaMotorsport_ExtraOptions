@@ -34,17 +34,17 @@ removed in `chore!: remove the compatibility layer`; it lives only in the git hi
 
 ## Project layout
 - `src/main.cpp` (DllMain, log, version, installs the loader watch and the launcher section), `src/proxy/` (winmm
-  forwarding), `src/core/` (log, pe, version, ini, patch, scan, hook, loader_watch, options, `game.hpp` =
-  `game::Module`), `src/launcher/` (Extra Options section of Azimuth's launcher),
-  `src/games/fm5/`, `src/games/fm6/` (+ `font.cpp`), `src/games/registry.*` (list of games).
+  forwarding), `src/core/` (log, pe, version, ini, patch, scan, hook, loader_watch, options, `stock_rims` = StockWheels engine of both
+  games, `game.hpp` = `game::Module`), `src/launcher/` (Extra Options section of Azimuth's launcher),
+  `src/games/fm5/` (+ `wheels.cpp`), `src/games/fm6/` (+ `font.cpp`, `stock_wheels.cpp`), `src/games/registry.*` (list of games).
 - **Game separation:** each game is its own static library that only links `core`; include paths keep one game
   from seeing the other, and the `include_isolation` test rejects `../` includes. A fix for one game goes in its
   folder only.
 - `tests/` (doctest): `expected.hpp` = hand-written bytes per option (never copied from the tables), fake image
   tests, real exe tests (skipped without `game_binaries\`), `check_imports.cmake`, `check_includes.cmake`.
 - `motorsport_extraoptions.ini` `[GLOBAL]` (`DisableLog`: 1 = no log; ini only, not in the launcher), `[FM5]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `EnableMarketplace`,
-  `UnlockMenuFrameRate`) and `[FM6]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`,
-  `UnlockMenuFrameRate`); a missing key = off.
+  `UnlockMenuFrameRate`, `StockWheels`) and `[FM6]` (`SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`,
+  `UnlockMenuFrameRate`, `StockWheels`); a missing key = off.
   Log: `fm_extra_options.log` next to `azimuth.exe` (recreated each run).
 - `azimuth.exe` (root, local), `data\` (Azimuth's folder: `data\logs\azimuth.log`).
 - `game_binaries\FM5\`, `FM6\`, `AZIMUTH\` — copied exes per game. Game folders: `E:\Xbox One Games\Forza Motorsport 5`,

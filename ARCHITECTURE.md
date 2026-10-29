@@ -125,10 +125,11 @@ that follows reads the same buffer.
 src/main.cpp            DllMain: log, real winmm, Azimuth version, installs the loader watch and the launcher section
 src/proxy/              winmm forwarding (export list + .def)
 src/core/               log, pe, version, ini, patch (checked sites), scan (byte signatures), hook (trampoline,
-                        memory near an address), loader_watch (FlushInstructionCache), options, game.hpp
+                        memory near an address), loader_watch (FlushInstructionCache), options, game.hpp,
+                        stock_rims (StockWheels: rim SQL rewritten from the game's, rim loader redirected)
 src/launcher/           Extra Options section of Azimuth's launcher (sites, rows, MSVC layouts)
-src/games/fm5/          FM5 option table
-src/games/fm6/          FM6 option table + dashboard font fix
+src/games/fm5/          FM5 option table + StockWheels sites (wheels.*)
+src/games/fm6/          FM6 option table + dashboard font fix + StockWheels sites (stock_wheels.*)
 src/games/registry.*    list of supported games, lookup by PE header
 tests/                  doctest unit tests and CMake checks
 ```
