@@ -21,7 +21,7 @@ When reporting a bug, please attach `fm_extra_options.log` (next to `azimuth.exe
 - `[FM6]`: `SkipIntro`, `SkipPresentationVideo`, `UnlockDLC`, `UnlockMenuFrameRate`, `StockWheels`.
 - Lap times on the digital dashboards in Brazilian Portuguese (always on).
 
-## Unreleased
+## v1.1.0 — Stock rims of every car in FM5 and FM6
 
 ### Added
 - FM6 `StockWheels` (off by default): a fifth rim style category, "Stock Rims (All Cars)", with the stock rims of
